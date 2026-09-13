@@ -363,7 +363,7 @@ class DynamicPluginManager(
          */
         private val swapScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-        private fun activeManagers(): List<DynamicPluginManager> {
+        internal fun activeManagers(): List<DynamicPluginManager> {
             liveManagers.removeIf { it.get() == null }
             return liveManagers.mapNotNull { it.get() }
         }

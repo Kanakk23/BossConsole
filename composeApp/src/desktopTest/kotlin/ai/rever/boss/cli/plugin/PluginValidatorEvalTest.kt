@@ -35,7 +35,7 @@ class PluginValidatorEvalTest {
                 author = "Test Author",
                 apiVersion = HostMeta.CURRENT_API_VERSION,
                 mainClass = "com.example.ValidPlugin",
-                permissions = listOf("mcp", "terminal"),
+                requiredPermissions = listOf("mcp", "terminal"),
             )
         File(dir, "plugin.json").writeText(launchpadJson.encodeToString(manifest))
 
@@ -112,8 +112,8 @@ class PluginValidatorEvalTest {
             )
         val manifestBytes = launchpadJson.encodeToString(manifest).toByteArray(StandardCharsets.UTF_8)
 
-        // Create JAR with only plugin.json, missing bytecode entry
-        createJar(jarFile, mapOf("plugin.json" to manifestBytes))
+        // Create JAR with only plugin.json in META-INF/boss-plugin/, missing bytecode entry
+        createJar(jarFile, mapOf("META-INF/boss-plugin/plugin.json" to manifestBytes))
 
         val result = PluginValidator.validate(jarFile)
         assertFalse(result.isValid, "JAR missing bytecode entry must fail validation")
@@ -288,7 +288,7 @@ class PluginValidatorEvalTest {
                 version = "1.0.0",
                 apiVersion = HostMeta.CURRENT_API_VERSION,
                 mainClass = "com.example.ValidPlugin",
-                permissions = allCanonical,
+                requiredPermissions = allCanonical,
             )
         File(dir, "plugin.json").writeText(launchpadJson.encodeToString(manifest))
 
@@ -300,7 +300,7 @@ class PluginValidatorEvalTest {
         // Test invalid permission
         val invalidDir = File(tempDir.toFile(), "invalid-perms-dir")
         invalidDir.mkdirs()
-        val invalidManifest = manifest.copy(permissions = listOf("invalid_perm_xyz"))
+        val invalidManifest = manifest.copy(requiredPermissions = listOf("invalid_perm_xyz"))
         File(invalidDir, "plugin.json").writeText(launchpadJson.encodeToString(invalidManifest))
         val invalidResult = PluginValidator.validate(invalidDir)
         val invalidCheck = invalidResult.checks.firstOrNull { it.name == "permissions" }
@@ -327,6 +327,67 @@ class PluginValidatorEvalTest {
         assertNotNull(idCheck)
         assertFalse(idCheck.passed, "Dotless plugin ID must fail id-format check")
         assertTrue(idCheck.message.contains("must follow reverse domain notation"))
+    }
+
+    @Test
+    fun `tests JAR with root plugin json is rejected requiring META-INF path`() {
+        val jarFile = File(tempDir.toFile(), "root-manifest-only.jar")
+        val manifest =
+            PluginManifest(
+                pluginId = "com.example.root-manifest-plugin",
+                displayName = "Root Manifest Plugin",
+                version = "1.0.0",
+                apiVersion = HostMeta.CURRENT_API_VERSION,
+                mainClass = "com.example.SomeClass",
+            )
+        val manifestBytes = launchpadJson.encodeToString(manifest).toByteArray(StandardCharsets.UTF_8)
+        createJar(
+            jarFile,
+            mapOf("plugin.json" to manifestBytes),
+        )
+
+        val result = PluginValidator.validate(jarFile)
+        assertFalse(result.isValid, "JAR with root plugin.json must fail validation")
+        val manifestCheck = result.checks.firstOrNull { it.name == "manifest-exists" }
+        assertNotNull(manifestCheck)
+        assertFalse(manifestCheck.passed)
+        assertTrue(
+            manifestCheck.message.contains("must be located at META-INF/boss-plugin/plugin.json"),
+            "Expected diagnostic pointing to META-INF location, got: ${manifestCheck.message}",
+        )
+    }
+
+    @Test
+    fun `tests closed archive does not crash bytecode fallback parser`() {
+        val jarFile = File(tempDir.toFile(), "closed-archive-fallback.jar")
+        val manifest =
+            PluginManifest(
+                pluginId = "com.example.fallback-plugin",
+                displayName = "Fallback Plugin",
+                version = "1.0.0",
+                apiVersion = HostMeta.CURRENT_API_VERSION,
+                mainClass = ValidatorTestFixturePlugin::class.java.name,
+            )
+        val manifestBytes = launchpadJson.encodeToString(manifest).toByteArray(StandardCharsets.UTF_8)
+        val classEntryPath = ValidatorTestFixturePlugin::class.java.name.replace('.', '/') + ".class"
+        val realClassBytes =
+            ValidatorTestFixturePlugin::class.java.classLoader
+                .getResourceAsStream(classEntryPath)!!
+                .readBytes()
+
+        createJar(
+            jarFile,
+            mapOf(
+                "META-INF/boss-plugin/plugin.json" to manifestBytes,
+                classEntryPath to realClassBytes,
+            ),
+        )
+
+        val result = PluginValidator.validate(jarFile)
+        assertTrue(result.isValid, "Valid JAR must pass validation without closed zip errors")
+        val implementsCheck = result.checks.firstOrNull { it.name == "bytecode-implements-plugin" }
+        assertNotNull(implementsCheck)
+        assertTrue(implementsCheck.passed)
     }
 
     private fun createJar(

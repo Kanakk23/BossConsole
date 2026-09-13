@@ -1,7 +1,10 @@
 package ai.rever.boss.plugin
 
+import ai.rever.boss.components.plugin.HotReloadPolicy
+import ai.rever.boss.components.plugin.PersistedPluginEntry
 import ai.rever.boss.config.GitHubConfig
 import ai.rever.boss.config.SupabaseClientConfig
+import ai.rever.boss.plugin.launchpad.DevPluginArtifacts
 import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginManifestReader
 import ai.rever.boss.plugin.loader.PluginSignatureEnforcement
@@ -1724,9 +1727,9 @@ object PluginStoreSetup {
 
         val entries =
             persistedPlugins.map { entry ->
-                ai.rever.boss.components.plugin.PersistedPluginEntry(
+                PersistedPluginEntry(
                     pluginId = entry.pluginId,
-                    jarPath = entry.jarPath,
+                    jarPath = resolvePersistedEntryPath(entry),
                     enabled = entry.enabled,
                 )
             }
@@ -1744,7 +1747,10 @@ object PluginStoreSetup {
             for ((pluginId, result) in persistedResults) {
                 val loaded = result.getOrNull() ?: continue
                 val persisted = persistedById[pluginId] ?: continue
-                if (persisted.jarPath != loaded.jarPath) {
+                if (persisted.jarPath != loaded.jarPath &&
+                    !ai.rever.boss.plugin.launchpad.DevPluginArtifacts
+                        .isDevPluginJar(File(loaded.jarPath))
+                ) {
                     PluginPersistence.addInstalledPlugin(
                         pluginId = pluginId,
                         jarPath = loaded.jarPath,
@@ -1774,6 +1780,22 @@ object PluginStoreSetup {
         )
         return results
     }
+
+    private fun resolvePersistedEntryPath(entry: PluginPersistence.InstalledPluginEntry): String {
+        val devJar =
+            DevPluginArtifacts.findActiveDevJar(
+                entry.pluginId,
+                File(_pluginDir, "dev"),
+            )
+        if (devJar != null && devJar.exists() && !isProtectedFromDevSwap(entry.pluginId)) {
+            return devJar.absolutePath
+        }
+        return entry.jarPath
+    }
+
+    private fun isProtectedFromDevSwap(pluginId: String): Boolean =
+        systemPlugins.any { it.pluginId == pluginId } ||
+            HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)
 
     /**
      * Copy bundled plugins from app resources to ~/.boss/plugins directory.

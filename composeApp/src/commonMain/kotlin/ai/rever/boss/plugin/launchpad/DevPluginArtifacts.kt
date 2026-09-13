@@ -78,15 +78,20 @@ object DevPluginArtifacts {
     }
 
     /**
-     * Discovers all active dev plugin JARs under [devRoot], including legacy flat JARs.
+     * Resolves the staging directory for a specific [pluginId] under [devRoot].
+     */
+    fun pluginDevDir(
+        pluginId: String,
+        devRoot: File = stagingRoot(),
+    ): File = File(devRoot, pluginId)
+
+    /**
+     * Discovers all active dev plugin JARs under [devRoot].
      */
     fun findAllActiveDevJars(devRoot: File = stagingRoot()): List<File> {
         if (!devRoot.exists() || !devRoot.isDirectory) return emptyList()
 
         val activeJars = mutableListOf<File>()
-        val flatJars = devRoot.listFiles { file -> file.isFile && file.extension == "jar" } ?: emptyArray()
-        activeJars.addAll(flatJars)
-
         val pluginDirs = devRoot.listFiles { file -> file.isDirectory } ?: emptyArray()
         for (pDir in pluginDirs) {
             val jar = findActiveDevJar(pDir.name, devRoot)
@@ -99,11 +104,13 @@ object DevPluginArtifacts {
 
     /**
      * Safely prunes older version directories, retaining at most [maxVersionsToKeep] valid builds.
-     * Never deletes the currently active or staged version, and logs warnings if deletion fails.
+     * Never deletes the currently active or staged version, and strictly retains any version directory
+     * whose JAR path is listed in [activeJarPaths] (e.g. actively referenced by any running window).
      */
     fun pruneStagingHistory(
         pluginDevDir: File,
         maxVersionsToKeep: Int = DEFAULT_MAX_VERSIONS_TO_KEEP,
+        activeJarPaths: Set<String> = emptySet(),
     ) {
         if (!pluginDevDir.exists() || !pluginDevDir.isDirectory) return
 
@@ -131,7 +138,32 @@ object DevPluginArtifacts {
 
         if (sortedDirs.size <= maxVersionsToKeep) return
 
-        pruneOldVersionDirectories(sortedDirs.drop(maxVersionsToKeep))
+        val normalizedActivePaths =
+            activeJarPaths
+                .mapNotNull { path ->
+                    runCatching { File(path).canonicalPath }.getOrNull() ?: File(path).absolutePath
+                }.toSet()
+
+        val candidatesToPrune = sortedDirs.drop(maxVersionsToKeep)
+        val dirsToPrune =
+            candidatesToPrune.filterNot { dir ->
+                isDirReferencedByActiveJars(dir, activeJarPaths, normalizedActivePaths)
+            }
+
+        pruneOldVersionDirectories(dirsToPrune)
+    }
+
+    private fun isDirReferencedByActiveJars(
+        dir: File,
+        activeJarPaths: Set<String>,
+        normalizedActivePaths: Set<String>,
+    ): Boolean {
+        val jars = dir.listFiles { file -> file.isFile && file.extension == "jar" } ?: return false
+        return jars.any { jar ->
+            val abs = jar.absolutePath
+            val canonical = runCatching { jar.canonicalPath }.getOrNull() ?: abs
+            abs in activeJarPaths || canonical in normalizedActivePaths
+        }
     }
 
     private fun cleanCorruptDirectories(corruptDirs: List<File>) {

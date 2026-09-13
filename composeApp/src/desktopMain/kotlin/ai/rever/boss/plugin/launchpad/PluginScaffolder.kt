@@ -120,7 +120,7 @@ object PluginScaffolder {
                 manifestVersion = 1,
                 systemPlugin = false,
                 canUnload = true,
-                permissions = permissions,
+                requiredPermissions = permissions,
                 mcpTools = mcpTools,
             )
 

@@ -118,7 +118,11 @@ object PluginBuildProbe {
                 reloadStamp = reloadStamp,
             )
 
-        hooks.record(pluginId, jarPath, mtime ?: previous?.buildStamp, tagFor(info), plugin.version)
+        if (!ai.rever.boss.plugin.launchpad.DevPluginArtifacts
+                .isDevPluginJar(File(jarPath))
+        ) {
+            hooks.record(pluginId, jarPath, mtime ?: previous?.buildStamp, tagFor(info), plugin.version)
+        }
 
         if (info.isTagged) {
             logger.info(

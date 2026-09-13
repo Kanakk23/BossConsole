@@ -117,8 +117,7 @@ object PluginValidator {
         JarFile(file).use { jar ->
             val entry =
                 jar.getJarEntry("META-INF/boss-plugin/plugin.json")
-                    ?: jar.getJarEntry("plugin.json")
-                    ?: error("plugin.json missing in archive: ${file.name}")
+                    ?: error("plugin.json missing in archive at META-INF/boss-plugin/plugin.json: ${file.name}")
             val content = jar.getInputStream(entry).bufferedReader().use { it.readText() }
             return launchpadJson.decodeFromString<PluginManifest>(content)
         }
@@ -168,7 +167,7 @@ object PluginValidator {
             }
 
         val manifest = parseManifest(jsonContent, checks) ?: return ValidationResult(isValid = false, checks = checks)
-        validateManifestFields(manifest, checks)
+        validateManifestFields(manifest, checks, jsonContent)
 
         return ValidationResult(isValid = checks.all { it.passed }, checks = checks)
     }
@@ -193,7 +192,7 @@ object PluginValidator {
         val manifest =
             parseManifest(archiveData.manifestContent, checks)
                 ?: return ValidationResult(isValid = false, checks = checks)
-        validateManifestFields(manifest, checks)
+        validateManifestFields(manifest, checks, archiveData.manifestContent)
 
         // Bytecode verification for entrypointClass
         val entrypointBytecodePath = manifest.mainClass.replace('.', '/') + ".class"
@@ -231,7 +230,7 @@ object PluginValidator {
     private data class ArchiveData(
         val manifestContent: String,
         val hasEntry: (String) -> Boolean,
-        val readBytes: (String) -> ByteArray?,
+        val entrypointClassBytes: ByteArray?,
     )
 
     private fun readArchive(
@@ -240,9 +239,22 @@ object PluginValidator {
     ): ArchiveData? =
         try {
             JarFile(file).use { jarFile ->
-                val manifestEntry =
-                    jarFile.getJarEntry("META-INF/boss-plugin/plugin.json")
-                        ?: jarFile.getJarEntry("plugin.json")
+                val metaInfEntry = jarFile.getJarEntry("META-INF/boss-plugin/plugin.json")
+                val rootEntry = jarFile.getJarEntry("plugin.json")
+
+                if (metaInfEntry == null && rootEntry != null) {
+                    checks +=
+                        ValidationCheck(
+                            name = "manifest-exists",
+                            passed = false,
+                            message =
+                                "plugin.json found at root of archive; must be located at " +
+                                    "META-INF/boss-plugin/plugin.json",
+                        )
+                    return null
+                }
+
+                val manifestEntry = metaInfEntry
                 if (manifestEntry == null) {
                     checks +=
                         ValidationCheck(
@@ -250,32 +262,45 @@ object PluginValidator {
                             passed = false,
                             message = "plugin.json not found in archive: ${file.name}",
                         )
-                    null
-                } else {
-                    checks +=
-                        ValidationCheck(
-                            name = "manifest-exists",
-                            passed = true,
-                            message = "plugin.json found in archive",
-                        )
-
-                    val manifestContent = jarFile.getInputStream(manifestEntry).bufferedReader().use { it.readText() }
-                    val allEntries =
-                        jarFile
-                            .entries()
-                            .asSequence()
-                            .map { it.name }
-                            .toSet()
-
-                    ArchiveData(
-                        manifestContent = manifestContent,
-                        hasEntry = { entryName -> entryName in allEntries },
-                        readBytes = { entryName ->
-                            val e = jarFile.getJarEntry(entryName)
-                            e?.let { jarFile.getInputStream(it).use { stream -> stream.readBytes() } }
-                        },
-                    )
+                    return null
                 }
+
+                checks +=
+                    ValidationCheck(
+                        name = "manifest-exists",
+                        passed = true,
+                        message = "plugin.json found in archive",
+                    )
+
+                val manifestContent = jarFile.getInputStream(manifestEntry).bufferedReader().use { it.readText() }
+                val allEntries =
+                    jarFile
+                        .entries()
+                        .asSequence()
+                        .map { it.name }
+                        .toSet()
+
+                val mainClass =
+                    Regex(""""(?:mainClass|entrypointClass)"\s*:\s*"([^"]+)"""")
+                        .find(manifestContent)
+                        ?.groupValues
+                        ?.get(1)
+
+                val entrypointBytes =
+                    if (mainClass != null) {
+                        val entrypointPath = mainClass.replace('.', '/') + ".class"
+                        jarFile.getJarEntry(entrypointPath)?.let { entry ->
+                            jarFile.getInputStream(entry).use { stream -> stream.readBytes() }
+                        }
+                    } else {
+                        null
+                    }
+
+                ArchiveData(
+                    manifestContent = manifestContent,
+                    hasEntry = { entryName -> entryName in allEntries },
+                    entrypointClassBytes = entrypointBytes,
+                )
             }
         } catch (e: ZipException) {
             checks +=
@@ -309,9 +334,8 @@ object PluginValidator {
         } catch (_: Throwable) {
             // Manual classfile fallback when classloading fails due to external dependencies.
             // Note: Manual classfile parser supports direct implementations of ai.rever.boss.plugin.api.Plugin.
-            val classEntryPath = mainClass.replace('.', '/') + ".class"
-            val classBytes = archiveData.readBytes(classEntryPath) ?: return false
-            return checkDirectInterfaceImplementation(classBytes)
+            val classBytes = archiveData.entrypointClassBytes ?: return false
+            checkDirectInterfaceImplementation(classBytes)
         }
     }
 
@@ -443,6 +467,7 @@ object PluginValidator {
     private fun validateManifestFields(
         manifest: PluginManifest,
         checks: MutableList<ValidationCheck>,
+        rawManifestJson: String? = null,
     ) {
         // ID format (supports reverse-domain dotted IDs e.g. com.example.tool matching PluginManifestReader)
         val idValid = ID_REGEX.matches(manifest.pluginId)
@@ -506,7 +531,8 @@ object PluginValidator {
             )
 
         // Permissions registry check
-        val invalidPermissions = manifest.permissions.filter { !PluginPermission.isValid(it) }
+        val permissionsToCheck = manifest.requiredPermissions.ifEmpty { manifest.permissions }
+        val invalidPermissions = permissionsToCheck.filter { !PluginPermission.isValid(it) }
         val permissionsValid = invalidPermissions.isEmpty()
         checks +=
             ValidationCheck(
@@ -514,7 +540,7 @@ object PluginValidator {
                 passed = permissionsValid,
                 message =
                     if (permissionsValid) {
-                        "All declared permissions (${manifest.permissions.size}) are allowed"
+                        "All declared permissions (${permissionsToCheck.size}) are allowed"
                     } else {
                         "Unknown permission(s): ${invalidPermissions.joinToString(", ")}. " +
                             "Allowed: ${HostMeta.ALLOWED_PERMISSIONS}"
@@ -549,7 +575,7 @@ object PluginValidator {
         try {
             val hostManifest =
                 PluginManifestReader.parseManifest(
-                    launchpadJson.encodeToString(manifest),
+                    rawManifestJson ?: launchpadJson.encodeToString(manifest),
                 )
             PluginManifestReader.validateManifest(hostManifest)
         } catch (e: Exception) {

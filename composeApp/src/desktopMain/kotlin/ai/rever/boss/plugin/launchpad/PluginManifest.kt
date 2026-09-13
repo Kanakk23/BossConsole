@@ -56,8 +56,8 @@ data class PluginManifest(
     val systemPlugin: Boolean = false,
     @SerialName("canUnload")
     val canUnload: Boolean = true,
-    @SerialName("permissions")
-    val permissions: List<String> = emptyList(),
+    @SerialName("requiredPermissions")
+    val requiredPermissions: List<String> = emptyList(),
     val mcpTools: List<PluginMcpToolDeclaration> = emptyList(),
     // Backward-compatibility aliases for legacy JSON fields
     @SerialName("id")
@@ -68,14 +68,14 @@ data class PluginManifest(
     private val legacyMinApiVersion: String? = null,
     @SerialName("entrypointClass")
     private val legacyEntrypointClass: String? = null,
-    @SerialName("requiredPermissions")
-    private val legacyRequiredPermissions: List<String>? = null,
+    @SerialName("permissions")
+    private val legacyPermissions: List<String>? = null,
 ) {
     val id: String get() = pluginId.ifBlank { legacyId.orEmpty() }
     val name: String get() = displayName.ifBlank { legacyName.orEmpty() }
     val minApiVersion: String get() = apiVersion.ifBlank { legacyMinApiVersion.orEmpty() }
     val entrypointClass: String get() = mainClass.ifBlank { legacyEntrypointClass.orEmpty() }
-    val requiredPermissions: List<String> get() = permissions.ifEmpty { legacyRequiredPermissions.orEmpty() }
+    val permissions: List<String> get() = requiredPermissions.ifEmpty { legacyPermissions.orEmpty() }
 
     /** Returns the canonical plugin ID. */
     fun resolvedPluginId(): String = pluginId.ifBlank { legacyId.orEmpty() }

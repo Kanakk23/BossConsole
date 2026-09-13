@@ -204,8 +204,10 @@ class DefaultPlugin(
                 .groupBy { extractPluginId(it) }
                 .mapValues { (_, group) ->
                     group.maxByOrNull { file ->
-                        val isVersionRotated = file.parentFile?.name?.startsWith("v") == true
-                        val versionBonus = if (isVersionRotated) 10_000_000_000_000L else 0L
+                        val isDev =
+                            ai.rever.boss.plugin.launchpad.DevPluginArtifacts
+                                .isDevPluginJar(file)
+                        val versionBonus = if (isDev) 10_000_000_000_000L else 0L
                         versionBonus + file.lastModified()
                     } ?: group.first()
                 }.values
@@ -1256,8 +1258,6 @@ class DefaultPlugin(
         trackedJarPaths: Set<String>,
     ) {
         if (jarFile.absolutePath in trackedJarPaths) return
-        val pluginId = extractPluginId(jarFile)
-        prioritizeDevPluginIfNecessary(manager, jarFile, pluginId)
         try {
             logger.info(
                 LogCategory.SYSTEM,
@@ -1309,27 +1309,6 @@ class DefaultPlugin(
                 ),
                 e,
             )
-        }
-    }
-
-    private suspend fun prioritizeDevPluginIfNecessary(
-        manager: DynamicPluginManager,
-        jarFile: File,
-        pluginId: String,
-    ) {
-        val isDev = DevPluginArtifacts.isDevPluginJar(jarFile)
-        val currentlyLoaded = manager.getPluginInfo(pluginId)
-        if (isDev && currentlyLoaded != null && currentlyLoaded.jarPath != jarFile.absolutePath) {
-            logger.info(
-                LogCategory.SYSTEM,
-                "Prioritizing active dev plugin over installed plugin",
-                mapOf(
-                    "pluginId" to pluginId,
-                    "installedJar" to currentlyLoaded.jarPath,
-                    "devJar" to jarFile.absolutePath,
-                ),
-            )
-            manager.uninstallPlugin(pluginId, force = true, waitForGC = true)
         }
     }
 

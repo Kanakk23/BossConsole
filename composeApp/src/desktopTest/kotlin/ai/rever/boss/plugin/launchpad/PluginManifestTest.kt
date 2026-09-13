@@ -223,28 +223,36 @@ class PluginManifestTest {
     }
 
     @Test
-    fun `DefaultPlugin deduplicateJars prefers version-rotated dev JAR over legacy flat dev JAR`() {
-        val devBase = File(tempDir.toFile(), "dev-test")
-        devBase.mkdirs()
+    fun `DefaultPlugin deduplicateJars prefers version-rotated dev JAR over standard installed JAR`() {
+        val stagingBase = File(tempDir.toFile(), "staging-test")
+        stagingBase.mkdirs()
+        DevPluginArtifacts.stagingRootOverride = stagingBase
 
-        // 1. Legacy flat dev JAR
-        val flatJar = File(devBase, "my-plugin.jar")
-        writeSyntheticJar(flatJar, "my-plugin")
+        try {
+            val pluginsDir = File(tempDir.toFile(), "plugins-dir")
+            pluginsDir.mkdirs()
 
-        // 2. Version-rotated dev JAR in my-plugin/v1000/my-plugin.jar
-        val versionDir = File(devBase, "my-plugin/v1000")
-        versionDir.mkdirs()
-        val versionJar = File(versionDir, "my-plugin.jar")
-        writeSyntheticJar(versionJar, "my-plugin")
+            // 1. Standard installed JAR
+            val standardJar = File(pluginsDir, "my-plugin.jar")
+            writeSyntheticJar(standardJar, "my-plugin")
 
-        // findActiveDevJars should find both the flat JAR and the versioned JAR
-        val discovered = DefaultPlugin.findActiveDevJars(devBase)
-        assertEquals(2, discovered.size)
+            // 2. Version-rotated dev JAR in staging root: my-plugin/v1000/my-plugin.jar
+            val versionDir = File(stagingBase, "my-plugin/v1000")
+            versionDir.mkdirs()
+            val versionJar = File(versionDir, "my-plugin.jar")
+            writeSyntheticJar(versionJar, "my-plugin")
 
-        // deduplicateJars must drop the legacy flat JAR and retain the version-rotated JAR
-        val deduplicated = DefaultPlugin.deduplicateJars(discovered)
-        assertEquals(1, deduplicated.size)
-        assertEquals(versionJar.absolutePath, deduplicated.single().absolutePath)
+            val discoveredDevJars = DefaultPlugin.findActiveDevJars(stagingBase)
+            assertEquals(1, discoveredDevJars.size)
+            assertEquals(versionJar.absolutePath, discoveredDevJars.single().absolutePath)
+
+            // deduplicateJars must drop the standard JAR and retain the dev JAR candidate
+            val deduplicated = DefaultPlugin.deduplicateJars(listOf(standardJar, versionJar))
+            assertEquals(1, deduplicated.size)
+            assertEquals(versionJar.absolutePath, deduplicated.single().absolutePath)
+        } finally {
+            DevPluginArtifacts.stagingRootOverride = null
+        }
     }
 
     @Test
