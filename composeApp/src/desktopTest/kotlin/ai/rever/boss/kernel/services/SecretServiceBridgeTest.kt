@@ -44,7 +44,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -351,8 +350,8 @@ class SecretServiceBridgeTest {
 
             assertTrue(response.success)
             response.secretsList.single().secret.let { row ->
-                assertNull(row.orgId)
-                assertNull(row.orgSlug)
+                assertEquals("", row.orgId)
+                assertEquals("", row.orgSlug)
                 assertEquals("partner-org", row.sharedWithOrgSlug)
                 assertFalse(row.isOrgOwned)
                 assertFalse(row.canManage)

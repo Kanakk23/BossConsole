@@ -279,6 +279,7 @@ class SecretServiceBridge(
             .toBuilder()
             .setOrgId(orgId ?: "")
             .setOrgSlug(orgSlug ?: "")
+            .setSharedWithOrgSlug(sharedWithOrgSlug ?: "")
             .setIsOrgOwned(isOrgOwned)
             .setCanManage(canManage)
             .build()

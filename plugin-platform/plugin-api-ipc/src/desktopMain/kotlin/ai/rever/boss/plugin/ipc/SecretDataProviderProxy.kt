@@ -366,7 +366,7 @@ private fun SecretEntryProto.toDataWithSharing() =
         updatedAt = updatedAt,
         isOwner = isOwner,
         sharedByEmail = sharedByEmail.takeIf { it.isNotEmpty() },
-        accessLevel = accessLevel.ifEmpty { "owner" },
+        accessLevel = accessLevel.ifEmpty { "read" },
     )
 
 /** Sharing-row decoder used by the out-of-process path and its contract tests. */
@@ -375,6 +375,7 @@ internal fun SecretEntryProto.toDataWithSharingAccess() =
         secret = toDataWithSharing(),
         orgId = orgId.takeIf { it.isNotEmpty() },
         orgSlug = orgSlug.takeIf { it.isNotEmpty() },
+        sharedWithOrgSlug = sharedWithOrgSlug.takeIf { it.isNotEmpty() },
         isOrgOwned = isOrgOwned,
         canManage = canManage,
     )

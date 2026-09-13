@@ -39,6 +39,42 @@ class SecretDataProviderProxyMappingTest {
     }
 
     @Test
+    fun `empty wire access level fails closed to read`() {
+        val decoded = baseSecret().toDataWithSharingAccess()
+
+        assertEquals("read", decoded.secret.accessLevel)
+    }
+
+    @Test
+    fun `explicit owner wire access level remains owner`() {
+        val decoded =
+            baseSecret()
+                .toBuilder()
+                .setAccessLevel("owner")
+                .build()
+                .toDataWithSharingAccess()
+
+        assertEquals("owner", decoded.secret.accessLevel)
+    }
+
+    @Test
+    fun `personal sharing row retains organisation share attribution`() {
+        val decoded =
+            baseSecret()
+                .toBuilder()
+                .setAccessLevel("read")
+                .setSharedWithOrgSlug("partner-org")
+                .build()
+                .toDataWithSharingAccess()
+
+        assertNull(decoded.orgId)
+        assertNull(decoded.orgSlug)
+        assertEquals("partner-org", decoded.sharedWithOrgSlug)
+        assertFalse(decoded.isOrgOwned)
+        assertFalse(decoded.canManage)
+    }
+
+    @Test
     fun `share decoder preserves organisation target and nullable legacy fields`() {
         val decoded =
             SecretShareProto

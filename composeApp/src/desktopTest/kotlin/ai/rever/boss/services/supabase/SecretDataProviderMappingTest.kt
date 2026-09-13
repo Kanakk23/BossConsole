@@ -63,6 +63,7 @@ class SecretDataProviderMappingTest {
                 accessLevel = "read",
                 orgId = "org-1",
                 orgSlug = "acme",
+                sharedWithOrgSlug = "partner-org",
                 isOrgOwned = true,
                 canManage = false,
             )
@@ -83,7 +84,34 @@ class SecretDataProviderMappingTest {
 
         assertEquals("org-1", mapped.orgId)
         assertEquals("acme", mapped.orgSlug)
+        assertEquals("partner-org", mapped.sharedWithOrgSlug)
         assertTrue(mapped.isOrgOwned)
+        assertFalse(mapped.canManage)
+    }
+
+    @Test
+    fun `personal sharing row retains its organisation share attribution`() {
+        val model =
+            SecretEntryWithSharing(
+                id = "s1",
+                website = "github.com",
+                username = "octocat",
+                password = "hunter2",
+                createdAt = "then",
+                updatedAt = "now",
+                isOwner = false,
+                accessLevel = "read",
+                sharedWithOrgSlug = "partner-org",
+                isOrgOwned = false,
+                canManage = false,
+            )
+
+        val mapped = model.toPluginSharingAccessData(sharingSecret())
+
+        assertNull(mapped.orgId)
+        assertNull(mapped.orgSlug)
+        assertEquals("partner-org", mapped.sharedWithOrgSlug)
+        assertFalse(mapped.isOrgOwned)
         assertFalse(mapped.canManage)
     }
 
@@ -119,5 +147,17 @@ class SecretDataProviderMappingTest {
             accessLevel = "read",
             sharedByEmail = "",
             createdAt = "now",
+        )
+
+    private fun sharingSecret() =
+        SecretEntryWithSharingData(
+            id = "s1",
+            website = "github.com",
+            username = "octocat",
+            password = "hunter2",
+            createdAt = "then",
+            updatedAt = "now",
+            isOwner = false,
+            accessLevel = "read",
         )
 }

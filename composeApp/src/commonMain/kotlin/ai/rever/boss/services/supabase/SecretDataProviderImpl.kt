@@ -257,6 +257,7 @@ internal fun SecretEntryWithSharing.toPluginSharingAccessData(secretData: Secret
         secret = secretData,
         orgId = orgId,
         orgSlug = orgSlug,
+        sharedWithOrgSlug = sharedWithOrgSlug,
         isOrgOwned = isOrgOwned == true,
         canManage = canManageOrDeny,
     )
