@@ -143,7 +143,9 @@ object FluckMarkdownExtractor {
               '.hidden', '.d-none', '.invisible'
             ];
             if (isSelection && root.querySelectorAll) {
-              root.querySelectorAll(noiseSelectors.join(',')).forEach(el => el.remove());
+              root.querySelectorAll(noiseSelectors.join(',')).forEach(el => {
+                if (isNoise(el)) el.remove();
+              });
             }
 
             let accumulatedChars = 0;
@@ -170,7 +172,8 @@ object FluckMarkdownExtractor {
               if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
               const tag = (node.tagName || '').toLowerCase();
               if (tag === 'script' || tag === 'style' || tag === 'nav' || tag === 'footer' || 
-                  tag === 'header' || tag === 'aside' || tag === 'noscript' || tag === 'svg' || 
+                  tag === 'header' || (tag === 'aside' && !/admonition|markdown-alert|callout/.test(node.getAttribute('class') || '')) ||
+                  tag === 'noscript' || tag === 'svg' ||
                   tag === 'canvas' || tag === 'dialog' || tag === 'button' ||
                   (tag === 'input' && (node.type === 'button' || node.type === 'submit'))) {
                 return true;
@@ -291,14 +294,15 @@ object FluckMarkdownExtractor {
                   const codeEl = node.querySelector('code');
                   const langMatch = (codeEl?.className || node.className || '').match(/language-([a-z0-9_-]+)/i);
                   const lang = langMatch ? langMatch[1] : '';
-                  const codeText = (codeEl ? (codeEl.innerText || codeEl.textContent) : (node.innerText || node.textContent || children || '')).trimEnd();
+                  // Use the filtered traversal, not raw textContent which restores hidden text and copy buttons.
+                  const codeText = children.replace(/\n$/, '');
                   const matches = codeText.match(/`+/g) || [];
                   let maxRun = 2;
                   for (let i = 0; i < matches.length; i++) {
                     if (matches[i].length > maxRun) maxRun = matches[i].length;
                   }
                   const fence = '`'.repeat(maxRun + 1);
-                  return '\n\n' + fence + lang + '\n' + codeText.trim() + '\n' + fence + '\n\n';
+                  return '\n\n' + fence + lang + '\n' + codeText + '\n' + fence + '\n\n';
                 }
                 case 'blockquote': {
                   const content = children.trim().replace(/\n/g, '\n> ');
@@ -309,7 +313,7 @@ object FluckMarkdownExtractor {
                 case 'section': {
                   const className = node.className || '';
                   if (typeof className === 'string' && (className.includes('admonition') || className.includes('markdown-alert') || className.includes('callout'))) {
-                    const isWarn = /warn|alert|danger|caution|error/i.test(className);
+                    const isWarn = /warn|danger|caution|error/i.test(className);
                     const isTip = /tip|hint/i.test(className);
                     const isImportant = /important/i.test(className);
                     const alertType = isWarn ? 'WARNING' : (isTip ? 'TIP' : (isImportant ? 'IMPORTANT' : 'NOTE'));
@@ -411,12 +415,11 @@ object FluckMarkdownExtractor {
               return md.trim();
             }
 
-            let md = walk(root, 0, selectionWasPreformatted)
-              .replace(/[ \t]+$/gm, '')
-              .replace(/\n{3,}/g, '\n\n')
-              .trim();
+            // Code whitespace is content. Wrap a naked preformatted selection before trimming
+            // the generated document boundary, and never normalize inside fenced blocks.
+            let md = walk(root, 0, selectionWasPreformatted);
 
-            if (isSelection && selectionWasPreformatted && !/^`{3,}/.test(md)) {
+            if (isSelection && selectionWasPreformatted && !/^`{3,}/.test(md.trimStart())) {
               const matches = md.match(/`+/g) || [];
               let maxRun = 2;
               for (let i = 0; i < matches.length; i++) {
@@ -425,7 +428,7 @@ object FluckMarkdownExtractor {
               const fence = '`'.repeat(maxRun + 1);
               md = fence + detectedLang + '\n' + md + '\n' + fence;
             }
-            return safeJson({ isSelection: isSelection, markdown: md });
+            return safeJson({ isSelection: isSelection, markdown: md.trim() });
           } catch (err) {
             return safeJson({ isSelection: false, markdown: '' });
           }
@@ -460,11 +463,8 @@ object FluckMarkdownExtractor {
                 ExtractionEnvelope(isSelection = false, markdown = "")
             }
 
-        val rawBody =
-            envelope.markdown
-                .replace("""[ \t]+$""".toRegex(RegexOption.MULTILINE), "")
-                .replace("""\n{3,}""".toRegex(), "\n\n")
-                .trim()
+        // The DOM walker owns layout. Global whitespace cleanup here also changes code samples.
+        val rawBody = envelope.markdown.trim()
         if (rawBody.isBlank()) {
             return ExtractionResult(
                 isSelection = envelope.isSelection,

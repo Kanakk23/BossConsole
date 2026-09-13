@@ -191,9 +191,6 @@ class FluckMarkdownExtractorTest {
         // Verify prototype poisoning protection
         assertTrue(script.contains("safeJson"), "Script must include safeJson fallback")
         assertTrue(script.contains("_ArrayFrom"), "Script must cache Array.from")
-
-        // Verify whitespace-only line cleanup
-        assertTrue(script.contains("[ \\t]+$"), "Script must clean trailing whitespace lines")
     }
 
     @Test
@@ -321,15 +318,18 @@ class FluckMarkdownExtractorTest {
         }
 
     @Test
-    fun `extractMarkdown cleans up whitespace-only lines from raw input`() =
+    fun `extractMarkdown preserves whitespace inside code fences`() =
         runBlocking {
-            val rawMarkdownWithSpaces = "Paragraph 1\n   \n   \nParagraph 2"
-            val jsonPayload = """{"isSelection":false,"markdown":"$rawMarkdownWithSpaces"}"""
-            val handle = FakeBrowserHandle(title = "Test", url = "https://example.com", jsResult = jsonPayload)
-
-            val result = FluckMarkdownExtractor.extractMarkdown(handle)
-            assertFalse(result.markdown.contains("\n   \n"))
-            assertTrue(result.markdown.contains("Paragraph 1\n\nParagraph 2"))
+            val markdown = "```python\n    first()  \n\n\n    second()\n```"
+            val payload =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("markdown", kotlinx.serialization.json.JsonPrimitive(markdown))
+                }.toString()
+            val result =
+                FluckMarkdownExtractor.extractMarkdown(
+                    FakeBrowserHandle(title = "", url = "", jsResult = payload),
+                )
+            assertEquals(markdown, result.markdown)
         }
 
     @Test
