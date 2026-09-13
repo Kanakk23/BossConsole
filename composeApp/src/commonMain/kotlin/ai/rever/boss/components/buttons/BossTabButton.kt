@@ -238,6 +238,18 @@ fun BossTabButton(
     val currentMenuItems by rememberUpdatedState(contextMenuItems)
     val currentOnClose by rememberUpdatedState(onClose)
 
+    // The same treatment for what the DRAG handler below needs, and for the same reason. These
+    // three used to be the keys of its `pointerInput`, which made a drag survive only for as long
+    // as none of them changed - and a tab's own identity changes while it is being dragged. A
+    // TabInfo is a data class carrying the title, so a terminal writing a new title or a page
+    // finishing its load hands the list a brand-new instance; `tabIndex` moves whenever anything
+    // else in the panel opens or closes. Any of those restarted the gesture mid-drag, and a
+    // restart cancels the coroutine WITHOUT calling onDragEnd or onDragCancel - so the ghost was
+    // left on screen following the cursor with no gesture left alive to put it down.
+    val currentTabInfo by rememberUpdatedState(tabInfo)
+    val currentPanelId by rememberUpdatedState(panelId)
+    val currentTabIndex by rememberUpdatedState(tabIndex)
+
     // Reported on change rather than written from the setter, so a tab disposed with its menu
     // still open (closing the tab from the menu does exactly that) clears the flag it set.
     // Strictly paired: one `true` when the menu opens, one `false` when that same effect is
@@ -388,32 +400,52 @@ fun BossTabButton(
                     }
                 }.then(
                     if (isDragEnabled) {
-                        Modifier.pointerInput(tabInfo, panelId, tabIndex) {
-                            detectDragGestures(
-                                onDragStart = { offset ->
-                                    // Calculate absolute position for drag start
-                                    val absolutePosition = windowPosition + offset
-                                    tabDragComponent.startDragging(
-                                        tabInfo = tabInfo,
-                                        panelId = panelId,
-                                        index = tabIndex,
-                                        startPosition = absolutePosition,
-                                    )
-                                    onDragStart()
-                                },
-                                onDrag = { change, dragAmount ->
-                                    change.consume()
-                                    tabDragComponent.updateDrag(dragAmount)
-                                },
-                                onDragEnd = {
-                                    // Always clean up drag state first to prevent stuck ghost
-                                    val result = tabDragComponent.endDrag()
-                                    onDragEnd(result)
-                                },
-                                onDragCancel = {
+                        // Keyed on Unit: this handler has to outlive every change to the tab it is
+                        // dragging. What it needs is read through rememberUpdatedState above.
+                        Modifier.pointerInput(Unit) {
+                            try {
+                                detectDragGestures(
+                                    onDragStart = { offset ->
+                                        val info = currentTabInfo ?: return@detectDragGestures
+                                        val panel = currentPanelId ?: return@detectDragGestures
+                                        // Calculate absolute position for drag start
+                                        val absolutePosition = windowPosition + offset
+                                        tabDragComponent.startDragging(
+                                            tabInfo = info,
+                                            panelId = panel,
+                                            index = currentTabIndex,
+                                            startPosition = absolutePosition,
+                                        )
+                                        onDragStart()
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        tabDragComponent.updateDrag(dragAmount)
+                                    },
+                                    onDragEnd = {
+                                        // Always clean up drag state first to prevent stuck ghost
+                                        val result = tabDragComponent.endDrag()
+                                        onDragEnd(result)
+                                    },
+                                    onDragCancel = {
+                                        tabDragComponent.cancelDrag()
+                                    },
+                                )
+                            } finally {
+                                // The backstop for every OTHER way this coroutine can go away
+                                // without the gesture ending: a pointerInput reset, the node being
+                                // detached, the composition leaving. None of those call
+                                // onDragCancel, and a drag left running has no gesture behind it -
+                                // just a ghost window tracking the cursor for the rest of the
+                                // session. Plain state writes, so running during cancellation is
+                                // safe. Scoped to THIS tab's drag, so a drag that already ended
+                                // (the common path: endDrag above, then the drop reshuffles the
+                                // panel and resets us) is left alone.
+                                val draggedId = tabDragComponent.draggingTab?.tabInfo?.id
+                                if (draggedId != null && draggedId == currentTabInfo?.id) {
                                     tabDragComponent.cancelDrag()
-                                },
-                            )
+                                }
+                            }
                         }
                     } else {
                         Modifier
