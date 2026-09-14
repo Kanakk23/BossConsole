@@ -17,6 +17,7 @@ import ai.rever.boss.plugin.sandbox.SandboxConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -33,6 +34,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+@Suppress("LargeClass")
 class DevPluginRollbackTest {
     @TempDir
     lateinit var tempDir: Path
@@ -640,6 +642,137 @@ class DevPluginRollbackTest {
                 DevPluginArtifacts.stagingRootOverride = null
             }
         }
+
+    @Test
+    fun `failed restoration in rollback attaches suppressed exception`() =
+        runBlocking {
+            val pluginId = "com.example.failed.restore"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            val v1Jar =
+                createDevTestJar(
+                    stagingRoot = stagingRoot,
+                    pluginId = pluginId,
+                    versionDir = "v1000",
+                    version = "1.0.0",
+                    mainClass = ControllableFailingPlugin::class.java.name,
+                    includeMainClassBytecode = true,
+                )
+
+            val dummyContext = TestPluginContext()
+            val manager1 = createManager()
+            var failManager2Install = false
+            val manager2 =
+                createManager { _, _ ->
+                    if (failManager2Install) {
+                        failManager2Install = false
+                        error("Simulated v2 install failure on manager 2")
+                    }
+                    dummyContext
+                }
+
+            System.clearProperty("boss.test.fail_rollback_register")
+            val res1 = manager1.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res1.isSuccess, "Manager 1 must install v1.jar")
+            val res2 = manager2.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res2.isSuccess, "Manager 2 must install v1.jar")
+
+            createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
+            failManager2Install = true
+            System.setProperty("boss.test.fail_rollback_register", "true")
+
+            try {
+                val result = DevPluginReloader.reload(pluginId, stagingRoot)
+                assertTrue(result.isFailure, "Reload must fail")
+                val root = result.exceptionOrNull()
+                assertNotNull(root, "Root exception must be present")
+                assertTrue(
+                    root.suppressedExceptions.isNotEmpty(),
+                    "Expected recovery failure to be attached as suppressed exception",
+                )
+                assertTrue(
+                    root.suppressedExceptions.any {
+                        it.message?.contains("Failed to reinstall prior JAR") == true
+                    },
+                    "Suppressed exceptions must contain rollback reinstall failure",
+                )
+            } finally {
+                System.clearProperty("boss.test.fail_rollback_register")
+            }
+        }
+
+    @Test
+    fun `protected dev candidate is dropped before deduplication`() {
+        val pluginId = ai.rever.boss.components.plugin.MicrokernelRuntime.PLUGIN_ID
+        val stagingRoot = DevPluginArtifacts.stagingRoot()
+        val devJar = createDevTestJar(stagingRoot, pluginId, "v1000", "1.0.0")
+
+        val deduplicated =
+            DefaultPlugin.deduplicateJars(listOf(devJar)) { id ->
+                DefaultPlugin.isAuthoritativeSystemPlugin(id)
+            }
+
+        assertTrue(
+            deduplicated.isEmpty(),
+            "Lone dev JAR claiming authoritative protected ID must be dropped before deduplication",
+        )
+    }
+
+    @Test
+    fun `repeated reloads preserve session retained jar paths`() =
+        runBlocking {
+            val pluginId = "com.example.repeated.retention"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            createManager()
+
+            val jars =
+                (1..5).map { v ->
+                    val jar = createDevTestJar(stagingRoot, pluginId, "v${v}000", "$v.0.0")
+                    val result = DevPluginReloader.reload(pluginId, stagingRoot)
+                    assertTrue(result.isSuccess, "Reload v$v must succeed")
+                    jar
+                }
+
+            jars.forEach { jar ->
+                assertTrue(
+                    jar.exists(),
+                    "Session retained JAR ${jar.name} must not be deleted by repeated reloads",
+                )
+            }
+        }
+
+    @Test
+    fun `overlapping reloads on same plugin are serialized by mutex`() =
+        runBlocking {
+            val pluginId = "com.example.mutex.reload"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            createDevTestJar(stagingRoot, pluginId, "v1000", "1.0.0")
+
+            val manager = createManager()
+            val res1 =
+                manager.installPlugin(
+                    File(stagingRoot, "$pluginId/v1000/$pluginId.jar").absolutePath,
+                    enabled = true,
+                )
+            assertTrue(res1.isSuccess)
+
+            createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
+
+            val job1 =
+                async(Dispatchers.Default) {
+                    DevPluginReloader.reload(pluginId, stagingRoot)
+                }
+            val job2 =
+                async(Dispatchers.Default) {
+                    DevPluginReloader.reload(pluginId, stagingRoot)
+                }
+
+            val result1 = job1.await()
+            val result2 = job2.await()
+
+            assertTrue(result1.isSuccess, "First concurrent reload must succeed")
+            assertTrue(result2.isSuccess, "Second concurrent reload must succeed")
+            assertEquals("2.0.0", manager.getPluginInfo(pluginId)?.manifest?.version)
+        }
 }
 
 class IncompatibleBinaryPlugin : ai.rever.boss.plugin.api.Plugin {
@@ -647,4 +780,16 @@ class IncompatibleBinaryPlugin : ai.rever.boss.plugin.api.Plugin {
     override val displayName = "Incompatible Binary Plugin"
 
     override fun register(context: PluginContext) = throw NoSuchMethodError("simulated binary incompatibility")
+}
+
+class ControllableFailingPlugin : ai.rever.boss.plugin.api.Plugin {
+    override val pluginId = "com.example.failed.restore"
+    override val displayName = "Controllable Failing Plugin"
+
+    override fun register(context: PluginContext) {
+        if (System.getProperty("boss.test.fail_rollback_register") == "true") {
+            System.clearProperty("boss.test.fail_rollback_register")
+            error("Simulated rollback reinstall failure in register()")
+        }
+    }
 }

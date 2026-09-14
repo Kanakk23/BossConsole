@@ -358,6 +358,9 @@ fun main(args: Array<String>) {
     ai.rever.boss.components.plugin.DefaultPlugin.Companion.loadPersistedPluginsInternal = { manager ->
         PluginStoreSetup.loadPersistedPlugins(manager)
     }
+    ai.rever.boss.components.plugin.DefaultPlugin.Companion.isAuthoritativeSystemPlugin = { pluginId ->
+        PluginStoreSetup.isSystemPluginId(pluginId)
+    }
 
     // Set up single-instance development reload handler
     SingleInstanceManager.pluginReloadHandlerOverride = { pluginId ->

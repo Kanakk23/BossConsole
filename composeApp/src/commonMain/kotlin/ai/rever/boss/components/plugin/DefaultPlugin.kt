@@ -185,6 +185,14 @@ class DefaultPlugin(
             // Default no-op - platform-specific code should set this
         }
 
+        /**
+         * Authoritative check for protected system plugin IDs when no manager has loaded them yet.
+         * Platform-specific desktop initialization sets this to SystemPluginManifestService / PluginStoreSetup.
+         */
+        var isAuthoritativeSystemPlugin: (String) -> Boolean = { pluginId ->
+            pluginId == MicrokernelRuntime.PLUGIN_ID || pluginId == "ai.rever.boss.plugin.api"
+        }
+
         internal fun findActiveDevJars(devDir: File): List<File> =
             DevPluginArtifacts
                 .findAllActiveDevJars(devDir, deepValidate = true)
@@ -1249,10 +1257,11 @@ class DefaultPlugin(
                             !file.name.startsWith(MicrokernelRuntime.ARTIFACT_PREFIX)
                     } ?: emptyArray()
 
-                val devJars = findActiveDevJars(File(pluginDir, "dev"))
+                val devJars = findActiveDevJars(DevPluginArtifacts.stagingRoot())
                 val jarFiles =
                     deduplicateJars(standardJars.toList() + devJars) { pluginId ->
                         manager.isSystemPlugin(pluginId) ||
+                            isAuthoritativeSystemPlugin(pluginId) ||
                             HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)
                     }
 

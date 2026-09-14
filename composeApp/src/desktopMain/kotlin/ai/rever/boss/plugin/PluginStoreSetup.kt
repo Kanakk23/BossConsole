@@ -1902,8 +1902,10 @@ object PluginStoreSetup {
         return entry.jarPath
     }
 
+    internal fun isSystemPluginId(pluginId: String): Boolean = systemPlugins.any { it.pluginId == pluginId }
+
     private fun isProtectedFromDevSwap(pluginId: String): Boolean =
-        systemPlugins.any { it.pluginId == pluginId } ||
+        isSystemPluginId(pluginId) ||
             HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)
 
     /**

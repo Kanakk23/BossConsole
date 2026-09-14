@@ -8,8 +8,11 @@ import ai.rever.boss.plugin.loader.PluginUnloadException
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Executes dev plugin hot-reload by dispatching unload and install requests directly to DynamicPluginManager.
@@ -17,6 +20,8 @@ import java.io.File
 @Suppress("ReturnCount", "ThrowsCount", "TooGenericExceptionCaught")
 object DevPluginReloader {
     private val logger = BossLogger.forComponent("DevPluginReloader")
+    private val reloadLocks = ConcurrentHashMap<String, Mutex>()
+    private val sessionPreservedPaths = ConcurrentHashMap<String, MutableSet<String>>()
 
     /**
      * Reloads the active dev build of [pluginId] into all running host [DynamicPluginManager] instances.
@@ -33,68 +38,83 @@ object DevPluginReloader {
     suspend fun reload(
         pluginId: String,
         devRoot: File = DevPluginArtifacts.stagingRoot(),
-    ): Result<Unit> =
-        withContext(Dispatchers.Main) {
-            runCatching {
-                val activeManagers = DynamicPluginManager.activeManagers()
-                if (activeManagers.isEmpty()) {
-                    error("Host plugin manager is not yet initialized")
+    ): Result<Unit> {
+        val mutex = reloadLocks.computeIfAbsent(pluginId) { Mutex() }
+        return mutex.withLock {
+            withContext(Dispatchers.Main) {
+                runCatching {
+                    executeReload(pluginId, devRoot)
                 }
-
-                if (HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
-                    val message = "Plugin $pluginId owns native resources that require a full application restart"
-                    logger.warn(LogCategory.SYSTEM, message, mapOf("pluginId" to pluginId))
-                    error(message)
-                }
-
-                val stagedJar =
-                    DevPluginArtifacts.findActiveDevJar(pluginId, devRoot)
-                        ?: error("No staged dev JAR found for plugin $pluginId in ${devRoot.absolutePath}")
-
-                logger.info(
-                    LogCategory.SYSTEM,
-                    "Initiating dev plugin reload",
-                    mapOf(
-                        "pluginId" to pluginId,
-                        "jarPath" to stagedJar.absolutePath,
-                        "managersCount" to activeManagers.size,
-                    ),
-                )
-
-                val priorStates =
-                    activeManagers.map { manager ->
-                        val info = manager.getPluginInfo(pluginId)
-                        PriorManagerState(
-                            manager = manager,
-                            priorJarPath = info?.jarPath,
-                            wasLoaded = info?.state == PluginState.LOADED,
-                            wasEnabled = info?.enabled ?: true,
-                        )
-                    }
-
-                preflightCheck(pluginId, activeManagers)
-                val modifiedManagers = mutableSetOf<DynamicPluginManager>()
-                try {
-                    unloadManagers(pluginId, activeManagers, modifiedManagers)
-                    installManagers(pluginId, stagedJar, activeManagers, priorStates, modifiedManagers)
-                } catch (e: Exception) {
-                    val rollbackErrors = rollbackManagers(pluginId, priorStates, modifiedManagers)
-                    if (rollbackErrors.isNotEmpty()) {
-                        rollbackErrors.values.forEach { rollbackError ->
-                            e.addSuppressed(rollbackError)
-                        }
-                    }
-                    throw e
-                }
-                pruneStaging(pluginId, devRoot)
-
-                logger.info(
-                    LogCategory.SYSTEM,
-                    "Dev plugin reloaded successfully",
-                    mapOf("pluginId" to pluginId, "jarPath" to stagedJar.absolutePath),
-                )
             }
         }
+    }
+
+    private suspend fun executeReload(
+        pluginId: String,
+        devRoot: File,
+    ) {
+        val activeManagers = DynamicPluginManager.activeManagers()
+        if (activeManagers.isEmpty()) {
+            error("Host plugin manager is not yet initialized")
+        }
+
+        if (HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)) {
+            val message = "Plugin $pluginId owns native resources that require a full application restart"
+            logger.warn(LogCategory.SYSTEM, message, mapOf("pluginId" to pluginId))
+            error(message)
+        }
+
+        val stagedJar =
+            DevPluginArtifacts.findActiveDevJar(pluginId, devRoot)
+                ?: error("No staged dev JAR found for plugin $pluginId in ${devRoot.absolutePath}")
+
+        logger.info(
+            LogCategory.SYSTEM,
+            "Initiating dev plugin reload",
+            mapOf(
+                "pluginId" to pluginId,
+                "jarPath" to stagedJar.absolutePath,
+                "managersCount" to activeManagers.size,
+            ),
+        )
+
+        val priorStates =
+            activeManagers.map { manager ->
+                val info = manager.getPluginInfo(pluginId)
+                PriorManagerState(
+                    manager = manager,
+                    priorJarPath = info?.jarPath,
+                    wasLoaded = info?.state == PluginState.LOADED,
+                    wasEnabled = info?.enabled ?: true,
+                )
+            }
+
+        preflightCheck(pluginId, activeManagers)
+        val modifiedManagers = mutableSetOf<DynamicPluginManager>()
+        try {
+            unloadManagers(pluginId, activeManagers, modifiedManagers)
+            installManagers(pluginId, stagedJar, activeManagers, priorStates, modifiedManagers)
+        } catch (e: Exception) {
+            val rollbackErrors = rollbackManagers(pluginId, priorStates, modifiedManagers)
+            if (rollbackErrors.isNotEmpty()) {
+                rollbackErrors.values.forEach { rollbackError ->
+                    e.addSuppressed(rollbackError)
+                }
+            }
+            throw e
+        }
+
+        val priorPaths = priorStates.mapNotNull { it.priorJarPath }.toSet()
+        val preserved = sessionPreservedPaths.computeIfAbsent(pluginId) { ConcurrentHashMap.newKeySet() }
+        preserved.addAll(priorPaths)
+        pruneStaging(pluginId, devRoot, sessionPreservedPaths[pluginId].orEmpty())
+
+        logger.info(
+            LogCategory.SYSTEM,
+            "Dev plugin reloaded successfully",
+            mapOf("pluginId" to pluginId, "jarPath" to stagedJar.absolutePath),
+        )
+    }
 
     internal data class PriorManagerState(
         val manager: DynamicPluginManager,
@@ -258,12 +278,13 @@ object DevPluginReloader {
     private fun pruneStaging(
         pluginId: String,
         devRoot: File,
+        preservedPaths: Set<String> = emptySet(),
     ) {
         val activeJarPaths =
             DynamicPluginManager
                 .activeManagers()
                 .mapNotNull { it.getPluginInfo(pluginId)?.jarPath }
-                .toSet()
+                .toSet() + preservedPaths
         val pluginDevDir = DevPluginArtifacts.pluginDevDir(pluginId, devRoot)
         DevPluginArtifacts.pruneStagingHistory(
             pluginDevDir = pluginDevDir,
