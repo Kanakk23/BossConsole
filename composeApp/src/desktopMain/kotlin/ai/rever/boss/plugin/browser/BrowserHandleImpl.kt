@@ -2040,7 +2040,7 @@ internal class BrowserHandleImpl(
      * renderer it will not block, and `goBack()` is a round trip into the browser.
      */
     private fun onSwipeNavigate(direction: SwipeNavDirection) {
-        if (!isValid || !swipeNavGate.accept(direction)) return
+        if (!isValid || !BrowserSwipeNavScript.isEnabled() || !swipeNavGate.accept(direction)) return
         pageInjectScope.launch(pageInjectDispatcher) {
             when (direction) {
                 SwipeNavDirection.BACK -> goBack()
@@ -2053,9 +2053,7 @@ internal class BrowserHandleImpl(
     private fun onSwipeGestureEnded(end: ScrollGestureEnd) {
         if (!isValid) return
         pageInjectScope.launch(pageInjectDispatcher) {
-            val releaseFunction = "window.${BrowserSwipeNavScript.RELEASE_PROPERTY}"
-            val releaseArguments = "'${end.id}', ${end.cancelled}, ${end.accumX}, ${end.rejected}"
-            val statement = "$releaseFunction && $releaseFunction($releaseArguments);"
+            val statement = BrowserSwipeNavScript.release(end)
             runCatching { browser.mainFrame().ifPresent { it.executeJavaScript<Any?>(statement) } }
         }
     }

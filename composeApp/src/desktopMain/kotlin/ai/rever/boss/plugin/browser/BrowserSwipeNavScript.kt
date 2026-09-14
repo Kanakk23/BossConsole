@@ -69,6 +69,12 @@ internal object BrowserSwipeNavScript {
         canGoForward: Boolean,
     ): String = "window.$STATE_PROPERTY = { enabled: $enabled, back: $canGoBack, forward: $canGoForward };"
 
+    /** Only typed native values cross this boundary; use the same statement in parity tests. */
+    fun release(end: ScrollGestureEnd): String {
+        val function = "window.$RELEASE_PROPERTY"
+        return "$function && $function('${end.id}', ${end.cancelled}, ${end.accumX}, ${end.rejected});"
+    }
+
     private fun loadResource(path: String): String =
         try {
             BrowserSwipeNavScript::class.java.getResourceAsStream(path)?.use {

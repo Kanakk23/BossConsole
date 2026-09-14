@@ -377,6 +377,13 @@
     }
 
     function onWheel(event) {
+        // Cheap filters precede the synchronous renderer-to-host claim. Do not skip vertical
+        // pixel events: their initial scroll chain must retain ownership if the contact curls.
+        if (switchedOff()) { reset(); return; }
+        if (event.deltaMode !== 0) {
+            if (nativeGestureId !== null) abandon();
+            return;
+        }
         var bridge = w.__bossSwipeNav;
         var activeId = null;
         try {
@@ -517,7 +524,9 @@
     // it anywhere is moot at best; this only tears down the affordance so nothing outlives the
     // document it was drawn into.
     w.addEventListener('pagehide', reset, { capture: true });
-    w.addEventListener('blur', reset, { capture: true });
+    w.addEventListener('blur', function (event) {
+        if (event.target === w) reset();
+    }, { capture: false });
     w.addEventListener('visibilitychange', function () {
         if (w.document.hidden) reset();
     }, { capture: true });

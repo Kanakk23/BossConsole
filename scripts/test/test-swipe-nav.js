@@ -39,12 +39,6 @@ function check(name, cond, detail) {
     console.log(`  FAIL ${name}${detail === undefined ? '' : ` -> ${detail}`}`);
   }
 }
-/** Smallest distance between consecutive commits; Infinity when there are fewer than two. */
-function minGap(times) {
-  let smallest = Infinity;
-  for (let i = 1; i < times.length; i++) smallest = Math.min(smallest, times[i] - times[i - 1]);
-  return smallest;
-}
 function eq(name, actual, expected) {
   check(
     name,
@@ -89,6 +83,7 @@ function newPage(js, options = {}) {
   let clockMs = 1000;
   let preventedDefaults = 0;
   let nativeGestureId = '1';
+  let claimCalls = 0;
   let nativeX = 0;
   let nativeBeganAt = 0;
 
@@ -204,7 +199,10 @@ function newPage(js, options = {}) {
   // The clock is recorded alongside the direction: the host's SWIPE_NAV_DEBOUNCE_MS rests on
   // "two commits are never closer than GESTURE_GAP_MS", and that claim lives in this script.
   sandbox.window[hostProps.bridge] = {
-    activeGestureId: () => nativeGestureId === null ? null : `${nativeGestureId}:${nativeBeganAt}`,
+    activeGestureId: () => {
+      claimCalls++;
+      return nativeGestureId === null ? null : `${nativeGestureId}:${nativeBeganAt}`;
+    },
     navigate: (d) => {
       navigated.push(d);
       navigatedAt.push(clockMs);
@@ -238,6 +236,12 @@ function newPage(js, options = {}) {
   return {
     element,
     body,
+    claimCalls: () => claimCalls,
+    executeRelease: statement => vm.runInContext(statement, sandbox),
+    releaseRaw: (...args) => sandbox.window[hostProps.release](...args),
+    elementBlur: () => (listeners.blur || []).forEach(f => f({ target: element({ tagName: "INPUT" }) })),
+    windowBlur: () => (listeners.blur || []).forEach(f => f({ target: sandbox.window })),
+    hide: () => { sandbox.document.hidden = true; (listeners.visibilitychange || []).forEach(f => f()); },
     navigated,
     navigatedAt,
     registrations,
@@ -694,7 +698,7 @@ console.log('\ngestures that must not navigate');
 {
   const p = newPage(js);
   p.wheelRaw({ deltaMode: 1, deltaX: -40, deltaY: 0, target: p.body, composedPath: () => [p.body] });
-  p.swipe(12, -10);
+  eq('line-mode wheels avoid host IPC', p.claimCalls(), 0);
   p.settle();
   eq('anything that is not pixel-mode', p.navigated, []);
 }
@@ -903,6 +907,62 @@ console.log('\nthe affordance');
 }
 
 console.log('');
+// Focus transfer inside the document must not cancel a physical contact.
+for (const kind of ['elementBlur', 'windowBlur', 'hide']) {
+  const p = newPage(js);
+  p.swipe(6, -20);
+  p[kind]();
+  p.release();
+  eq(kind + ' release semantics', p.navigated, kind === 'elementBlur' ? ['back'] : []);
+}
+{
+  const p = newPage(js, { state: { enabled: false, back: true, forward: true } });
+  p.swipe(6, 0, 20);
+  eq('disabled vertical scrolling avoids host IPC', p.claimCalls(), 0);
+}
+{
+  const p = newPage(js);
+  p.swipe(6, -20);
+  p.releaseRaw('1', false, -120, false);
+  p.releaseRaw('1', false, -120, false);
+  eq('duplicate release commits once', p.navigated, ['back']);
+}
+{
+  const p = newPage(js);
+  p.newGesture();
+  p.swipe(6, -20);
+  p.releaseRaw('1', true, 0, true);
+  p.release();
+  eq('stale release preserves the newer contact', p.navigated, ['back']);
+}
+{
+  const p = newPage(js);
+  p.momentumWheel(-20, 0);
+  p.swipe(6, -20);
+  eq('unavailable native contact cannot navigate', p.navigated, []);
+}
+{
+  const p = newPage(js);
+  p.newGesture();
+  p.swipe(6, -20, 0, undefined, undefined, { timeStamp: 999 });
+  p.release();
+  eq('one millisecond early renderer stamps are accepted', p.navigated, ['back']);
+}
+// Kotlin produces these terminal values by running the real native reducer over the same
+// samples. This exercises the generated release statement as well as recognizer parity.
+const nativeResultsAt = process.argv.indexOf('--native-results');
+if (nativeResultsAt >= 0) {
+  const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, 'swipe-nav-cases.json'), 'utf8'));
+  const results = JSON.parse(fs.readFileSync(process.argv[nativeResultsAt + 1], 'utf8'));
+  for (const fixture of fixtures) {
+    const p = newPage(js);
+    for (const [dx, dy] of fixture.samples) p.wheel(dx, dy);
+    const end = results[fixture.name];
+    p.executeRelease(end.statement);
+    eq('native/page parity: ' + fixture.name, p.navigated, fixture.expected);
+  }
+}
+
 if (failures) {
   console.log(`${failures} failing check(s)`);
   process.exit(1);

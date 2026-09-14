@@ -137,9 +137,9 @@ internal fun shouldAcceptSwipeNav(
     direction: SwipeNavDirection,
 ): Boolean {
     if (previous == null) return true
-    // The repeat window is the larger of the two - pinned in BrowserSwipeNavTest against the
-    // script's own gesture gap, which sits between them - so a same-direction swipe clearing it has
-    // cleared the debounce as well, and one window per case is the whole rule.
+    // The repeat window is the larger of the two, so a same-direction swipe clearing it has
+    // cleared the debounce as well. Native gesture IDs do not survive this bridge's navigate call;
+    // the gate also limits duplicate or page-originated calls after document replacement.
     val window = if (direction == previous.direction) SWIPE_NAV_REPEAT_MS else SWIPE_NAV_DEBOUNCE_MS
     return nowMs - previous.atMs > window
 }
@@ -178,5 +178,5 @@ internal class SwipeNavGate(
 /** Any direction, for a double-dispatch bug. Two frames, well clear of the script's 120ms floor. */
 internal const val SWIPE_NAV_DEBOUNCE_MS = 32L
 
-/** Same direction, for a drag that hesitated past the script's gesture gap. */
+/** Same-direction calls across document replacement, which discards the page's gesture ID. */
 internal const val SWIPE_NAV_REPEAT_MS = 400L

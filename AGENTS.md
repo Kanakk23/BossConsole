@@ -808,10 +808,25 @@ carry over as the same fractions of the commit distance.
 session event tap assigns each finger sequence an id and accumulates its final point deltas. The
 page latches that id while deciding scroll ownership; only the matching native release can decide.
 A stationary hold therefore remains cancellable indefinitely. Cancelled phases reset without
-navigating, and momentum has no active finger id and is ignored. Native final displacement is
-authoritative at release so renderer/native queue reordering cannot hide a late easing-back or
+navigating, and momentum has no active finger id and is ignored. Native final displacement magnitude is
+authoritative at release (the page chooses direction) so renderer/native queue reordering cannot hide a late easing-back or
 reversal. If Input Monitoring preflight fails the feature fails closed and Settings shows how to
-grant access; this path never requests permission itself.
+grant access; this path never requests permission itself. The observer is started off the UI thread
+only while the effective setting is enabled. Disabling cancels claimants immediately and releases
+the native source and tap within the bounded run-loop poll. Re-enabling retries permission/setup;
+run-loop failures cancel the contact, clean up resources and report a distinct failure state.
+Availability reads and browser registration do not start native observation.
+
+`boss.browser.swipe.phase` remains compatible: `id:active:beganAtEpochMs` or
+`id:ended|cancelled:netX:verticalPath:pageRejected:reversed`. Active publication occurs only at
+contact begin, not on every movement. `boss.browser.swipe.terminals` additionally retains the last
+32 terminal records, separated by semicolons, published before the next active contact. Companion
+fluck-browser#45 reconciles by contact ID both before handling a new wheel and in its watchdog.
+Reads are non-destructive across surfaces; missing/evicted evidence cancels. These deltas are native
+CoreGraphics point deltas, not a guarantee of CSS-pixel or Compose-unit equivalence. Physical
+trackpad calibration still needs to cover browser zoom, slow drags and the separately tuned home
+surface. `SwipeNavParityTest` runs shared sample fixtures through the native reducer and the actual
+page script, including the host-generated release statement; it also pins cancellation constants.
 
 One cross-process ordering limit remains: JxBrowser drops the AWT event timestamp before building
 the renderer wheel event. The epoch check can reject an event Chromium timestamps before the new

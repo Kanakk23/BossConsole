@@ -19,6 +19,7 @@ import ai.rever.boss.html.HtmlFileSettingsManager
 import ai.rever.boss.plugin.browser.BrowserSettings
 import ai.rever.boss.plugin.browser.BrowserSettingsManager
 import ai.rever.boss.plugin.browser.MacOSScrollGesturePhases
+import ai.rever.boss.plugin.browser.swipeNavSettingsDescription
 import ai.rever.boss.plugin.ui.BossAlertDialog
 import ai.rever.boss.terminal.ExistingSplitTargetMode
 import ai.rever.boss.terminal.TerminalLinkOpenMode
@@ -100,7 +101,7 @@ fun FluckBrowserSettings() {
                 // stale value after the other one changes it.
                 val stored by SwipeNavSettingsManager.settings.collectAsState()
                 val swipeEnabled = parseSwipeNavEnabled(envOverride) ?: stored.enabled
-                val phaseAvailable = MacOSScrollGesturePhases.isAvailable()
+                val phaseAvailability by MacOSScrollGesturePhases.availability.collectAsState()
                 SettingsToggle(
                     label = "Two-finger swipe navigation",
                     checked = swipeEnabled,
@@ -108,19 +109,7 @@ fun FluckBrowserSettings() {
                     // Disabled rather than silently ignored: a user with the variable exported
                     // would otherwise watch this control do nothing and conclude it is broken.
                     enabled = !envOwned,
-                    description =
-                        envOverride
-                            .takeIf { envOwned }
-                            ?.let { "Set by ${SwipeNavSettingsManager.KEY}=$it in the environment" }
-                            ?: (
-                                if (!phaseAvailable) {
-                                    "Unavailable: allow BOSS under System Settings > Privacy & Security > " +
-                                        "Input Monitoring, then restart BOSS."
-                                } else {
-                                    null
-                                }
-                            )
-                            ?: "Swipe right with two fingers to go back, left to go forward.",
+                    description = swipeNavSettingsDescription(envOverride, phaseAvailability),
                 )
             }
         }
