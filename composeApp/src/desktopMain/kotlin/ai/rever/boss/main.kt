@@ -366,7 +366,6 @@ fun main(args: Array<String>) {
             true
         }
     }
-
     GlobalLogCapture.start()
     ResourceModeConfig.publishToPlugins()
 
