@@ -401,8 +401,11 @@ internal class BrowserHandleImpl(
     // the navigation it just caused, which the page-side script cannot - see [SwipeNavGate].
     private val swipeNavGate = SwipeNavGate()
 
+    private val swipeGestureClaim = MacOSScrollGesturePhases.register(::onSwipeGestureEnded)
+
     /** Receives committed two-finger swipes from the page. See [BrowserSwipeNavScript]. */
-    private val swipeNavBridge = BrowserSwipeNavBridge(onNavigate = ::onSwipeNavigate)
+    private val swipeNavBridge =
+        BrowserSwipeNavBridge(onNavigate = ::onSwipeNavigate, gestureClaim = swipeGestureClaim)
 
     private val menuContextAuthority = BrowserMenuContextAuthority()
     private val disposed = AtomicBoolean(false)
@@ -1511,6 +1514,7 @@ internal class BrowserHandleImpl(
             browser.on(BrowserClosed::class.java) {
                 menuContextAuthority.invalidate()
                 logger.debug(LogCategory.BROWSER, "Browser closed", mapOf("handleId" to id))
+                swipeGestureClaim.close()
                 // A browser can close without a dispose() call (a crashed renderer, an engine recycle).
                 // Call dispose() to ensure all scopes are cancelled and the handle is unregistered.
                 // It is idempotent, so a dispose() from the UI will safely no-op.
@@ -2042,6 +2046,17 @@ internal class BrowserHandleImpl(
                 SwipeNavDirection.BACK -> goBack()
                 SwipeNavDirection.FORWARD -> goForward()
             }
+        }
+    }
+
+    /** Delivers a real native release to the document which accumulated the matching sequence. */
+    private fun onSwipeGestureEnded(end: ScrollGestureEnd) {
+        if (!isValid) return
+        pageInjectScope.launch(pageInjectDispatcher) {
+            val releaseFunction = "window.${BrowserSwipeNavScript.RELEASE_PROPERTY}"
+            val releaseArguments = "'${end.id}', ${end.cancelled}, ${end.accumX}, ${end.rejected}"
+            val statement = "$releaseFunction && $releaseFunction($releaseArguments);"
+            runCatching { browser.mainFrame().ifPresent { it.executeJavaScript<Any?>(statement) } }
         }
     }
 
@@ -4240,6 +4255,7 @@ internal class BrowserHandleImpl(
     override fun dispose() {
         menuContextAuthority.invalidate()
         audioSource.close()
+        swipeGestureClaim.close()
         // Synchronously, and before the guard below: invokeLater would let browser.close() run
         // first, and closing the browser under a still-attached Swing view is exactly the
         // ordering that leaves an undecorated always-on-top window on screen with nothing able
