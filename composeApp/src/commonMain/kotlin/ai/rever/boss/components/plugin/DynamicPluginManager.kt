@@ -803,7 +803,7 @@ class DynamicPluginManager(
      *   plugin's [PluginManifest.requiredPermissions]. An empty list (legacy
      *   plugins) means "available to any authenticated user".
      */
-    private fun canAccess(manifest: PluginManifest): Boolean =
+    internal fun canAccess(manifest: PluginManifest): Boolean =
         pluginAccessAllowed(
             isAdmin = _isAdmin.value,
             userPermissions = _userPermissions.value,

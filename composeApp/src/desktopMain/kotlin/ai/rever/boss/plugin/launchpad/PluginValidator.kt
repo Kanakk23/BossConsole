@@ -27,6 +27,7 @@ object PluginValidator {
     private val ID_REGEX = Regex("^[a-zA-Z][a-zA-Z0-9_-]*(?:\\.[a-zA-Z0-9_-]+)+$")
     private val MCP_TOOL_REGEX = Regex("^mcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_-]+$")
     private val CLASS_NAME_REGEX = Regex("""^[a-zA-Z_$][a-zA-Z0-9_$]*(?:\.[a-zA-Z_$][a-zA-Z0-9_$]*)+$""")
+    private const val MAX_CLASSFILE_BYTES: Long = 5_000_000L
 
     fun validate(target: File): ValidationResult {
         val checks = mutableListOf<ValidationCheck>()
@@ -180,12 +181,12 @@ object PluginValidator {
         val archiveData =
             try {
                 readArchive(file, checks)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 checks +=
                     ValidationCheck(
                         name = "archive-readable",
                         passed = false,
-                        message = "Failed to read archive: ${e.message}",
+                        message = "Failed to read archive: ${e.message ?: e::class.simpleName}",
                     )
                 return ValidationResult(isValid = false, checks = checks)
             } ?: return ValidationResult(isValid = false, checks = checks)
@@ -291,7 +292,14 @@ object PluginValidator {
                     if (mainClass != null) {
                         val entrypointPath = mainClass.replace('.', '/') + ".class"
                         jarFile.getJarEntry(entrypointPath)?.let { entry ->
-                            jarFile.getInputStream(entry).use { stream -> stream.readBytes() }
+                            if (entry.size > MAX_CLASSFILE_BYTES) {
+                                null
+                            } else {
+                                jarFile.getInputStream(entry).use { stream ->
+                                    val bytes = stream.readNBytes((MAX_CLASSFILE_BYTES + 1).toInt())
+                                    if (bytes.size > MAX_CLASSFILE_BYTES) null else bytes
+                                }
+                            }
                         }
                     } else {
                         null
@@ -323,6 +331,13 @@ object PluginValidator {
         mainClass: String,
         archiveData: ArchiveData,
     ): Boolean {
+        // Fast-path & isolation safety: check direct interface implementation from classfile bytes first
+        // to avoid parent-first delegation falsely loading a host-side class with the same name.
+        val classBytes = archiveData.entrypointClassBytes
+        if (classBytes != null && checkDirectInterfaceImplementation(classBytes)) {
+            return true
+        }
+
         return try {
             val parentLoader = Plugin::class.java.classLoader
             // The classloader holds the jar open (notably on Windows), so it is
@@ -335,8 +350,11 @@ object PluginValidator {
         } catch (_: Throwable) {
             // Manual classfile fallback when classloading fails due to external dependencies.
             // Note: Manual classfile parser supports direct implementations of ai.rever.boss.plugin.api.Plugin.
-            val classBytes = archiveData.entrypointClassBytes ?: return false
-            checkDirectInterfaceImplementation(classBytes)
+            if (classBytes != null) {
+                checkDirectInterfaceImplementation(classBytes)
+            } else {
+                false
+            }
         }
     }
 

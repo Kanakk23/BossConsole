@@ -256,6 +256,71 @@ class PluginManifestTest {
     }
 
     @Test
+    fun `DefaultPlugin deduplicateJars respects isProtectedPredicate`() {
+        val stagingBase = File(tempDir.toFile(), "protected-staging-root")
+        stagingBase.mkdirs()
+        DevPluginArtifacts.stagingRootOverride = stagingBase
+
+        try {
+            val pluginsDir = File(tempDir.toFile(), "protected-plugins-dir")
+            pluginsDir.mkdirs()
+
+            val standardJar = File(pluginsDir, "protected-plugin.jar")
+            writeSyntheticJar(standardJar, "protected-plugin")
+            standardJar.setLastModified(2000L)
+
+            val versionDir = File(stagingBase, "protected-plugin/v1000")
+            versionDir.mkdirs()
+            val versionJar = File(versionDir, "protected-plugin.jar")
+            writeSyntheticJar(versionJar, "protected-plugin")
+            versionJar.setLastModified(5000L)
+
+            // When isProtectedPredicate is true, dev JAR is penalized so standardJar wins even if older
+            val deduplicated =
+                DefaultPlugin.deduplicateJars(listOf(standardJar, versionJar)) { pluginId ->
+                    pluginId == "protected-plugin"
+                }
+            assertEquals(1, deduplicated.size)
+            assertEquals(standardJar.absolutePath, deduplicated.single().absolutePath)
+        } finally {
+            DevPluginArtifacts.stagingRootOverride = null
+        }
+    }
+
+    @Test
+    fun `extractPluginIdFromManifestText reads pluginId with deps preceding it`() {
+        val manifestWithDepsFirst =
+            """
+            {
+              "manifestVersion": 1,
+              "dependencies": [
+                {
+                  "id": "ai.rever.boss.gateway",
+                  "version": "1.0.0"
+                }
+              ],
+              "pluginId": "com.example.actual-plugin"
+            }
+            """.trimIndent()
+
+        val extracted = DevPluginArtifacts.extractPluginIdFromManifestText(manifestWithDepsFirst)
+        assertEquals("com.example.actual-plugin", extracted)
+
+        val jarFile = File(tempDir.toFile(), "deps-first.jar")
+        jarFile.parentFile?.mkdirs()
+        java.util.jar.JarOutputStream(java.io.FileOutputStream(jarFile)).use { out ->
+            val entry = java.util.jar.JarEntry("META-INF/boss-plugin/plugin.json")
+            out.putNextEntry(entry)
+            out.write(manifestWithDepsFirst.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+            out.closeEntry()
+        }
+
+        assertTrue(DevPluginArtifacts.isValidDevJar(jarFile, "com.example.actual-plugin"))
+        assertFalse(DevPluginArtifacts.isValidDevJar(jarFile, "ai.rever.boss.gateway"))
+        assertEquals("com.example.actual-plugin", DefaultPlugin.extractPluginId(jarFile))
+    }
+
+    @Test
     fun `DevPluginArtifacts isDevPluginJar avoids false positives on paths containing dev username`() {
         val stagingBase = File(tempDir.toFile(), "staging-root")
         stagingBase.mkdirs()

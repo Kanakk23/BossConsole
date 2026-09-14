@@ -1185,3 +1185,21 @@ no second sandbox prompt. Explicit policies and session trust retain precedence.
 HIGH/CRITICAL names use the mutating default, while unknown names remain allowed
 by default. Risk reasons and sanitized arguments appear together in the existing
 approval dialog. #362 is closed pending extraction into a management plugin.
+
+### Plugin Dev Staging & Launchpad Invariants
+
+- **Protected Plugins Overrule Dev JARs Unconditionally**:
+  When deduplicating or resolving dev vs. standard plugins, `isSystemPlugin` and `requiresRestartInsteadOfHotReload` plugins MUST NEVER be superseded by a dev JAR, regardless of file modification timestamps (`lastModified`). Never rely solely on additive bonuses (`versionBonus + lastModified`) without penalizing or filtering dev JARs on protected identities.
+
+- **Reload Forward & Rollback State Completeness**:
+  Hot-reload must support both active (`LOADED`) and inactive (`DISABLED`) plugins symmetrically:
+  - If a plugin was disabled prior to reload (`wasEnabled = false`), forward reload must install with `enabled = false` and accept `state == DISABLED` as an expected successful outcome.
+  - If the active user lacks RBAC permissions, forward reload must accept `state == DISABLED && !canAccess(manifest)` as a valid outcome.
+  - Rollback must restore `wasEnabled = false` and reinstall `v1.jar` in `DISABLED` state without uninstallation.
+
+- **Archive Traversal & Stream Bounds**:
+  Never trust `ZipEntry.size` alone for decompression limits, as `size == -1` in streaming ZIPs. Always enforce hard byte caps on the incoming `InputStream` (e.g. `readNBytes(MAX + 1)` or explicit counter bounds) to prevent heap exhaustion.
+
+- **Test Veracity Rules**:
+  - In deduplication tests, ALWAYS test with dev JAR `lastModified` strictly greater than standard JAR `lastModified` to mirror real-world compiler outputs.
+  - Test the public reload pipeline (`DevPluginReloader.reload`) end-to-end rather than calling internal rollback helpers in isolation.

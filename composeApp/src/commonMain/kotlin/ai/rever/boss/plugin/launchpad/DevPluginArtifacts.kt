@@ -3,6 +3,10 @@ package ai.rever.boss.plugin.launchpad
 import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.nio.file.Path
 
@@ -12,6 +16,7 @@ import java.nio.file.Path
 @Suppress("ReturnCount", "TooGenericExceptionCaught", "TooManyFunctions")
 object DevPluginArtifacts {
     private val logger = BossLogger.forComponent("DevPluginArtifacts")
+    private val manifestJson = Json { ignoreUnknownKeys = true }
 
     const val DEFAULT_MAX_VERSIONS_TO_KEEP: Int = 3
 
@@ -25,18 +30,30 @@ object DevPluginArtifacts {
     fun stagingRoot(): File = stagingRootOverride ?: BossDirectories.resolve("plugins/dev")
 
     /**
-     * Returns true if [jarFile] is located strictly within the dev staging directory tree
-     * under a version folder (`.../plugins/dev/<pluginId>/v<timestamp>/<pluginId>.jar`).
-     * Prevents false-positives on paths containing "dev" in username or parent directories.
+     * Extracts the top-level plugin ID from a plugin.json manifest text.
+     * Accurately inspects root keys ("pluginId", "id") and ignores nested objects
+     * like dependencies or MCP tools that may declare an "id" field.
      */
-    fun isDevPluginJar(jarFile: File): Boolean = isDevPluginJar(jarFile.toPath())
+    fun extractPluginIdFromManifestText(text: String): String? =
+        runCatching {
+            val root = manifestJson.parseToJsonElement(text).jsonObject
+            root["pluginId"]?.jsonPrimitive?.contentOrNull
+                ?: root["id"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull()
 
     /**
-     * Returns true if [jarPath] is located strictly within the dev staging directory tree
-     * under a version folder (`.../plugins/dev/<pluginId>/v<timestamp>/<pluginId>.jar`).
+     * Resolves whether [jarPath] points to a version-rotated dev JAR under the staging root.
      */
-    fun isDevPluginJar(jarPath: Path): Boolean {
-        val stagingDir = stagingRoot().toPath().toAbsolutePath().normalize()
+    fun isDevPluginJar(jarFile: File): Boolean = isDevPluginPath(jarFile.toPath())
+
+    /**
+     * Resolves whether [jarPath] points to a version-rotated dev JAR under the staging root.
+     */
+    fun isDevPluginPath(
+        jarPath: Path,
+        devRoot: File = stagingRoot(),
+    ): Boolean {
+        val stagingDir = devRoot.toPath().toAbsolutePath().normalize()
         val candidate = jarPath.toAbsolutePath().normalize()
         val parent = candidate.parent ?: return false
         return candidate.startsWith(stagingDir) && parent.fileName?.toString()?.startsWith("v") == true
@@ -52,28 +69,26 @@ object DevPluginArtifacts {
         jarFile: File,
         expectedPluginId: String? = null,
     ): Boolean {
-        if (!jarFile.isFile || jarFile.length() <= 0) {
-            return false
-        }
-        if (jarFile.extension != "jar" || jarFile.name.endsWith(".part")) {
-            return false
-        }
-        return try {
+        if (!isEligibleJarFile(jarFile)) return false
+        val manifestText = readManifestText(jarFile) ?: return false
+        if (expectedPluginId == null) return true
+        return extractPluginIdFromManifestText(manifestText) == expectedPluginId
+    }
+
+    private fun isEligibleJarFile(file: File): Boolean {
+        if (!file.isFile || file.length() <= 0) return false
+        return file.extension == "jar" && !file.name.endsWith(".part")
+    }
+
+    private fun readManifestText(jarFile: File): String? =
+        try {
             java.util.jar.JarFile(jarFile).use { jar ->
-                val entry = jar.getJarEntry("META-INF/boss-plugin/plugin.json") ?: return false
-                if (expectedPluginId != null) {
-                    val text = jar.getInputStream(entry).bufferedReader().readText()
-                    val match = Regex(""""(?:id|pluginId)"\s*:\s*"([^"]+)"""").find(text)
-                    val manifestId = match?.groupValues?.get(1)
-                    manifestId == expectedPluginId
-                } else {
-                    true
-                }
+                val entry = jar.getJarEntry("META-INF/boss-plugin/plugin.json") ?: return null
+                jar.getInputStream(entry).bufferedReader().use { it.readText() }
             }
         } catch (_: Exception) {
-            false
+            null
         }
-    }
 
     /**
      * Finds the active dev JAR for [pluginId] by inspecting version directories in descending order.

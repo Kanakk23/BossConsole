@@ -74,7 +74,7 @@ object DevPluginReloader {
                 preflightCheck(pluginId, activeManagers)
                 try {
                     unloadManagers(pluginId, activeManagers)
-                    installManagers(pluginId, stagedJar, activeManagers)
+                    installManagers(pluginId, stagedJar, activeManagers, priorStates)
                 } catch (e: Exception) {
                     rollbackManagers(pluginId, priorStates)
                     throw e
@@ -116,8 +116,7 @@ object DevPluginReloader {
     ) {
         try {
             val hasValidPriorJar =
-                priorState.wasLoaded &&
-                    priorState.priorJarPath != null &&
+                priorState.priorJarPath != null &&
                     File(priorState.priorJarPath).exists()
             if (hasValidPriorJar) {
                 // Hot-reload case: reinstall the prior working JAR with previous enabled state
@@ -184,11 +183,20 @@ object DevPluginReloader {
         pluginId: String,
         stagedJar: File,
         managers: List<DynamicPluginManager>,
+        priorStates: List<PriorManagerState>,
     ) {
+        val priorByManager = priorStates.associateBy { it.manager }
         for (manager in managers) {
-            val installResult = manager.installPlugin(stagedJar.absolutePath, enabled = true)
+            val targetEnabled = priorByManager[manager]?.wasEnabled ?: true
+            val installResult = manager.installPlugin(stagedJar.absolutePath, enabled = targetEnabled)
             val installed = installResult.getOrNull()
-            if (installed == null || installed.state != PluginState.LOADED) {
+            val isLoadedOrHidden =
+                installed != null && (
+                    installed.state == PluginState.LOADED ||
+                        (!targetEnabled && installed.state == PluginState.DISABLED) ||
+                        (installed.state == PluginState.DISABLED && !manager.canAccess(installed.manifest))
+                )
+            if (!isLoadedOrHidden) {
                 val error = installResult.exceptionOrNull()
                 val state = installed?.state?.name ?: "unknown"
                 val message =

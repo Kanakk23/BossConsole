@@ -182,32 +182,41 @@ class DefaultPlugin(
                 .findAllActiveDevJars(devDir, deepValidate = true)
 
         internal fun extractPluginId(jarFile: File): String =
+            readManifestIdFromJar(jarFile)
+                ?: jarFile.nameWithoutExtension
+
+        private fun readManifestIdFromJar(jarFile: File): String? =
             try {
                 java.util.jar.JarFile(jarFile).use { jar ->
                     val entry =
                         jar.getJarEntry("META-INF/boss-plugin/plugin.json")
                             ?: jar.getJarEntry("plugin.json")
-                    if (entry != null) {
-                        val text = jar.getInputStream(entry).bufferedReader().readText()
-                        val match = Regex(""""(?:id|pluginId)"\s*:\s*"([^"]+)"""").find(text)
-                        match?.groupValues?.get(1)
-                    } else {
-                        null
-                    }
-                } ?: jarFile.nameWithoutExtension
+                            ?: return null
+                    val text = jar.getInputStream(entry).bufferedReader().use { it.readText() }
+                    DevPluginArtifacts.extractPluginIdFromManifestText(text)
+                }
             } catch (_: Exception) {
-                jarFile.nameWithoutExtension
+                null
             }
 
-        internal fun deduplicateJars(jars: List<File>): List<File> =
+        internal fun deduplicateJars(
+            jars: List<File>,
+            isProtectedPredicate: (String) -> Boolean = { false },
+        ): List<File> =
             jars
                 .groupBy { extractPluginId(it) }
-                .mapValues { (_, group) ->
+                .mapValues { (pluginId, group) ->
                     group.maxByOrNull { file ->
                         val isDev =
                             DevPluginArtifacts
                                 .isDevPluginJar(file)
-                        val versionBonus = if (isDev) 10_000_000_000_000L else 0L
+                        val isProtected = isProtectedPredicate(pluginId)
+                        val versionBonus =
+                            when {
+                                isProtected && isDev -> -10_000_000_000_000L
+                                isDev -> 10_000_000_000_000L
+                                else -> 0L
+                            }
                         versionBonus + file.lastModified()
                     } ?: group.first()
                 }.values
@@ -1218,7 +1227,11 @@ class DefaultPlugin(
                     } ?: emptyArray()
 
                 val devJars = findActiveDevJars(File(pluginDir, "dev"))
-                val jarFiles = deduplicateJars(standardJars.toList() + devJars)
+                val jarFiles =
+                    deduplicateJars(standardJars.toList() + devJars) { pluginId ->
+                        manager.isSystemPlugin(pluginId) ||
+                            HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)
+                    }
 
                 if (jarFiles.isEmpty()) {
                     logger.debug(
