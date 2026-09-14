@@ -128,6 +128,36 @@ class DevPluginRollbackTest {
         return jar
     }
 
+    private fun createStoreTestJar(
+        storeJar: File,
+        pluginId: String,
+        version: String = "1.0.0",
+    ) {
+        val classEntryPath = ValidatorTestFixturePlugin::class.java.name.replace('.', '/') + ".class"
+        val classBytes =
+            ValidatorTestFixturePlugin::class.java.classLoader
+                .getResourceAsStream(classEntryPath)!!
+                .readBytes()
+        val storeManifest =
+            """
+            {
+              "manifestVersion": 1,
+              "pluginId": "$pluginId",
+              "displayName": "Store Build $version",
+              "version": "$version",
+              "apiVersion": "1.0.0",
+              "mainClass": "${ValidatorTestFixturePlugin::class.java.name}"
+            }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+        createJar(
+            storeJar,
+            mapOf(
+                "META-INF/boss-plugin/plugin.json" to storeManifest,
+                classEntryPath to classBytes,
+            ),
+        )
+    }
+
     private fun assertRestoredToV1(
         manager: DynamicPluginManager,
         pluginId: String,
@@ -282,7 +312,7 @@ class DevPluginRollbackTest {
         }
 
     @Test
-    fun `reload where manager 1 unloads and manager 2 late-refuses unload leaves manager 2 untouched and restores manager 1`() =
+    fun `reload with late refusal leaves refusing manager untouched`() =
         runBlocking {
             val pluginId = "com.example.laterefusal"
             val stagingRoot = DevPluginArtifacts.stagingRoot()
@@ -318,7 +348,9 @@ class DevPluginRollbackTest {
                             CanUnloadResult.NotAllowed(listOf("Late refusal from manager 2"))
                         }
 
-                    override fun prepareForUnload(pluginId: String) {}
+                    override fun prepareForUnload(pluginId: String) {
+                        // No preparation needed; manager doesn't hold unloadable resources
+                    }
                 },
             )
 
@@ -342,36 +374,13 @@ class DevPluginRollbackTest {
         }
 
     @Test
-    fun `startup fallback loads store jar when staged dev jar fails registration`() =
+    fun `startup fallback loads store jar when staged dev jar fails`() =
         runBlocking {
             val pluginId = "com.example.startup.fallback"
             val stagingRoot = DevPluginArtifacts.stagingRoot()
             val storeDir = tempDir.resolve("store-builds").toFile().apply { mkdirs() }
             val storeJar = File(storeDir, "$pluginId.jar")
-
-            val classEntryPath = ValidatorTestFixturePlugin::class.java.name.replace('.', '/') + ".class"
-            val classBytes =
-                ValidatorTestFixturePlugin::class.java.classLoader
-                    .getResourceAsStream(classEntryPath)!!
-                    .readBytes()
-            val storeManifest =
-                """
-                {
-                  "manifestVersion": 1,
-                  "pluginId": "$pluginId",
-                  "displayName": "Store Build 1.0.0",
-                  "version": "1.0.0",
-                  "apiVersion": "1.0.0",
-                  "mainClass": "${ValidatorTestFixturePlugin::class.java.name}"
-                }
-                """.trimIndent().toByteArray(Charsets.UTF_8)
-            createJar(
-                storeJar,
-                mapOf(
-                    "META-INF/boss-plugin/plugin.json" to storeManifest,
-                    classEntryPath to classBytes,
-                ),
-            )
+            createStoreTestJar(storeJar, pluginId, "1.0.0")
 
             // Create a dev jar that passes archive and manifest validation, but points to a non-existent mainClass
             createDevTestJar(

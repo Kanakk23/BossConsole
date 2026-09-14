@@ -1803,45 +1803,66 @@ object PluginStoreSetup {
             if (result.isFailure) {
                 val entry = persistedById[pluginId] ?: continue
                 val attemptedPath = entries.firstOrNull { it.pluginId == pluginId }?.jarPath
-                val isDevBuildSwap =
-                    attemptedPath != null &&
-                        attemptedPath != entry.jarPath &&
-                        DevPluginArtifacts.isDevPluginJar(File(attemptedPath))
-                val storeJar = File(entry.jarPath)
-                if (isDevBuildSwap && storeJar.exists()) {
-                    val devError = result.exceptionOrNull()
-                    logger.warn(
-                        LogCategory.SYSTEM,
-                        "Dev plugin failed to load at startup; falling back to store build",
-                        mapOf(
-                            "pluginId" to pluginId,
-                            "devJarPath" to attemptedPath,
-                            "storeJarPath" to entry.jarPath,
-                            "error" to (devError?.message ?: "unknown"),
-                        ),
-                        devError,
+                val fallbackResult =
+                    attemptStoreFallbackOnDevFailure(
+                        dynamicPluginManager = dynamicPluginManager,
+                        pluginId = pluginId,
+                        entry = entry,
+                        attemptedPath = attemptedPath,
+                        devError = result.exceptionOrNull(),
                     )
-                    val fallbackResult =
-                        dynamicPluginManager.installPlugin(entry.jarPath, enabled = entry.enabled)
+                if (fallbackResult != null) {
                     finalResults[pluginId] = fallbackResult
-                    if (fallbackResult.isSuccess) {
-                        logger.info(
-                            LogCategory.SYSTEM,
-                            "Successfully fell back to store build for plugin $pluginId",
-                            mapOf("pluginId" to pluginId, "storeJarPath" to entry.jarPath),
-                        )
-                    } else {
-                        logger.error(
-                            LogCategory.SYSTEM,
-                            "Fallback to store build also failed for plugin $pluginId",
-                            mapOf("pluginId" to pluginId, "storeJarPath" to entry.jarPath),
-                            fallbackResult.exceptionOrNull(),
-                        )
-                    }
                 }
             }
         }
         return finalResults
+    }
+
+    private suspend fun attemptStoreFallbackOnDevFailure(
+        dynamicPluginManager: DynamicPluginManager,
+        pluginId: String,
+        entry: PluginPersistence.InstalledPluginEntry,
+        attemptedPath: String?,
+        devError: Throwable?,
+    ): Result<DynamicPluginInfo>? {
+        val isDevBuildSwap =
+            attemptedPath != null &&
+                attemptedPath != entry.jarPath &&
+                DevPluginArtifacts.isDevPluginJar(File(attemptedPath))
+        val storeJar = File(entry.jarPath)
+        if (!isDevBuildSwap || !storeJar.exists()) {
+            return null
+        }
+
+        logger.warn(
+            LogCategory.SYSTEM,
+            "Dev plugin failed to load at startup; falling back to store build",
+            mapOf(
+                "pluginId" to pluginId,
+                "devJarPath" to attemptedPath,
+                "storeJarPath" to entry.jarPath,
+                "error" to (devError?.message ?: "unknown"),
+            ),
+            devError,
+        )
+        val fallbackResult =
+            dynamicPluginManager.installPlugin(entry.jarPath, enabled = entry.enabled)
+        if (fallbackResult.isSuccess) {
+            logger.info(
+                LogCategory.SYSTEM,
+                "Successfully fell back to store build for plugin $pluginId",
+                mapOf("pluginId" to pluginId, "storeJarPath" to entry.jarPath),
+            )
+        } else {
+            logger.error(
+                LogCategory.SYSTEM,
+                "Fallback to store build also failed for plugin $pluginId",
+                mapOf("pluginId" to pluginId, "storeJarPath" to entry.jarPath),
+                fallbackResult.exceptionOrNull(),
+            )
+        }
+        return fallbackResult
     }
 
     internal fun resolvePersistedEntryPath(
