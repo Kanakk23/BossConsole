@@ -3,15 +3,19 @@ package ai.rever.boss.plugin.launchpad
 import ai.rever.boss.cli.plugin.ValidatorTestFixturePlugin
 import ai.rever.boss.components.plugin.DynamicPluginInfo
 import ai.rever.boss.components.plugin.DynamicPluginManager
+import ai.rever.boss.plugin.PluginPersistence
+import ai.rever.boss.plugin.PluginStoreSetup
+import ai.rever.boss.plugin.api.CanUnloadResult
 import ai.rever.boss.plugin.api.PanelRegistry
 import ai.rever.boss.plugin.api.PluginContext
 import ai.rever.boss.plugin.api.PluginState
+import ai.rever.boss.plugin.api.PluginUnloadAware
 import ai.rever.boss.plugin.api.TabRegistry
 import ai.rever.boss.plugin.sandbox.PluginSandboxManagerImpl
+import ai.rever.boss.plugin.sandbox.SandboxConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -27,7 +31,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import ai.rever.boss.plugin.api.PluginManifest as ApiPluginManifest
 
 class DevPluginRollbackTest {
     @TempDir
@@ -57,7 +60,9 @@ class DevPluginRollbackTest {
         override val pluginScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
     ) : PluginContext
 
-    private fun createManager(): DynamicPluginManager {
+    private fun createManager(
+        onSandboxedContext: ((pluginId: String, config: SandboxConfig) -> PluginContext)? = null,
+    ): DynamicPluginManager {
         val sandboxManager = PluginSandboxManagerImpl()
         val dummyContext = TestPluginContext()
         val manager =
@@ -65,21 +70,12 @@ class DevPluginRollbackTest {
                 dummyContext.panelRegistry,
                 dummyContext.tabRegistry,
                 sandboxManager,
-                createSandboxedContext = { _, _ -> dummyContext },
+                createSandboxedContext = { pluginId, config ->
+                    onSandboxedContext?.invoke(pluginId, config) ?: dummyContext
+                },
             )
         activeManagersToClean.add(manager)
         return manager
-    }
-
-    @Suppress("UNCHECKED_CAST")
-    private fun setPluginInfo(
-        manager: DynamicPluginManager,
-        pluginId: String,
-        info: DynamicPluginInfo,
-    ) {
-        val field = DynamicPluginManager::class.java.getDeclaredField("_pluginStates").apply { isAccessible = true }
-        val flow = field.get(manager) as MutableStateFlow<Map<String, DynamicPluginInfo>>
-        flow.value = flow.value + (pluginId to info)
     }
 
     private fun createJar(
@@ -91,7 +87,6 @@ class DevPluginRollbackTest {
             entries.forEach { (name, bytes) ->
                 jos.putNextEntry(JarEntry(name))
                 jos.write(bytes)
-                jos.closeEntry()
             }
         }
     }
@@ -101,14 +96,11 @@ class DevPluginRollbackTest {
         pluginId: String,
         versionDir: String,
         version: String,
+        mainClass: String = ValidatorTestFixturePlugin::class.java.name,
+        includeMainClassBytecode: Boolean = true,
     ): File {
         val dir = File(stagingRoot, "$pluginId/$versionDir").apply { mkdirs() }
         val jar = File(dir, "$pluginId.jar")
-        val classEntryPath = ValidatorTestFixturePlugin::class.java.name.replace('.', '/') + ".class"
-        val classBytes =
-            ValidatorTestFixturePlugin::class.java.classLoader
-                .getResourceAsStream(classEntryPath)!!
-                .readBytes()
         val manifest =
             """
             {
@@ -117,30 +109,23 @@ class DevPluginRollbackTest {
               "displayName": "Hot Reload Tool $version",
               "version": "$version",
               "apiVersion": "1.0.0",
-              "mainClass": "${ValidatorTestFixturePlugin::class.java.name}"
+              "mainClass": "$mainClass"
             }
             """.trimIndent().toByteArray(Charsets.UTF_8)
-        createJar(
-            jar,
-            mapOf(
+        val entries =
+            mutableMapOf<String, ByteArray>(
                 "META-INF/boss-plugin/plugin.json" to manifest,
-                classEntryPath to classBytes,
-            ),
-        )
+            )
+        if (includeMainClassBytecode) {
+            val classEntryPath = ValidatorTestFixturePlugin::class.java.name.replace('.', '/') + ".class"
+            val classBytes =
+                ValidatorTestFixturePlugin::class.java.classLoader
+                    .getResourceAsStream(classEntryPath)!!
+                    .readBytes()
+            entries[classEntryPath] = classBytes
+        }
+        createJar(jar, entries)
         return jar
-    }
-
-    private fun capturePriorState(
-        manager: DynamicPluginManager,
-        pluginId: String,
-    ): DevPluginReloader.PriorManagerState {
-        val info = manager.getPluginInfo(pluginId)
-        return DevPluginReloader.PriorManagerState(
-            manager = manager,
-            priorJarPath = info?.jarPath,
-            wasLoaded = info?.state == PluginState.LOADED,
-            wasEnabled = info?.enabled ?: true,
-        )
     }
 
     private fun assertRestoredToV1(
@@ -160,118 +145,6 @@ class DevPluginRollbackTest {
         assertEquals("1.0.0", restored.manifest.version, "Must be on v1 (1.0.0)")
     }
 
-    @Test
-    fun `first link failure uninstalls partially installed plugin across managers to restore clean initial state`() =
-        runBlocking {
-            val pluginId = "first-link-tool"
-            val manager1 = createManager()
-            val manager2 = createManager()
-
-            // Simulate manager1 having newly loaded the plugin during the link cycle
-            val dummyManifest =
-                ApiPluginManifest(
-                    pluginId = pluginId,
-                    displayName = "First Link Tool",
-                    version = "1.0.0",
-                    apiVersion = "1.0.0",
-                    mainClass = "test.FirstLinkMain",
-                    canUnload = true,
-                )
-            val info =
-                DynamicPluginInfo(
-                    manifest = dummyManifest,
-                    jarPath = "/fake/v1/first-link-tool.jar",
-                    state = PluginState.LOADED,
-                    loadedAt = System.currentTimeMillis(),
-                    enabled = true,
-                )
-            setPluginInfo(manager1, pluginId, info)
-
-            // Prior state: plugin was NOT previously loaded in either manager
-            val priorStates =
-                listOf(
-                    DevPluginReloader.PriorManagerState(
-                        manager = manager1,
-                        priorJarPath = null,
-                        wasLoaded = false,
-                        wasEnabled = true,
-                    ),
-                    DevPluginReloader.PriorManagerState(
-                        manager = manager2,
-                        priorJarPath = null,
-                        wasLoaded = false,
-                        wasEnabled = true,
-                    ),
-                )
-
-            // Rollback must uninstall from manager1 to avoid leaving a fractured single-window install
-            DevPluginReloader.rollbackManagers(pluginId, priorStates)
-
-            assertNull(
-                manager1.getPluginInfo(pluginId),
-                "Manager 1 must have uninstalled the newly linked plugin after rollback",
-            )
-            assertNull(
-                manager2.getPluginInfo(pluginId),
-                "Manager 2 must remain in clean state without plugin",
-            )
-        }
-
-    @Test
-    fun `hot reload failure in second manager restores prior jar in first manager`() =
-        runBlocking {
-            val pluginId = "com.example.hotreload"
-            val stagingRoot = DevPluginArtifacts.stagingRoot()
-            val v1Jar = createDevTestJar(stagingRoot, pluginId, "v1000", "1.0.0")
-            val v2Jar = createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
-
-            val manager1 = createManager()
-            val manager2 = createManager()
-
-            // 3. Manager 1 and Manager 2 start on v1.jar
-            val res1 = manager1.installPlugin(v1Jar.absolutePath, enabled = true)
-            assertTrue(res1.isSuccess, "Manager 1 must load v1.jar successfully")
-            val res2 = manager2.installPlugin(v1Jar.absolutePath, enabled = true)
-            assertTrue(res2.isSuccess, "Manager 2 must load v1.jar successfully")
-
-            assertEquals(
-                v1Jar.canonicalPath,
-                File(manager1.getPluginInfo(pluginId)!!.jarPath).canonicalPath,
-            )
-            assertEquals(
-                v1Jar.canonicalPath,
-                File(manager2.getPluginInfo(pluginId)!!.jarPath).canonicalPath,
-            )
-
-            // 4. Capture prior states before reload cycle
-            val priorStates =
-                listOf(
-                    capturePriorState(manager1, pluginId),
-                    capturePriorState(manager2, pluginId),
-                )
-
-            // 5. Simulate reload progression:
-            // Manager 1 unloads v1 and installs v2.jar successfully
-            manager1.uninstallPlugin(pluginId, force = false, waitForGC = false)
-            val v2InstallResult = manager1.installPlugin(v2Jar.absolutePath, enabled = true)
-            assertTrue(v2InstallResult.isSuccess, "Manager 1 must succeed installing v2.jar")
-            assertEquals(
-                v2Jar.canonicalPath,
-                File(manager1.getPluginInfo(pluginId)!!.jarPath).canonicalPath,
-            )
-
-            // Manager 2 unloads v1, but fails to install v2.jar (simulated install failure)
-            manager2.uninstallPlugin(pluginId, force = false, waitForGC = false)
-            assertNull(manager2.getPluginInfo(pluginId))
-
-            // 6. Trigger symmetric rollback across managers
-            DevPluginReloader.rollbackManagers(pluginId, priorStates)
-
-            // 7. Assert that Manager 1 and Manager 2 uninstalled v2 and restored v1
-            assertRestoredToV1(manager1, pluginId, v1Jar)
-            assertRestoredToV1(manager2, pluginId, v1Jar)
-        }
-
     private fun assertRestoredToV1Disabled(
         manager: DynamicPluginManager,
         pluginId: String,
@@ -290,17 +163,105 @@ class DevPluginRollbackTest {
     }
 
     @Test
+    fun `first link failure uninstalls partially installed plugin across managers to restore clean initial state`() =
+        runBlocking {
+            val pluginId = "first-link-tool"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            createDevTestJar(stagingRoot, pluginId, "v1000", "1.0.0")
+
+            val dummyContext = TestPluginContext()
+            val manager1 = createManager()
+            var manager2FailLink = true
+            val manager2 =
+                createManager { _, _ ->
+                    if (manager2FailLink) {
+                        manager2FailLink = false
+                        error("Simulated link failure in manager 2")
+                    }
+                    dummyContext
+                }
+
+            assertNull(manager1.getPluginInfo(pluginId))
+            assertNull(manager2.getPluginInfo(pluginId))
+
+            // Drive through public DevPluginReloader.reload
+            val result = DevPluginReloader.reload(pluginId, stagingRoot)
+            assertTrue(result.isFailure, "Reload must fail when second manager fails install")
+
+            assertNull(
+                manager1.getPluginInfo(pluginId),
+                "Manager 1 must have uninstalled the newly linked plugin after rollback",
+            )
+            assertNull(
+                manager2.getPluginInfo(pluginId),
+                "Manager 2 must remain in clean state without plugin",
+            )
+        }
+
+    @Test
+    fun `hot reload failure in second manager restores prior jar in first manager`() =
+        runBlocking {
+            val pluginId = "com.example.hotreload"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            val v1Jar = createDevTestJar(stagingRoot, pluginId, "v1000", "1.0.0")
+
+            val dummyContext = TestPluginContext()
+            val manager1 = createManager()
+            var manager2FailV2Install = false
+            val manager2 =
+                createManager { _, _ ->
+                    if (manager2FailV2Install) {
+                        manager2FailV2Install = false
+                        error("Simulated v2 install failure on manager 2")
+                    }
+                    dummyContext
+                }
+
+            val res1 = manager1.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res1.isSuccess, "Manager 1 must load v1.jar successfully")
+            val res2 = manager2.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res2.isSuccess, "Manager 2 must load v1.jar successfully")
+
+            assertEquals(
+                v1Jar.canonicalPath,
+                File(manager1.getPluginInfo(pluginId)!!.jarPath).canonicalPath,
+            )
+            assertEquals(
+                v1Jar.canonicalPath,
+                File(manager2.getPluginInfo(pluginId)!!.jarPath).canonicalPath,
+            )
+
+            // Stage v2.jar and arm manager 2 to fail v2 install
+            createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
+            manager2FailV2Install = true
+
+            // Drive through public DevPluginReloader.reload
+            val result = DevPluginReloader.reload(pluginId, stagingRoot)
+            assertTrue(result.isFailure, "Reload must fail when manager 2 fails v2 install")
+
+            assertRestoredToV1(manager1, pluginId, v1Jar)
+            assertRestoredToV1(manager2, pluginId, v1Jar)
+        }
+
+    @Test
     fun `hot reload failure in second manager restores disabled prior jar in first manager with wasEnabled false`() =
         runBlocking {
             val pluginId = "com.example.disabled.rollback"
             val stagingRoot = DevPluginArtifacts.stagingRoot()
             val v1Jar = createDevTestJar(stagingRoot, pluginId, "v1000", "1.0.0")
-            val v2Jar = createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
 
+            val dummyContext = TestPluginContext()
             val manager1 = createManager()
-            val manager2 = createManager()
+            var manager2FailV2Install = false
+            val manager2 =
+                createManager { _, _ ->
+                    if (manager2FailV2Install) {
+                        manager2FailV2Install = false
+                        error("Simulated v2 install failure on manager 2")
+                    }
+                    dummyContext
+                }
 
-            // 1. Manager 1 and Manager 2 start with v1.jar installed and DISABLED
             val res1 = manager1.installPlugin(v1Jar.absolutePath, enabled = false)
             assertTrue(res1.isSuccess, "Manager 1 must load v1.jar successfully")
             val res2 = manager2.installPlugin(v1Jar.absolutePath, enabled = false)
@@ -309,31 +270,146 @@ class DevPluginRollbackTest {
             assertEquals(PluginState.DISABLED, manager1.getPluginInfo(pluginId)!!.state)
             assertFalse(manager1.getPluginInfo(pluginId)!!.enabled)
 
-            // 2. Capture prior states before reload cycle
-            val priorStates =
-                listOf(
-                    capturePriorState(manager1, pluginId),
-                    capturePriorState(manager2, pluginId),
-                )
-            assertFalse(priorStates[0].wasLoaded, "Disabled plugin wasLoaded must be false")
-            assertFalse(priorStates[0].wasEnabled, "Disabled plugin wasEnabled must be false")
+            createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
+            manager2FailV2Install = true
 
-            // 3. Simulate reload progression:
-            // Manager 1 unloads v1 and installs v2.jar
-            manager1.uninstallPlugin(pluginId, force = false, waitForGC = false)
-            val v2InstallResult = manager1.installPlugin(v2Jar.absolutePath, enabled = false)
-            assertTrue(v2InstallResult.isSuccess, "Manager 1 must succeed installing v2.jar")
+            // Drive through public DevPluginReloader.reload
+            val result = DevPluginReloader.reload(pluginId, stagingRoot)
+            assertTrue(result.isFailure, "Reload must fail when manager 2 fails v2 install")
 
-            // Manager 2 unloads v1, but fails to install v2.jar
-            manager2.uninstallPlugin(pluginId, force = false, waitForGC = false)
-            assertNull(manager2.getPluginInfo(pluginId))
-
-            // 4. Trigger symmetric rollback across managers
-            DevPluginReloader.rollbackManagers(pluginId, priorStates)
-
-            // 5. Assert Manager 1 and Manager 2 uninstalled v2 and restored v1 in DISABLED state
             assertRestoredToV1Disabled(manager1, pluginId, v1Jar)
             assertRestoredToV1Disabled(manager2, pluginId, v1Jar)
+        }
+
+    @Test
+    fun `reload where manager 1 unloads and manager 2 late-refuses unload leaves manager 2 untouched and restores manager 1`() =
+        runBlocking {
+            val pluginId = "com.example.laterefusal"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            val v1Jar = createDevTestJar(stagingRoot, pluginId, "v1000", "1.0.0")
+
+            val manager1 = createManager()
+            val manager2 = createManager()
+
+            val res1 = manager1.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res1.isSuccess, "Manager 1 must install v1.jar")
+            val res2 = manager2.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res2.isSuccess, "Manager 2 must install v1.jar")
+
+            val initialManager2Info = manager2.getPluginInfo(pluginId)
+            assertNotNull(initialManager2Info)
+
+            var manager1Unloaded = false
+            manager1.registerUnloadAware(
+                object : PluginUnloadAware {
+                    override fun checkCanUnload(pluginId: String): CanUnloadResult = CanUnloadResult.Ok
+
+                    override fun prepareForUnload(pluginId: String) {
+                        manager1Unloaded = true
+                    }
+                },
+            )
+            manager2.registerUnloadAware(
+                object : PluginUnloadAware {
+                    override fun checkCanUnload(pluginId: String): CanUnloadResult =
+                        if (!manager1Unloaded) {
+                            CanUnloadResult.Ok
+                        } else {
+                            CanUnloadResult.NotAllowed(listOf("Late refusal from manager 2"))
+                        }
+
+                    override fun prepareForUnload(pluginId: String) {}
+                },
+            )
+
+            createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
+
+            val result = DevPluginReloader.reload(pluginId, stagingRoot)
+            assertTrue(result.isFailure, "Reload must fail when manager 2 refuses unload")
+
+            // Manager 1 had unloaded, so rollback cleanly restores its prior v1.jar
+            assertRestoredToV1(manager1, pluginId, v1Jar)
+
+            // Manager 2 refused unload, so it was never modified; rollback leaves it completely untouched
+            assertRestoredToV1(manager2, pluginId, v1Jar)
+            val currentManager2Info = manager2.getPluginInfo(pluginId)
+            assertNotNull(currentManager2Info)
+            assertEquals(
+                initialManager2Info.loadedAt,
+                currentManager2Info.loadedAt,
+                "Manager 2 was untouched and must retain its exact original loaded instance",
+            )
+        }
+
+    @Test
+    fun `startup fallback loads store jar when staged dev jar fails registration`() =
+        runBlocking {
+            val pluginId = "com.example.startup.fallback"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            val storeDir = tempDir.resolve("store-builds").toFile().apply { mkdirs() }
+            val storeJar = File(storeDir, "$pluginId.jar")
+
+            val classEntryPath = ValidatorTestFixturePlugin::class.java.name.replace('.', '/') + ".class"
+            val classBytes =
+                ValidatorTestFixturePlugin::class.java.classLoader
+                    .getResourceAsStream(classEntryPath)!!
+                    .readBytes()
+            val storeManifest =
+                """
+                {
+                  "manifestVersion": 1,
+                  "pluginId": "$pluginId",
+                  "displayName": "Store Build 1.0.0",
+                  "version": "1.0.0",
+                  "apiVersion": "1.0.0",
+                  "mainClass": "${ValidatorTestFixturePlugin::class.java.name}"
+                }
+                """.trimIndent().toByteArray(Charsets.UTF_8)
+            createJar(
+                storeJar,
+                mapOf(
+                    "META-INF/boss-plugin/plugin.json" to storeManifest,
+                    classEntryPath to classBytes,
+                ),
+            )
+
+            // Create a dev jar that passes archive and manifest validation, but points to a non-existent mainClass
+            createDevTestJar(
+                stagingRoot = stagingRoot,
+                pluginId = pluginId,
+                versionDir = "v2000",
+                version = "2.0.0",
+                mainClass = "non.existent.BrokenPluginMain",
+                includeMainClassBytecode = false,
+            )
+
+            val manager = createManager()
+            val storeEntry =
+                PluginPersistence.InstalledPluginEntry(
+                    pluginId = pluginId,
+                    jarPath = storeJar.absolutePath,
+                    enabled = true,
+                )
+
+            val results =
+                PluginStoreSetup.loadPersistedPluginEntries(
+                    dynamicPluginManager = manager,
+                    persistedPlugins = listOf(storeEntry),
+                    devRoot = stagingRoot,
+                )
+
+            val pluginResult = results[pluginId]
+            assertNotNull(pluginResult, "Must have a result for plugin")
+            assertTrue(
+                pluginResult.isSuccess,
+                "Plugin must successfully fall back to store build: ${pluginResult.exceptionOrNull()}",
+            )
+
+            val loadedInfo = manager.getPluginInfo(pluginId)
+            assertNotNull(loadedInfo, "Plugin must be loaded in manager")
+            assertEquals(storeJar.canonicalPath, File(loadedInfo.jarPath).canonicalPath, "Must load store jar path")
+            assertEquals(PluginState.LOADED, loadedInfo.state, "Fallback plugin must be LOADED")
+            assertEquals("1.0.0", loadedInfo.manifest.version, "Must be on store version 1.0.0")
         }
 
     @Test

@@ -4,6 +4,7 @@ import ai.rever.boss.components.plugin.DynamicPluginManager
 import ai.rever.boss.components.plugin.HotReloadPolicy
 import ai.rever.boss.plugin.api.CanUnloadResult
 import ai.rever.boss.plugin.api.PluginState
+import ai.rever.boss.plugin.loader.PluginUnloadException
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.Dispatchers
@@ -72,11 +73,17 @@ object DevPluginReloader {
                     }
 
                 preflightCheck(pluginId, activeManagers)
+                val modifiedManagers = mutableSetOf<DynamicPluginManager>()
                 try {
-                    unloadManagers(pluginId, activeManagers)
-                    installManagers(pluginId, stagedJar, activeManagers, priorStates)
+                    unloadManagers(pluginId, activeManagers, modifiedManagers)
+                    installManagers(pluginId, stagedJar, activeManagers, priorStates, modifiedManagers)
                 } catch (e: Exception) {
-                    rollbackManagers(pluginId, priorStates)
+                    val rollbackErrors = rollbackManagers(pluginId, priorStates, modifiedManagers)
+                    if (rollbackErrors.isNotEmpty()) {
+                        rollbackErrors.values.forEach { rollbackError ->
+                            e.addSuppressed(rollbackError)
+                        }
+                    }
                     throw e
                 }
                 pruneStaging(pluginId, devRoot)
@@ -99,39 +106,76 @@ object DevPluginReloader {
     internal suspend fun rollbackManagers(
         pluginId: String,
         priorStates: List<PriorManagerState>,
-    ) {
+        modifiedManagers: Set<DynamicPluginManager> = priorStates.map { it.manager }.toSet(),
+    ): Map<DynamicPluginManager, Throwable> {
+        val targets = priorStates.filter { it.manager in modifiedManagers }
         logger.warn(
             LogCategory.SYSTEM,
-            "Rolling back dev plugin reload across managers",
-            mapOf("pluginId" to pluginId, "managersCount" to priorStates.size),
+            "Rolling back dev plugin reload across modified managers",
+            mapOf("pluginId" to pluginId, "managersCount" to targets.size),
         )
-        for (priorState in priorStates) {
-            rollbackSingleManager(pluginId, priorState)
+        val rollbackErrors = mutableMapOf<DynamicPluginManager, Throwable>()
+        for (priorState in targets) {
+            val outcome = rollbackSingleManager(pluginId, priorState)
+            outcome.exceptionOrNull()?.let { error ->
+                rollbackErrors[priorState.manager] = error
+            }
         }
+        return rollbackErrors
     }
 
     private suspend fun rollbackSingleManager(
         pluginId: String,
         priorState: PriorManagerState,
-    ) {
-        try {
+    ): Result<Unit> =
+        runCatching {
             val hasValidPriorJar =
                 priorState.priorJarPath != null &&
                     File(priorState.priorJarPath).exists()
             if (hasValidPriorJar) {
-                // Hot-reload case: reinstall the prior working JAR with previous enabled state
-                if (priorState.manager.getPluginInfo(pluginId) != null) {
+                // Hot-reload case: reinstall the prior working JAR with previous enabled state.
+                // Always force-uninstall any existing or partially loaded instance first.
+                val uninstallResult =
                     priorState.manager.uninstallPlugin(pluginId, force = true, waitForGC = false)
+                if (uninstallResult.isFailure) {
+                    val error = uninstallResult.exceptionOrNull()
+                    val isNotFound =
+                        (error is PluginUnloadException && error.message?.contains("Plugin not found") == true) ||
+                            error?.message?.contains("Plugin not found") == true
+                    if (!isNotFound) {
+                        val message = "Failed to force-uninstall plugin $pluginId during rollback: ${error?.message}"
+                        logger.error(LogCategory.SYSTEM, message, mapOf("pluginId" to pluginId), error)
+                        throw IllegalStateException(message, error)
+                    }
                 }
-                priorState.manager.installPlugin(priorState.priorJarPath, enabled = priorState.wasEnabled)
+                val installResult =
+                    priorState.manager.installPlugin(priorState.priorJarPath, enabled = priorState.wasEnabled)
+                if (installResult.isFailure) {
+                    val error = installResult.exceptionOrNull()
+                    val message =
+                        "Failed to reinstall prior JAR ${priorState.priorJarPath} during rollback: ${error?.message}"
+                    logger.error(LogCategory.SYSTEM, message, mapOf("pluginId" to pluginId), error)
+                    throw IllegalStateException(message, error)
+                }
             } else {
                 // First link case: was newly installed during this reload cycle;
-                // uninstall it to restore clean initial state
-                if (priorState.manager.getPluginInfo(pluginId) != null) {
+                // uninstall it to restore clean initial state.
+                val uninstallResult =
                     priorState.manager.uninstallPlugin(pluginId, force = true, waitForGC = false)
+                if (uninstallResult.isFailure) {
+                    val error = uninstallResult.exceptionOrNull()
+                    val isNotFound =
+                        (error is PluginUnloadException && error.message?.contains("Plugin not found") == true) ||
+                            error?.message?.contains("Plugin not found") == true
+                    if (!isNotFound) {
+                        val message =
+                            "Failed to clean up newly installed plugin $pluginId during rollback: ${error?.message}"
+                        logger.error(LogCategory.SYSTEM, message, mapOf("pluginId" to pluginId), error)
+                        throw IllegalStateException(message, error)
+                    }
                 }
             }
-        } catch (e: Exception) {
+        }.onFailure { e ->
             logger.error(
                 LogCategory.SYSTEM,
                 "Failed to rollback plugin $pluginId on manager",
@@ -139,7 +183,6 @@ object DevPluginReloader {
                 e,
             )
         }
-    }
 
     private suspend fun preflightCheck(
         pluginId: String,
@@ -165,6 +208,7 @@ object DevPluginReloader {
     private suspend fun unloadManagers(
         pluginId: String,
         managers: List<DynamicPluginManager>,
+        modifiedManagers: MutableSet<DynamicPluginManager>,
     ) {
         for (manager in managers) {
             if (manager.getPluginInfo(pluginId) != null) {
@@ -175,6 +219,7 @@ object DevPluginReloader {
                     logger.error(LogCategory.SYSTEM, message, mapOf("pluginId" to pluginId), error)
                     throw IllegalStateException(message, error)
                 }
+                modifiedManagers.add(manager)
             }
         }
     }
@@ -184,9 +229,11 @@ object DevPluginReloader {
         stagedJar: File,
         managers: List<DynamicPluginManager>,
         priorStates: List<PriorManagerState>,
+        modifiedManagers: MutableSet<DynamicPluginManager>,
     ) {
         val priorByManager = priorStates.associateBy { it.manager }
         for (manager in managers) {
+            modifiedManagers.add(manager)
             val targetEnabled = priorByManager[manager]?.wasEnabled ?: true
             val installResult = manager.installPlugin(stagedJar.absolutePath, enabled = targetEnabled)
             val installed = installResult.getOrNull()

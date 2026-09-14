@@ -1,5 +1,7 @@
 package ai.rever.boss.plugin
 
+import ai.rever.boss.components.plugin.DynamicPluginInfo
+import ai.rever.boss.components.plugin.DynamicPluginManager
 import ai.rever.boss.components.plugin.HotReloadPolicy
 import ai.rever.boss.components.plugin.PersistedPluginEntry
 import ai.rever.boss.config.GitHubConfig
@@ -1727,16 +1729,12 @@ object PluginStoreSetup {
             ),
         )
 
-        val entries =
-            persistedPlugins.map { entry ->
-                PersistedPluginEntry(
-                    pluginId = entry.pluginId,
-                    jarPath = resolvePersistedEntryPath(entry),
-                    enabled = entry.enabled,
-                )
-            }
-
-        val persistedResults = dynamicPluginManager.loadPersistedPlugins(entries)
+        val persistedResults =
+            loadPersistedPluginEntries(
+                dynamicPluginManager = dynamicPluginManager,
+                persistedPlugins = persistedPlugins,
+                devRoot = DevPluginArtifacts.stagingRoot(),
+            )
         results.putAll(persistedResults)
 
         // Repoint installed.json at what actually loaded: a stale persisted
@@ -1783,11 +1781,77 @@ object PluginStoreSetup {
         return results
     }
 
-    private fun resolvePersistedEntryPath(entry: PluginPersistence.InstalledPluginEntry): String {
+    internal suspend fun loadPersistedPluginEntries(
+        dynamicPluginManager: DynamicPluginManager,
+        persistedPlugins: List<PluginPersistence.InstalledPluginEntry>,
+        devRoot: File = DevPluginArtifacts.stagingRoot(),
+    ): Map<String, Result<DynamicPluginInfo>> {
+        val entries =
+            persistedPlugins.map { entry ->
+                PersistedPluginEntry(
+                    pluginId = entry.pluginId,
+                    jarPath = resolvePersistedEntryPath(entry, devRoot),
+                    enabled = entry.enabled,
+                )
+            }
+
+        val initialResults = dynamicPluginManager.loadPersistedPlugins(entries)
+        val finalResults = initialResults.toMutableMap()
+        val persistedById = persistedPlugins.associateBy { it.pluginId }
+
+        for ((pluginId, result) in initialResults) {
+            if (result.isFailure) {
+                val entry = persistedById[pluginId] ?: continue
+                val attemptedPath = entries.firstOrNull { it.pluginId == pluginId }?.jarPath
+                val isDevBuildSwap =
+                    attemptedPath != null &&
+                        attemptedPath != entry.jarPath &&
+                        DevPluginArtifacts.isDevPluginJar(File(attemptedPath))
+                val storeJar = File(entry.jarPath)
+                if (isDevBuildSwap && storeJar.exists()) {
+                    val devError = result.exceptionOrNull()
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "Dev plugin failed to load at startup; falling back to store build",
+                        mapOf(
+                            "pluginId" to pluginId,
+                            "devJarPath" to attemptedPath,
+                            "storeJarPath" to entry.jarPath,
+                            "error" to (devError?.message ?: "unknown"),
+                        ),
+                        devError,
+                    )
+                    val fallbackResult =
+                        dynamicPluginManager.installPlugin(entry.jarPath, enabled = entry.enabled)
+                    finalResults[pluginId] = fallbackResult
+                    if (fallbackResult.isSuccess) {
+                        logger.info(
+                            LogCategory.SYSTEM,
+                            "Successfully fell back to store build for plugin $pluginId",
+                            mapOf("pluginId" to pluginId, "storeJarPath" to entry.jarPath),
+                        )
+                    } else {
+                        logger.error(
+                            LogCategory.SYSTEM,
+                            "Fallback to store build also failed for plugin $pluginId",
+                            mapOf("pluginId" to pluginId, "storeJarPath" to entry.jarPath),
+                            fallbackResult.exceptionOrNull(),
+                        )
+                    }
+                }
+            }
+        }
+        return finalResults
+    }
+
+    internal fun resolvePersistedEntryPath(
+        entry: PluginPersistence.InstalledPluginEntry,
+        devRoot: File = DevPluginArtifacts.stagingRoot(),
+    ): String {
         val devJar =
             DevPluginArtifacts.findActiveDevJar(
                 entry.pluginId,
-                File(_pluginDir, "dev"),
+                devRoot,
             )
         if (devJar != null && devJar.exists() && !isProtectedFromDevSwap(entry.pluginId)) {
             if (DevPluginArtifacts.isValidDevJar(devJar, entry.pluginId)) {

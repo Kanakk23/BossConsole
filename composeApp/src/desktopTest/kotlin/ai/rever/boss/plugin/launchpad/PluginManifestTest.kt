@@ -288,6 +288,30 @@ class PluginManifestTest {
     }
 
     @Test
+    fun `DefaultPlugin deduplicateJars drops lone dev JAR claiming protected system plugin`() {
+        val stagingBase = File(tempDir.toFile(), "lone-protected-staging-root")
+        stagingBase.mkdirs()
+        DevPluginArtifacts.stagingRootOverride = stagingBase
+
+        try {
+            val versionDir = File(stagingBase, "protected-system-plugin/v1000")
+            versionDir.mkdirs()
+            val versionJar = File(versionDir, "protected-system-plugin.jar")
+            writeSyntheticJar(versionJar, "protected-system-plugin")
+            versionJar.setLastModified(5000L)
+
+            // A lone dev JAR claiming a protected plugin ID must be dropped immediately before grouping
+            val deduplicated =
+                DefaultPlugin.deduplicateJars(listOf(versionJar)) { pluginId ->
+                    pluginId == "protected-system-plugin"
+                }
+            assertTrue(deduplicated.isEmpty(), "Lone dev JAR claiming protected plugin ID must be dropped")
+        } finally {
+            DevPluginArtifacts.stagingRootOverride = null
+        }
+    }
+
+    @Test
     fun `extractPluginIdFromManifestText reads pluginId with deps preceding it`() {
         val manifestWithDepsFirst =
             """

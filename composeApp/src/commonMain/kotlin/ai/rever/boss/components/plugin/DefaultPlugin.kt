@@ -211,7 +211,10 @@ class DefaultPlugin(
             isProtectedPredicate: (String) -> Boolean = { false },
         ): List<File> =
             jars
-                .groupBy { extractPluginId(it) }
+                .filterNot { file ->
+                    DevPluginArtifacts.isDevPluginJar(file) &&
+                        isProtectedPredicate(extractPluginId(file))
+                }.groupBy { extractPluginId(it) }
                 .mapValues { (pluginId, group) ->
                     group.maxByOrNull { file ->
                         val isDev =
