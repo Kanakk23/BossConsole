@@ -19,6 +19,7 @@ import ai.rever.boss.components.dialogs.TopOfMindDialog
 import ai.rever.boss.components.events.DashboardEventBus
 import ai.rever.boss.components.events.FileEventBus
 import ai.rever.boss.components.events.PanelEventBus
+import ai.rever.boss.components.events.TabEventBus
 import ai.rever.boss.components.plugin.DependentRestartDeclinedException
 import ai.rever.boss.components.plugin.DependentRestartDialog
 import ai.rever.boss.components.plugin.DynamicPluginManager
@@ -27,6 +28,7 @@ import ai.rever.boss.components.plugin.MissingHandlerPluginDialog
 import ai.rever.boss.components.plugin.MissingHandlerPluginEventBus
 import ai.rever.boss.components.plugin.PanelIds
 import ai.rever.boss.components.plugin.PluginDependencyEventBus
+import ai.rever.boss.components.plugin.PluginHealthCenterDialog
 import ai.rever.boss.components.plugin.PluginLoadGateHost
 import ai.rever.boss.components.plugin.PluginLoadRemedyAccess
 import ai.rever.boss.components.plugin.PluginStoreVersionBridge
@@ -52,6 +54,7 @@ import ai.rever.boss.mcp.McpToolRegistryImpl
 import ai.rever.boss.platform.rememberDirectoryPicker
 import ai.rever.boss.plugin.api.Panel.Companion.left
 import ai.rever.boss.plugin.api.Panel.Companion.top
+import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.api.TabInfo
 import ai.rever.boss.plugin.sandbox.notification.ToastMessage
 import ai.rever.boss.plugin.sandbox.notification.ToastType
@@ -68,7 +71,10 @@ import ai.rever.boss.search.SearchSources
 import ai.rever.boss.search.ToolSearchRecord
 import ai.rever.boss.services.auth.UserDataStorage
 import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
+import ai.rever.boss.settings.MICROKERNEL_MODE_CONFIRMATION_MESSAGE
+import ai.rever.boss.settings.MicrokernelModePreference
 import ai.rever.boss.terminal.TerminalLinkSettingsManager
+import ai.rever.boss.utils.WindowFocusManager
 import ai.rever.boss.utils.extractFileName
 import ai.rever.boss.utils.logging.LogCategory
 import ai.rever.boss.window.MenuActionsHandler
@@ -462,6 +468,14 @@ internal fun BossAppDialogs(state: BossAppState) {
         )
     }
 
+    if (state.showPluginHealthCenter) {
+        PluginHealthCenterDialog(
+            manager = state.currentDefaultPlugin?.dynamicPluginManager,
+            delegate = state.currentDefaultPlugin?.getPluginAPI(PluginLoaderDelegate::class.java),
+            onDismiss = { state.showPluginHealthCenter = false },
+        )
+    }
+
     if (state.showGlobalSearchDialog) {
         // Offer THIS window's tools to the search, for exactly as long as its dialog is open.
         //
@@ -515,6 +529,20 @@ internal fun BossAppDialogs(state: BossAppState) {
                     coroutineScope.launch {
                         delay(100)
                         splitViewState.selectTabInPanel(tabId, panelId)
+                    }
+                } else {
+                    // Returns false when the window closed while the dialog was open. The bus
+                    // has no replay, so an emit then would go nowhere - log it instead.
+                    if (WindowFocusManager.focusWindow(targetWindowId)) {
+                        coroutineScope.launch {
+                            TabEventBus.selectTab(targetWindowId, panelId, tabId, sourceWindowId = windowId)
+                        }
+                    } else {
+                        logger.warn(
+                            LogCategory.UI,
+                            "Cross-window tab select dropped: target window is no longer open",
+                            mapOf("targetWindowId" to targetWindowId, "tabId" to tabId),
+                        )
                     }
                 }
                 state.focusRequester.requestFocus()
@@ -782,15 +810,15 @@ internal fun BossAppDialogs(state: BossAppState) {
     // `boss` invocation. `boss://` is registered with the OS, so this request
     // carries no evidence of who made it — the operator says whether it runs,
     // and sees the exact text first.
-    state.pendingTerminalCommand?.let { pending ->
-        ConfirmationDialog(
-            title = "Run this command?",
-            message =
-                "BOSS was asked from outside the app to run a command in a new terminal tab. " +
-                    "It has not run. Confirm only if you recognise it:\n\n${pending.command}",
-            confirmText = "Run command",
-            onDismiss = { state.pendingTerminalCommand = null },
-            onConfirm = {
+    state.terminalCommandApprovals.current?.let { pending ->
+        TerminalCommandApprovalDialog(
+            request = pending,
+            pendingCount = state.terminalCommandApprovals.size,
+            onDismiss = { state.terminalCommandApprovals.consume(pending) },
+            onConfirm = confirm@{
+                // Consume before execution; the dialog also calls onDismiss after onConfirm.
+                // A stale callback must never execute or dismiss the next request.
+                if (!state.terminalCommandApprovals.consume(pending)) return@confirm
                 logger.info(
                     LogCategory.TERMINAL,
                     "Operator confirmed an externally requested terminal command",
@@ -808,11 +836,33 @@ internal fun BossAppDialogs(state: BossAppState) {
         McpApprovalDialog(
             request = approvalRequest,
             pendingQueueSize = pendingList.size,
-            onApprove = { trustForSession ->
-                McpToolRegistryImpl.approvalBus.approve(approvalRequest.id, trustForSession)
+            onApprove = { trustForSession, persistPolicy, trustProvider ->
+                McpToolRegistryImpl.approvalBus.approve(
+                    approvalRequest.id,
+                    trustForSession,
+                    persistPolicy,
+                    trustProvider,
+                )
             },
-            onDeny = { reason ->
-                McpToolRegistryImpl.approvalBus.deny(approvalRequest.id, reason)
+            onDeny = { reason, persistPolicy ->
+                McpToolRegistryImpl.approvalBus.deny(approvalRequest.id, reason, persistPolicy)
+            },
+        )
+    }
+
+    // Application-menu request to enable experimental Microkernel Mode (BossConsole#472) - the
+    // Settings entry point shows its own copy of this dialog locally, since that composable
+    // already owns a scope to hold the pending/error state in.
+    if (state.microkernelModeConfirmation.pending) {
+        ConfirmationDialog(
+            title = "Enable experimental Microkernel Mode?",
+            message = MICROKERNEL_MODE_CONFIRMATION_MESSAGE,
+            confirmText = "Enable experimental mode",
+            onDismiss = { state.microkernelModeConfirmation.cancel() },
+            onConfirm = {
+                state.microkernelModeConfirmation.confirm {
+                    coroutineScope.launch { MicrokernelModePreference.save(true) }
+                }
             },
         )
     }
@@ -916,7 +966,9 @@ internal fun BossAppDialogs(state: BossAppState) {
                                 state.currentDefaultPlugin?.pluginToastState?.show(
                                     ToastMessage(
                                         type = ToastType.SUCCESS,
-                                        title = if (plan.order.size > 1) "Plugins installed" else "Plugin installed",
+// Neutral for a plan, because an element that became present between
+                                        // consent and install is a no-op success and "Plugins" would overstate.
+                                        title = if (plan.order.size > 1) "Install complete" else "Plugin installed",
                                         message =
                                             "${prompt.missing.dependentDisplayName} can use it now. " +
                                                 "Relaunch BOSS if a feature still reports it missing.",
