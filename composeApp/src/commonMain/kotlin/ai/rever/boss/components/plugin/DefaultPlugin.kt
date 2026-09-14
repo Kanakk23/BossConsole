@@ -67,6 +67,7 @@ import ai.rever.boss.plugin.api.NotificationProvider
 import ai.rever.boss.plugin.api.PanelRegistry
 import ai.rever.boss.plugin.api.PluginContext
 import ai.rever.boss.plugin.api.PluginSandboxRef
+import ai.rever.boss.plugin.api.PluginState
 import ai.rever.boss.plugin.api.PluginStorageFactory
 import ai.rever.boss.plugin.api.PluginStoreApiKeyProvider
 import ai.rever.boss.plugin.api.ProjectData
@@ -1286,31 +1287,62 @@ class DefaultPlugin(
                         .map { it.jarPath }
                         .toSet()
 
+                val standardJarsById = standardJars.associateBy { extractPluginId(it) }
+
                 for (jarFile in jarFiles) {
-                    installSingleExternalPlugin(manager, jarFile, trackedJarPaths)
+                    val fallbackJar =
+                        if (DevPluginArtifacts.isDevPluginJar(jarFile)) {
+                            standardJarsById[extractPluginId(jarFile)]?.takeIf { it != jarFile }
+                        } else {
+                            null
+                        }
+                    installSingleExternalPlugin(manager, jarFile, trackedJarPaths, fallbackJar)
                 }
             }
     }
 
-    @Suppress("LongMethod")
-    private suspend fun installSingleExternalPlugin(
+    internal suspend fun installSingleExternalPlugin(
         manager: DynamicPluginManager,
         jarFile: File,
         trackedJarPaths: Set<String>,
+        fallbackStandardJar: File? = null,
     ) {
         if (jarFile.absolutePath in trackedJarPaths) return
         try {
             logger.info(
                 LogCategory.SYSTEM,
                 "Installing external plugin",
-                mapOf(
-                    "file" to jarFile.name,
-                ),
+                mapOf("file" to jarFile.name),
             )
 
             val result = manager.installPlugin(jarFile.absolutePath)
+            handleExternalPluginInstallResult(manager, jarFile, result, fallbackStandardJar)
+        } catch (e: Exception) {
+            logger.error(
+                LogCategory.SYSTEM,
+                "Exception loading external plugin",
+                mapOf("file" to jarFile.name),
+                e,
+            )
+        }
+    }
 
-            if (result.isSuccess) {
+    private suspend fun handleExternalPluginInstallResult(
+        manager: DynamicPluginManager,
+        jarFile: File,
+        result: Result<DynamicPluginInfo>,
+        fallbackStandardJar: File?,
+    ) {
+        val loadedInfo = result.getOrNull()
+        val isBrokenDev =
+            DevPluginArtifacts.isDevPluginJar(jarFile) &&
+                loadedInfo?.state == PluginState.DISABLED &&
+                manager.canAccess(loadedInfo.manifest)
+        val isAlreadyLoaded =
+            result.exceptionOrNull()?.message?.startsWith(PluginLoadException.ALREADY_LOADED_PREFIX) == true
+
+        when {
+            result.isSuccess && !isBrokenDev -> {
                 val info = result.getOrThrow()
                 logger.info(
                     LogCategory.SYSTEM,
@@ -1321,37 +1353,82 @@ class DefaultPlugin(
                         "displayName" to info.manifest.displayName,
                     ),
                 )
-            } else if (result.exceptionOrNull()?.message?.startsWith(PluginLoadException.ALREADY_LOADED_PREFIX) == true) {
-                // A second jar for a plugin that's already running — a
-                // stale old version left in the directory, not a failure.
+            }
+
+            isAlreadyLoaded -> {
                 logger.info(
                     LogCategory.SYSTEM,
                     "Skipping duplicate jar for already-loaded plugin",
-                    mapOf(
-                        "file" to jarFile.name,
-                    ),
+                    mapOf("file" to jarFile.name),
                 )
-            } else {
+            }
+
+            attemptFallbackOnDevFailure(manager, jarFile, fallbackStandardJar, result) -> {
+                // Fallback attempt was executed and logged
+            }
+
+            else -> {
                 logger.error(
                     LogCategory.SYSTEM,
                     "Failed to load external plugin",
                     mapOf(
                         "file" to jarFile.name,
-                        "error" to (result.exceptionOrNull()?.message ?: "unknown"),
+                        "error" to (result.exceptionOrNull()?.message ?: "Dev plugin loaded in DISABLED state"),
                     ),
                 )
             }
-        } catch (e: Exception) {
-            logger.error(
-                LogCategory.SYSTEM,
-                "Exception loading external plugin",
-                mapOf(
-                    "file" to jarFile.name,
-                ),
-                e,
-            )
         }
     }
+
+    private suspend fun attemptFallbackOnDevFailure(
+        manager: DynamicPluginManager,
+        jarFile: File,
+        fallbackStandardJar: File?,
+        devResult: Result<DynamicPluginInfo>,
+    ): Boolean =
+        if (!DevPluginArtifacts.isDevPluginJar(jarFile) ||
+            fallbackStandardJar == null ||
+            !fallbackStandardJar.exists()
+        ) {
+            false
+        } else {
+            val devError =
+                devResult.exceptionOrNull()?.message
+                    ?: devResult.getOrNull()?.errorMessage
+                    ?: "Dev plugin loaded in DISABLED state"
+            logger.warn(
+                LogCategory.SYSTEM,
+                "External dev plugin failed to load; falling back to standard build",
+                mapOf(
+                    "devJar" to jarFile.name,
+                    "fallback" to fallbackStandardJar.name,
+                    "error" to devError,
+                ),
+            )
+            val fallbackResult = manager.installPlugin(fallbackStandardJar.absolutePath)
+            if (fallbackResult.isSuccess) {
+                val info = fallbackResult.getOrThrow()
+                logger.info(
+                    LogCategory.SYSTEM,
+                    "External standard plugin loaded successfully as fallback",
+                    mapOf(
+                        "pluginId" to info.manifest.pluginId,
+                        "version" to info.manifest.version,
+                        "displayName" to info.manifest.displayName,
+                    ),
+                )
+            } else {
+                logger.error(
+                    LogCategory.SYSTEM,
+                    "Fallback to standard build also failed for external plugin",
+                    mapOf(
+                        "file" to fallbackStandardJar.name,
+                        "error" to (fallbackResult.exceptionOrNull()?.message ?: "unknown"),
+                    ),
+                )
+            }
+            true
+        }
 
     // ============================================================
     // REMOVED BUNDLED PLUGINS

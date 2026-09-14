@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin.launchpad
 
 import ai.rever.boss.cli.plugin.ValidatorTestFixturePlugin
+import ai.rever.boss.components.plugin.DefaultPlugin
 import ai.rever.boss.components.plugin.DynamicPluginInfo
 import ai.rever.boss.components.plugin.DynamicPluginManager
 import ai.rever.boss.plugin.PluginPersistence
@@ -592,6 +593,52 @@ class DevPluginRollbackTest {
             assertEquals(storeJar.canonicalPath, File(loadedInfo.jarPath).canonicalPath)
             assertEquals(PluginState.LOADED, loadedInfo.state)
             assertEquals("1.0.0", loadedInfo.manifest.version)
+        }
+
+    @Test
+    fun `external scan falls back to standard jar on dev failure`() =
+        runBlocking {
+            val pluginId = "com.example.ext.fallback"
+            val pluginDir = tempDir.resolve("ext-plugins").toFile().apply { mkdirs() }
+            val standardJar = File(pluginDir, "$pluginId.jar")
+            createStoreTestJar(standardJar, pluginId, "1.0.0")
+
+            val devRoot = File(pluginDir, "dev").apply { mkdirs() }
+            DevPluginArtifacts.stagingRootOverride = devRoot
+            try {
+                val devJar =
+                    createDevTestJar(
+                        stagingRoot = devRoot,
+                        pluginId = pluginId,
+                        versionDir = "v2000",
+                        version = "2.0.0",
+                        mainClass = "non.existent.BrokenClass",
+                        includeMainClassBytecode = false,
+                    )
+
+                val manager = createManager()
+                val defaultPlugin =
+                    DefaultPlugin(
+                        panelRegistry = PanelRegistry(),
+                        tabRegistry = TabRegistry(),
+                        windowProjectState = null,
+                    )
+
+                defaultPlugin.installSingleExternalPlugin(
+                    manager = manager,
+                    jarFile = devJar,
+                    trackedJarPaths = emptySet(),
+                    fallbackStandardJar = standardJar,
+                )
+
+                val loaded = manager.getPluginInfo(pluginId)
+                assertNotNull(loaded, "Manager must load fallback standard plugin")
+                assertEquals(standardJar.canonicalPath, File(loaded.jarPath).canonicalPath)
+                assertEquals(PluginState.LOADED, loaded.state)
+                assertEquals("1.0.0", loaded.manifest.version)
+            } finally {
+                DevPluginArtifacts.stagingRootOverride = null
+            }
         }
 }
 
