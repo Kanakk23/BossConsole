@@ -358,8 +358,9 @@ fun main(args: Array<String>) {
     ai.rever.boss.components.plugin.DefaultPlugin.Companion.loadPersistedPluginsInternal = { manager ->
         PluginStoreSetup.loadPersistedPlugins(manager)
     }
+    val defaultCheck = ai.rever.boss.components.plugin.DefaultPlugin.Companion.isAuthoritativeSystemPlugin
     ai.rever.boss.components.plugin.DefaultPlugin.Companion.isAuthoritativeSystemPlugin = { pluginId ->
-        PluginStoreSetup.isSystemPluginId(pluginId)
+        defaultCheck(pluginId) || PluginStoreSetup.isSystemPluginId(pluginId)
     }
 
     // Set up single-instance development reload handler

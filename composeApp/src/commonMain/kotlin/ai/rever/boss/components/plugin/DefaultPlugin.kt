@@ -189,8 +189,11 @@ class DefaultPlugin(
          * Authoritative check for protected system plugin IDs when no manager has loaded them yet.
          * Platform-specific desktop initialization sets this to SystemPluginManifestService / PluginStoreSetup.
          */
+        @Volatile
         var isAuthoritativeSystemPlugin: (String) -> Boolean = { pluginId ->
-            pluginId == MicrokernelRuntime.PLUGIN_ID || pluginId == "ai.rever.boss.plugin.api"
+            pluginId == MicrokernelRuntime.PLUGIN_ID ||
+                pluginId.startsWith("ai.rever.boss.system.") ||
+                pluginId == "ai.rever.boss.plugin.api"
         }
 
         internal fun findActiveDevJars(devDir: File): List<File> =

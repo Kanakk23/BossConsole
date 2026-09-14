@@ -104,9 +104,8 @@ object DevPluginReloader {
             throw e
         }
 
-        val priorPaths = priorStates.mapNotNull { it.priorJarPath }.toSet()
-        val preserved = sessionPreservedPaths.computeIfAbsent(pluginId) { ConcurrentHashMap.newKeySet() }
-        preserved.addAll(priorPaths)
+        val priorPaths = priorStates.mapNotNull { it.priorJarPath }
+        recordSessionPreservedPaths(pluginId, priorPaths)
         pruneStaging(pluginId, devRoot, sessionPreservedPaths[pluginId].orEmpty())
 
         logger.info(
@@ -273,6 +272,16 @@ object DevPluginReloader {
                 throw IllegalStateException(message, error)
             }
         }
+    }
+
+    private fun recordSessionPreservedPaths(
+        pluginId: String,
+        paths: Collection<String>,
+    ) {
+        if (paths.isEmpty()) return
+        sessionPreservedPaths
+            .computeIfAbsent(pluginId) { ConcurrentHashMap.newKeySet() }
+            .addAll(paths)
     }
 
     private fun pruneStaging(
