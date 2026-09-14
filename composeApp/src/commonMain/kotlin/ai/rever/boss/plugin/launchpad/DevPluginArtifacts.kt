@@ -34,8 +34,10 @@ object DevPluginArtifacts {
         maxBytes: Int = MAX_MANIFEST_BYTES,
     ): String? =
         try {
-            val bytes = stream.readNBytes(maxBytes + 1)
-            if (bytes.size > maxBytes) null else bytes.toString(Charsets.UTF_8)
+            stream.use { s ->
+                val bytes = s.readNBytes(maxBytes + 1)
+                if (bytes.size > maxBytes) null else bytes.toString(Charsets.UTF_8)
+            }
         } catch (_: Exception) {
             null
         }

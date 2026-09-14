@@ -6,6 +6,7 @@ import ai.rever.boss.components.plugin.HotReloadPolicy
 import ai.rever.boss.components.plugin.PersistedPluginEntry
 import ai.rever.boss.config.GitHubConfig
 import ai.rever.boss.config.SupabaseClientConfig
+import ai.rever.boss.plugin.api.PluginState
 import ai.rever.boss.plugin.launchpad.DevPluginArtifacts
 import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginManifestReader
@@ -1800,16 +1801,26 @@ object PluginStoreSetup {
         val persistedById = persistedPlugins.associateBy { it.pluginId }
 
         for ((pluginId, result) in initialResults) {
-            if (result.isFailure) {
-                val entry = persistedById[pluginId] ?: continue
-                val attemptedPath = entries.firstOrNull { it.pluginId == pluginId }?.jarPath
+            val entry = persistedById[pluginId] ?: continue
+            val attemptedPath = entries.firstOrNull { it.pluginId == pluginId }?.jarPath
+            val isDevSwap = attemptedPath != null && attemptedPath != entry.jarPath
+            val isFailedDevSwap =
+                result.isFailure || (
+                    isDevSwap && entry.enabled && result.getOrNull()?.state == PluginState.DISABLED
+                )
+
+            if (isFailedDevSwap) {
                 val fallbackResult =
                     attemptStoreFallbackOnDevFailure(
                         dynamicPluginManager = dynamicPluginManager,
                         pluginId = pluginId,
                         entry = entry,
                         attemptedPath = attemptedPath,
-                        devError = result.exceptionOrNull(),
+                        devError =
+                            result.exceptionOrNull()
+                                ?: IllegalStateException(
+                                    result.getOrNull()?.errorMessage ?: "Dev plugin loaded in DISABLED state",
+                                ),
                     )
                 if (fallbackResult != null) {
                     finalResults[pluginId] = fallbackResult

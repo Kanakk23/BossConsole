@@ -193,18 +193,30 @@ class DefaultPlugin(
                 ?: jarFile.nameWithoutExtension
 
         private fun readManifestIdFromJar(jarFile: File): String? =
+            if (!jarFile.exists() || jarFile.length() == 0L) {
+                null
+            } else {
+                readManifestText(jarFile)?.let(DevPluginArtifacts::extractPluginIdFromManifestText)
+            }
+
+        private fun readManifestText(jarFile: File): String? =
             try {
                 java.util.jar.JarFile(jarFile).use { jar ->
-                    val entry =
-                        jar.getJarEntry("META-INF/boss-plugin/plugin.json")
-                            ?: jar.getJarEntry("plugin.json")
-                            ?: return null
-                    val text = jar.getInputStream(entry).bufferedReader().use { it.readText() }
-                    DevPluginArtifacts.extractPluginIdFromManifestText(text)
+                    readEntryText(jar)
                 }
             } catch (_: Exception) {
                 null
             }
+
+        private fun readEntryText(jar: java.util.jar.JarFile): String? {
+            val entry =
+                jar.getJarEntry("META-INF/boss-plugin/plugin.json")
+                    ?: jar.getJarEntry("plugin.json")
+                    ?: return null
+            return jar.getInputStream(entry).use { stream ->
+                DevPluginArtifacts.readBoundedUtf8String(stream)
+            }
+        }
 
         internal fun deduplicateJars(
             jars: List<File>,

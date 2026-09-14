@@ -117,7 +117,7 @@ class DevPluginRollbackTest {
                 "META-INF/boss-plugin/plugin.json" to manifest,
             )
         if (includeMainClassBytecode) {
-            val classEntryPath = ValidatorTestFixturePlugin::class.java.name.replace('.', '/') + ".class"
+            val classEntryPath = mainClass.replace('.', '/') + ".class"
             val classBytes =
                 ValidatorTestFixturePlugin::class.java.classLoader
                     .getResourceAsStream(classEntryPath)!!
@@ -513,4 +513,91 @@ class DevPluginRollbackTest {
         assertEquals(1, allDiscovered.size)
         assertEquals(validJar.absolutePath, allDiscovered.first().absolutePath)
     }
+
+    @Test
+    fun `partial install failure on window 1 leaves window 2 untouched`() =
+        runBlocking {
+            val pluginId = "com.example.partial.install"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            val v1Jar = createDevTestJar(stagingRoot, pluginId, "v1000", "1.0.0")
+
+            val dummyContext = TestPluginContext()
+            var manager1FailInstall = false
+            val manager1 =
+                createManager { _, _ ->
+                    if (manager1FailInstall) {
+                        manager1FailInstall = false
+                        error("Simulated v2 install failure on manager 1")
+                    }
+                    dummyContext
+                }
+            val manager2 = createManager()
+
+            val res1 = manager1.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res1.isSuccess, "Manager 1 must install v1.jar")
+            assertNull(manager2.getPluginInfo(pluginId), "Manager 2 must have no plugin")
+
+            createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
+            manager1FailInstall = true
+
+            val result = DevPluginReloader.reload(pluginId, stagingRoot)
+            assertTrue(result.isFailure, "Reload must fail when manager 1 fails install")
+
+            assertRestoredToV1(manager1, pluginId, v1Jar)
+            assertNull(manager2.getPluginInfo(pluginId), "Manager 2 was untouched and remains null")
+        }
+
+    @Test
+    fun `startup fallback recovers store jar on binary incompatibility`() =
+        runBlocking {
+            val pluginId = "com.example.binary.compat"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            val storeDir = tempDir.resolve("store-compat").toFile().apply { mkdirs() }
+            val storeJar = File(storeDir, "$pluginId.jar")
+            createStoreTestJar(storeJar, pluginId, "1.0.0")
+
+            createDevTestJar(
+                stagingRoot = stagingRoot,
+                pluginId = pluginId,
+                versionDir = "v2000",
+                version = "2.0.0",
+                mainClass = IncompatibleBinaryPlugin::class.java.name,
+                includeMainClassBytecode = true,
+            )
+
+            val manager = createManager()
+            val storeEntry =
+                PluginPersistence.InstalledPluginEntry(
+                    pluginId = pluginId,
+                    jarPath = storeJar.absolutePath,
+                    enabled = true,
+                )
+
+            val results =
+                PluginStoreSetup.loadPersistedPluginEntries(
+                    dynamicPluginManager = manager,
+                    persistedPlugins = listOf(storeEntry),
+                    devRoot = stagingRoot,
+                )
+
+            val pluginResult = results[pluginId]
+            assertNotNull(pluginResult, "Must have a result for plugin")
+            assertTrue(
+                pluginResult.isSuccess,
+                "Plugin must fall back to store build on binary incompatibility: ${pluginResult.exceptionOrNull()}",
+            )
+
+            val loadedInfo = manager.getPluginInfo(pluginId)
+            assertNotNull(loadedInfo, "Plugin must be loaded in manager")
+            assertEquals(storeJar.canonicalPath, File(loadedInfo.jarPath).canonicalPath)
+            assertEquals(PluginState.LOADED, loadedInfo.state)
+            assertEquals("1.0.0", loadedInfo.manifest.version)
+        }
+}
+
+class IncompatibleBinaryPlugin : ai.rever.boss.plugin.api.Plugin {
+    override val pluginId = "com.example.binary.compat"
+    override val displayName = "Incompatible Binary Plugin"
+
+    override fun register(context: PluginContext) = throw NoSuchMethodError("simulated binary incompatibility")
 }
