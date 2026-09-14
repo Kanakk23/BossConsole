@@ -115,7 +115,9 @@ object BossLogger {
     private val listenersLock = Any()
 
     /** File logging */
+    @Volatile
     private var logFile: File? = null
+    @Volatile
     private var fileLoggingEnabled = false
 
     /**
@@ -124,6 +126,7 @@ object BossLogger {
      * TRACE means "everything the console gets", which is what [configure] callers had before
      * the threshold existed.
      */
+    @Volatile
     private var fileMinLevel: LogLevel = LogLevel.TRACE
     private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
 

@@ -19,6 +19,7 @@ import ai.rever.boss.components.dialogs.TopOfMindDialog
 import ai.rever.boss.components.events.DashboardEventBus
 import ai.rever.boss.components.events.FileEventBus
 import ai.rever.boss.components.events.PanelEventBus
+import ai.rever.boss.components.events.TabEventBus
 import ai.rever.boss.components.plugin.DependentRestartDeclinedException
 import ai.rever.boss.components.plugin.DependentRestartDialog
 import ai.rever.boss.components.plugin.DynamicPluginManager
@@ -73,6 +74,7 @@ import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
 import ai.rever.boss.settings.MICROKERNEL_MODE_CONFIRMATION_MESSAGE
 import ai.rever.boss.settings.MicrokernelModePreference
 import ai.rever.boss.terminal.TerminalLinkSettingsManager
+import ai.rever.boss.utils.WindowFocusManager
 import ai.rever.boss.utils.extractFileName
 import ai.rever.boss.utils.logging.LogCategory
 import ai.rever.boss.window.MenuActionsHandler
@@ -528,6 +530,20 @@ internal fun BossAppDialogs(state: BossAppState) {
                         delay(100)
                         splitViewState.selectTabInPanel(tabId, panelId)
                     }
+                } else {
+                    // Returns false when the window closed while the dialog was open. The bus
+                    // has no replay, so an emit then would go nowhere - log it instead.
+                    if (WindowFocusManager.focusWindow(targetWindowId)) {
+                        coroutineScope.launch {
+                            TabEventBus.selectTab(targetWindowId, panelId, tabId, sourceWindowId = windowId)
+                        }
+                    } else {
+                        logger.warn(
+                            LogCategory.UI,
+                            "Cross-window tab select dropped: target window is no longer open",
+                            mapOf("targetWindowId" to targetWindowId, "tabId" to tabId),
+                        )
+                    }
                 }
                 state.focusRequester.requestFocus()
             },
@@ -794,15 +810,15 @@ internal fun BossAppDialogs(state: BossAppState) {
     // `boss` invocation. `boss://` is registered with the OS, so this request
     // carries no evidence of who made it — the operator says whether it runs,
     // and sees the exact text first.
-    state.pendingTerminalCommand?.let { pending ->
-        ConfirmationDialog(
-            title = "Run this command?",
-            message =
-                "BOSS was asked from outside the app to run a command in a new terminal tab. " +
-                    "It has not run. Confirm only if you recognise it:\n\n${pending.command}",
-            confirmText = "Run command",
-            onDismiss = { state.pendingTerminalCommand = null },
-            onConfirm = {
+    state.terminalCommandApprovals.current?.let { pending ->
+        TerminalCommandApprovalDialog(
+            request = pending,
+            pendingCount = state.terminalCommandApprovals.size,
+            onDismiss = { state.terminalCommandApprovals.consume(pending) },
+            onConfirm = confirm@{
+                // Consume before execution; the dialog also calls onDismiss after onConfirm.
+                // A stale callback must never execute or dismiss the next request.
+                if (!state.terminalCommandApprovals.consume(pending)) return@confirm
                 logger.info(
                     LogCategory.TERMINAL,
                     "Operator confirmed an externally requested terminal command",
@@ -820,8 +836,13 @@ internal fun BossAppDialogs(state: BossAppState) {
         McpApprovalDialog(
             request = approvalRequest,
             pendingQueueSize = pendingList.size,
-            onApprove = { trustForSession, persistPolicy ->
-                McpToolRegistryImpl.approvalBus.approve(approvalRequest.id, trustForSession, persistPolicy)
+            onApprove = { trustForSession, persistPolicy, trustProvider ->
+                McpToolRegistryImpl.approvalBus.approve(
+                    approvalRequest.id,
+                    trustForSession,
+                    persistPolicy,
+                    trustProvider,
+                )
             },
             onDeny = { reason, persistPolicy ->
                 McpToolRegistryImpl.approvalBus.deny(approvalRequest.id, reason, persistPolicy)
@@ -945,7 +966,7 @@ internal fun BossAppDialogs(state: BossAppState) {
                                 state.currentDefaultPlugin?.pluginToastState?.show(
                                     ToastMessage(
                                         type = ToastType.SUCCESS,
-                                        // Neutral for a plan, because an element that became present between
+// Neutral for a plan, because an element that became present between
                                         // consent and install is a no-op success and "Plugins" would overstate.
                                         title = if (plan.order.size > 1) "Install complete" else "Plugin installed",
                                         message =
