@@ -13,7 +13,7 @@ import java.io.File
 /**
  * Executes dev plugin hot-reload by dispatching unload and install requests directly to DynamicPluginManager.
  */
-@Suppress("ReturnCount", "ThrowsCount")
+@Suppress("ReturnCount", "ThrowsCount", "TooGenericExceptionCaught")
 object DevPluginReloader {
     private val logger = BossLogger.forComponent("DevPluginReloader")
 
@@ -106,27 +106,39 @@ object DevPluginReloader {
             mapOf("pluginId" to pluginId, "managersCount" to priorStates.size),
         )
         for (priorState in priorStates) {
-            try {
-                if (priorState.wasLoaded && priorState.priorJarPath != null && File(priorState.priorJarPath).exists()) {
-                    // Hot-reload case: reinstall the prior working JAR with previous enabled state
-                    if (priorState.manager.getPluginInfo(pluginId) != null) {
-                        priorState.manager.uninstallPlugin(pluginId, force = true, waitForGC = false)
-                    }
-                    priorState.manager.installPlugin(priorState.priorJarPath, enabled = priorState.wasEnabled)
-                } else {
-                    // First link case: was newly installed during this reload cycle; uninstall it to restore clean initial state
-                    if (priorState.manager.getPluginInfo(pluginId) != null) {
-                        priorState.manager.uninstallPlugin(pluginId, force = true, waitForGC = false)
-                    }
+            rollbackSingleManager(pluginId, priorState)
+        }
+    }
+
+    private suspend fun rollbackSingleManager(
+        pluginId: String,
+        priorState: PriorManagerState,
+    ) {
+        try {
+            val hasValidPriorJar =
+                priorState.wasLoaded &&
+                    priorState.priorJarPath != null &&
+                    File(priorState.priorJarPath).exists()
+            if (hasValidPriorJar) {
+                // Hot-reload case: reinstall the prior working JAR with previous enabled state
+                if (priorState.manager.getPluginInfo(pluginId) != null) {
+                    priorState.manager.uninstallPlugin(pluginId, force = true, waitForGC = false)
                 }
-            } catch (e: Exception) {
-                logger.error(
-                    LogCategory.SYSTEM,
-                    "Failed to rollback plugin $pluginId on manager",
-                    mapOf("pluginId" to pluginId),
-                    e,
-                )
+                priorState.manager.installPlugin(priorState.priorJarPath, enabled = priorState.wasEnabled)
+            } else {
+                // First link case: was newly installed during this reload cycle;
+                // uninstall it to restore clean initial state
+                if (priorState.manager.getPluginInfo(pluginId) != null) {
+                    priorState.manager.uninstallPlugin(pluginId, force = true, waitForGC = false)
+                }
             }
+        } catch (e: Exception) {
+            logger.error(
+                LogCategory.SYSTEM,
+                "Failed to rollback plugin $pluginId on manager",
+                mapOf("pluginId" to pluginId),
+                e,
+            )
         }
     }
 

@@ -135,11 +135,16 @@ object HostMeta {
         System.getProperty("boss.plugin.api.version")
             ?: ai.rever.boss.utils.VersionConstants.PLUGIN_API_VERSION
 
-    /** Standard RBAC permission format: dot/dash/underscore-separated alphanumeric tokens (e.g. 'plugins.create', 'secret.read'). */
+    /**
+     * Standard RBAC permission format: dot/dash/underscore-separated alphanumeric tokens
+     * (e.g. 'plugins.create', 'secret.read').
+     */
     val PERMISSION_REGEX: Regex = Regex("""^[a-zA-Z0-9]+([._-][a-zA-Z0-9]+)*$""")
 
-    fun isValidPermissionIdentifier(permission: String): Boolean =
-        permission.isNotBlank() && PERMISSION_REGEX.matches(permission.trim())
+    fun isValidPermissionIdentifier(permission: String): Boolean {
+        val trimmed = permission.trim()
+        return trimmed.isNotEmpty() && PERMISSION_REGEX.matches(trimmed)
+    }
 
     @Deprecated("Permissions in BOSS correspond to dynamic host RBAC permissions rather than a fixed enum.")
     val ALLOWED_PERMISSIONS: Set<String> =
@@ -200,4 +205,5 @@ val launchpadJson =
         isLenient = true
         prettyPrint = true
         encodeDefaults = true
+        explicitNulls = false
     }

@@ -85,7 +85,7 @@ object PluginScaffolder {
 
         // Starter templates are unconstrained by default so any authenticated non-admin developer
         // can load and test them without hitting RBAC permission gating (pluginAccessAllowed).
-        val permissions = emptyList<String>()
+        val requiredPermissions = emptyList<String>()
 
         val mcpTools =
             when (template) {
@@ -116,7 +116,7 @@ object PluginScaffolder {
                 manifestVersion = 1,
                 systemPlugin = false,
                 canUnload = true,
-                requiredPermissions = permissions,
+                requiredPermissions = requiredPermissions,
                 mcpTools = mcpTools,
             )
 

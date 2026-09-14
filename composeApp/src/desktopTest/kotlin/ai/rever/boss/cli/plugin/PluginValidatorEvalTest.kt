@@ -300,7 +300,8 @@ class PluginValidatorEvalTest {
         // Test real RBAC permissions (plugins.create, secret.read)
         val rbacDir = File(tempDir.toFile(), "rbac-perms-dir")
         rbacDir.mkdirs()
-        val rbacManifest = manifest.copy(requiredPermissions = listOf("plugins.create", "secret.read", "api_key.create"))
+        val rbacManifest =
+            manifest.copy(requiredPermissions = listOf("plugins.create", "secret.read", "api_key.create"))
         File(rbacDir, "plugin.json").writeText(launchpadJson.encodeToString(rbacManifest))
         val rbacResult = PluginValidator.validate(rbacDir)
         val rbacCheck = rbacResult.checks.firstOrNull { it.name == "permissions" }
@@ -402,17 +403,16 @@ class PluginValidatorEvalTest {
         assertTrue(result.isValid, "Valid JAR must pass validation without closed zip errors")
         val implementsCheck = result.checks.firstOrNull { it.name == "bytecode-implements-plugin" }
         assertNotNull(implementsCheck)
-        assertTrue(implementsCheck.passed, "Fallback bytecode parser must detect direct Plugin interface implementation")
+        assertTrue(
+            implementsCheck.passed,
+            "Fallback bytecode parser must detect direct Plugin interface implementation",
+        )
     }
 
     @Test
     fun `tests truncated classfile bytes returns false without throwing BufferUnderflowException`() {
-        val truncatedBytes = byteArrayOf(
-            0xCA.toByte(), 0xFE.toByte(), 0xBA.toByte(), 0xBE.toByte(),
-            0, 0, // minor
-            0, 52, // major
-            0, 2, // cp count = 2
-        )
+        val truncatedBytes =
+            byteArrayOf(0xCA.toByte(), 0xFE.toByte(), 0xBA.toByte(), 0xBE.toByte(), 0, 0, 0, 52, 0, 2)
         assertFalse(
             PluginValidator.checkDirectInterfaceImplementation(truncatedBytes),
             "Truncated bytecode must safely return false and not throw BufferUnderflowException",

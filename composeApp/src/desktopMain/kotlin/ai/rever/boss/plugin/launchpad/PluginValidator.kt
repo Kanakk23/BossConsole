@@ -531,7 +531,8 @@ object PluginValidator {
                     },
             )
 
-        // Permissions registry check: permissions correspond to host RBAC permissions (e.g. plugins.create, secret.read)
+        // Permissions registry check: permissions correspond to host RBAC permissions
+        // (e.g. plugins.create, secret.read)
         val permissionsToCheck = manifest.requiredPermissions.ifEmpty { manifest.permissions }
         val invalidPermissions = permissionsToCheck.filter { !HostMeta.isValidPermissionIdentifier(it) }
         val permissionsValid = invalidPermissions.isEmpty()
@@ -545,9 +546,11 @@ object PluginValidator {
                             "Invalid permission format: ${invalidPermissions.joinToString(", ")}. " +
                                 "Permissions must follow RBAC identifier format (e.g. 'plugins.create', 'secret.read')"
                         }
+
                         permissionsToCheck.isEmpty() -> {
                             "Declared permissions list is empty (accessible to all authenticated users)"
                         }
+
                         else -> {
                             "All declared permissions (${permissionsToCheck.size}) follow valid RBAC identifier format"
                         }

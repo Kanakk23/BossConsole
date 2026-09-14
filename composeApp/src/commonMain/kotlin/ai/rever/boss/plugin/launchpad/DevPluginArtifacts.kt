@@ -9,7 +9,7 @@ import java.nio.file.Path
 /**
  * Manages staging directories, version history, and dev JAR discovery for BossConsole plugins.
  */
-@Suppress("ReturnCount", "TooGenericExceptionCaught")
+@Suppress("ReturnCount", "TooGenericExceptionCaught", "TooManyFunctions")
 object DevPluginArtifacts {
     private val logger = BossLogger.forComponent("DevPluginArtifacts")
 
@@ -52,7 +52,10 @@ object DevPluginArtifacts {
         jarFile: File,
         expectedPluginId: String? = null,
     ): Boolean {
-        if (!jarFile.isFile || jarFile.extension != "jar" || jarFile.name.endsWith(".part") || jarFile.length() <= 0) {
+        if (!jarFile.isFile || jarFile.length() <= 0) {
+            return false
+        }
+        if (jarFile.extension != "jar" || jarFile.name.endsWith(".part")) {
             return false
         }
         return try {

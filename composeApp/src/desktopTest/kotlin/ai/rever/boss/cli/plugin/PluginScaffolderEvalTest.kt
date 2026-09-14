@@ -69,11 +69,14 @@ class PluginScaffolderEvalTest {
             assertTrue(gradlewFile.canExecute(), "gradlew must have executable bit set")
 
             // Verify plugin.json content
-            val manifest = launchpadJson.decodeFromString<PluginManifest>(manifestFile.readText())
+            val rawJson = manifestFile.readText()
+            assertTrue(rawJson.contains("\"requiredPermissions\""), "plugin.json must emit 'requiredPermissions' key")
+            assertFalse(rawJson.contains("\"permissions\" : null"), "plugin.json must not emit null legacy permissions")
+            val manifest = launchpadJson.decodeFromString<PluginManifest>(rawJson)
             assertEquals("com.example.test-$tmpl", manifest.id)
             assertEquals("0.1.0", manifest.version)
             assertEquals(HostMeta.CURRENT_API_VERSION, manifest.minApiVersion)
-
+            assertEquals(emptyList(), manifest.requiredPermissions)
             assertTrue(manifest.permissions.isEmpty(), "Templates emit emptyList() by default for open access")
             when (tmpl) {
                 "mcp-tool" -> {
