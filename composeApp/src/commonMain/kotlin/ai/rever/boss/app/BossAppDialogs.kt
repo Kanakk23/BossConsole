@@ -810,15 +810,18 @@ internal fun BossAppDialogs(state: BossAppState) {
     // `boss` invocation. `boss://` is registered with the OS, so this request
     // carries no evidence of who made it — the operator says whether it runs,
     // and sees the exact text first.
-    state.pendingTerminalCommand?.let { pending ->
+    state.terminalCommandApprovals.current?.let { pending ->
         ConfirmationDialog(
             title = "Run this command?",
             message =
                 "BOSS was asked from outside the app to run a command in a new terminal tab. " +
                     "It has not run. Confirm only if you recognise it:\n\n${pending.command}",
             confirmText = "Run command",
-            onDismiss = { state.pendingTerminalCommand = null },
-            onConfirm = {
+            onDismiss = { state.terminalCommandApprovals.consume(pending) },
+            onConfirm = confirm@{
+                // Consume before execution; the dialog also calls onDismiss after onConfirm.
+                // A stale callback must never execute or dismiss the next request.
+                if (!state.terminalCommandApprovals.consume(pending)) return@confirm
                 logger.info(
                     LogCategory.TERMINAL,
                     "Operator confirmed an externally requested terminal command",
@@ -836,8 +839,13 @@ internal fun BossAppDialogs(state: BossAppState) {
         McpApprovalDialog(
             request = approvalRequest,
             pendingQueueSize = pendingList.size,
-            onApprove = { trustForSession, persistPolicy ->
-                McpToolRegistryImpl.approvalBus.approve(approvalRequest.id, trustForSession, persistPolicy)
+            onApprove = { trustForSession, persistPolicy, trustProvider ->
+                McpToolRegistryImpl.approvalBus.approve(
+                    approvalRequest.id,
+                    trustForSession,
+                    persistPolicy,
+                    trustProvider,
+                )
             },
             onDeny = { reason, persistPolicy ->
                 McpToolRegistryImpl.approvalBus.deny(approvalRequest.id, reason, persistPolicy)

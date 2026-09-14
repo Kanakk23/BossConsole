@@ -182,9 +182,8 @@ internal class BossAppState(
     var pendingDependentRestart by
         mutableStateOf<DependentRestartPrompt?>(null)
 
-    // A terminal command that arrived from outside this BOSS invocation and is
-    // waiting for the operator to confirm it. Null whenever nothing is pending.
-    var pendingTerminalCommand by mutableStateOf<PendingTerminalCommand?>(null)
+    // Keep every external request until the operator answers its own prompt.
+    val terminalCommandApprovals = TerminalCommandApprovalQueue()
 
     // An MCP tool execution requested by an AI agent that is suspended waiting
     // for operator approval under an ASK policy.

@@ -150,7 +150,7 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
                         "Holding an externally requested terminal command for confirmation",
                         mapOf("windowId" to windowId),
                     )
-                    state.pendingTerminalCommand = PendingTerminalCommand(command, event.workingDirectory)
+                    state.terminalCommandApprovals.enqueue(PendingTerminalCommand(command, event.workingDirectory))
                 } else {
                     splitViewState.openTerminalInActivePanel(command, event.workingDirectory)
                     DashboardStatsManager.recordTerminalSession()
