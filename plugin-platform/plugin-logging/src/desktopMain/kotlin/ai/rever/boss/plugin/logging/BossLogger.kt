@@ -117,6 +117,7 @@ object BossLogger {
     /** File logging */
     @Volatile
     private var logFile: File? = null
+
     @Volatile
     private var fileLoggingEnabled = false
 
