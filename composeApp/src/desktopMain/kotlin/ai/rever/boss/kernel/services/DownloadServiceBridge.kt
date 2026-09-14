@@ -43,7 +43,7 @@ class DownloadServiceBridge(
                 currentIdentity?.invoke()
                     ?: throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
             provider.downloads.collect { downloads ->
-                // A stream must not retain access after its process token has been revoked.
+                // Revalidate at each emission; an idle subscription remains until emission or cancellation.
                 if (currentIdentity?.invoke() != caller) {
                     throw StatusException(Status.PERMISSION_DENIED.withDescription(NO_IDENTITY))
                 }

@@ -18,9 +18,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 
@@ -84,7 +86,8 @@ fun BoxScope.VerticalTabBarDrawer(
 
     val region = panelRegion ?: return
     val heavyweight = overlayCornerIsHeavyweight()
-    val drawerRegion = region.besideLeadingRail(railWidth)
+    val layoutDirection = LocalLayoutDirection.current
+    val drawerRegion = region.besideLeadingRail(railWidth, layoutDirection)
 
     if (heavyweight) {
         OverlayCorner(
@@ -107,8 +110,8 @@ fun BoxScope.VerticalTabBarDrawer(
                     .align(Alignment.CenterStart)
                     .padding(start = railWidth)
                     .fillMaxHeight(),
-            enter = slideInHorizontally(initialOffsetX = { -it }),
-            exit = slideOutHorizontally(targetOffsetX = { -it }),
+            enter = slideInHorizontally(initialOffsetX = { drawerSlideOffset(it, layoutDirection) }),
+            exit = slideOutHorizontally(targetOffsetX = { drawerSlideOffset(it, layoutDirection) }),
         ) {
             Box(modifier = Modifier.hoverable(hoverSource, enabled = hoverEnabled)) { content() }
         }
@@ -127,10 +130,15 @@ fun BoxScope.VerticalTabBarDrawer(
  * beside the rail). That "wrong but visible" choice is inherited, not handled here, and only
  * bites for a panel narrower than the rail itself.
  */
-internal fun IntRect.besideLeadingRail(railWidth: Dp): IntRect {
-    val railEnd = (left + railWidth.value.roundToInt()).coerceAtMost(right)
-    return copy(left = railEnd)
-}
+internal fun IntRect.besideLeadingRail(
+    railWidth: Dp,
+    layoutDirection: LayoutDirection,
+): IntRect =
+    if (layoutDirection == LayoutDirection.Rtl) {
+        copy(right = (right - railWidth.value.roundToInt()).coerceAtLeast(left))
+    } else {
+        copy(left = (left + railWidth.value.roundToInt()).coerceAtMost(right))
+    }
 
 /**
  * A layout rectangle converted to the dp-relative-to-content-pane form a heavyweight overlay is
@@ -164,3 +172,9 @@ private fun Rect.hasArea(): Boolean {
     val h = height
     return w.isFinite() && h.isFinite() && w > 0f && h > 0f
 }
+
+/** The lightweight drawer slides from its logical start edge, including RTL. */
+internal fun drawerSlideOffset(
+    width: Int,
+    layoutDirection: LayoutDirection,
+): Int = if (layoutDirection == LayoutDirection.Rtl) width else -width

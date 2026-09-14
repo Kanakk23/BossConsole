@@ -264,7 +264,8 @@ class McpPolicyEngine(
      * the caller's pre-check - otherwise a reset landing between the pre-check and the write
      * (BossConsole#542 review) persists a provider-wide grant the reset was supposed to
      * invalidate. All three are optional because this is also called with no tool in mind
-     * (tests, and any future non-approval-flow caller).
+     * (tests, and any future non-approval-flow caller). Supplying [expectedRevocation]
+     * requires [toolName]; without it the guard fails closed and returns false.
      */
     fun setProviderPolicy(
         providerId: String,

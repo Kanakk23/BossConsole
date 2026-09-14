@@ -8,6 +8,20 @@ import kotlin.test.assertTrue
 
 class TerminalCommandApprovalQueueTest {
     @Test
+    fun `flood refuses tail without replacing displayed or queued commands`() {
+        val queue = TerminalCommandApprovalQueue()
+        val accepted = List(TerminalCommandApprovalQueue.MAX_PENDING) { PendingTerminalCommand("echo $it", null) }
+        accepted.forEach { assertTrue(queue.enqueue(it)) }
+        repeat(1000) { assertFalse(queue.enqueue(PendingTerminalCommand("overflow", null))) }
+        accepted.forEach {
+            assertSame(it, queue.current)
+            assertTrue(queue.consume(it))
+        }
+        assertNull(queue.current)
+        assertTrue(queue.enqueue(PendingTerminalCommand("after drain", null)))
+    }
+
+    @Test
     fun `arrival while prompt is open preserves its command and working directory`() {
         val queue = TerminalCommandApprovalQueue()
         val first = PendingTerminalCommand("echo first", "/first")

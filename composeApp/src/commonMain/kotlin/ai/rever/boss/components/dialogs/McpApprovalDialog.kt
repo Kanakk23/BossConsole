@@ -49,7 +49,7 @@ import androidx.compose.ui.window.DialogProperties
  * Interactive dialog prompted when an AI agent attempts to execute a tool
  * governed by an ASK policy.
  *
- * Four scopes an operator can choose, in increasing durability: approve or deny just this one
+* Four scopes an operator can choose, in increasing durability: approve or deny just this one
  * call, trust it for the rest of this session only, or persist a rule to
  * `~/.boss/mcp-tool-policy.json` so the same tool never asks again - across restarts, not just
  * this run. The engine behind the persisted scope ([ai.rever.boss.mcp.McpPolicyEngine

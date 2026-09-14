@@ -84,7 +84,6 @@ internal class BossAppState(
     // --- Dialog visibility --------------------------------------------------
     var showNewTabDialog by mutableStateOf(false)
     var newTabDialogInitialType by mutableStateOf<TabType?>(null)
-    var showTopOfMindDialog by mutableStateOf(false)
     var showGlobalSearchDialog by mutableStateOf(false)
 
     /**
@@ -269,7 +268,7 @@ internal class BossAppState(
  * invocation (see `DeepLinkOrigin`). The command is carried verbatim so the
  * prompt shows exactly what would run.
  */
-internal data class PendingTerminalCommand(
+internal class PendingTerminalCommand(
     val command: String,
     val workingDirectory: String?,
 )

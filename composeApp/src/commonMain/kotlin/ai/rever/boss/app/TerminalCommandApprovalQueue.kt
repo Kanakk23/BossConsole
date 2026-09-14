@@ -9,8 +9,17 @@ internal class TerminalCommandApprovalQueue {
     val current: PendingTerminalCommand?
         get() = requests.firstOrNull()
 
-    fun enqueue(request: PendingTerminalCommand) {
+    val size: Int
+        get() = requests.size
+
+    fun enqueue(request: PendingTerminalCommand): Boolean {
+        if (requests.size >= MAX_PENDING) return false
         requests.add(request)
+        return true
+    }
+
+    companion object {
+        const val MAX_PENDING = 16
     }
 
     /** Only the request actually shown can be consumed, once, even for identical commands. */

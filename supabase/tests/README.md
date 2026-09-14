@@ -43,4 +43,3 @@ After #538 lands, its `audit_log_insert_rls_test.sql` independently rejects any
 recreated secret_access_log_insert policy and pins the plugin log INSERT policy
 to service_role. Recreating either exception name therefore fails that suite;
 the subset here allows either merge order without requiring a synchronized edit.
->>>>>>> origin/dev
