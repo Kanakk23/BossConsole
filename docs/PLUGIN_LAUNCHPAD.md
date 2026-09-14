@@ -133,7 +133,7 @@ boss plugin link . --json
    - **If BossConsole is running**: Dispatches `<TOKEN> PLUGIN_DEV_RELOAD <PLUGIN_ID>\n` over loopback socket and awaits synchronous host acknowledgment (`RELOAD_OK`). Any host-side exceptions are captured and returned as `RELOAD_FAILED <message>` without dropping the socket.
    - **If BossConsole is offline**: Stages the plugin cleanly into the version-rotated dev folder and reports ready for next launch (`status: "staged", running: false`).
 
-> **Note on Startup Precedence**: At application launch, BossConsole prioritizes staged development JARs in `~/.boss/plugins/dev/<plugin-id>/` over installed store versions for that same plugin ID (`prioritizeDevPluginIfNecessary`). Since `boss plugin link` pre-validates JARs before staging, dev artifacts are well-formed; if a dev directory is ever manually corrupted, removing the corresponding directory under `~/.boss/plugins/dev/<plugin-id>/` restores normal loading of the store-installed plugin.
+> **Note on Startup Precedence**: At application launch, BossConsole prioritizes staged development JARs in `~/.boss/plugins/dev/<plugin-id>/` over installed store versions for that same plugin ID via pre-load resolution (`resolvePersistedEntryPath` and `deduplicateJars`). Since `boss plugin link` pre-validates JARs before staging, dev artifacts are well-formed; if a dev build is missing or corrupt, startup automatically falls back to the installed store build. Protected system plugins and plugins requiring application restart (`HotReloadPolicy`) are never overridden by development JARs.
 
 ---
 
@@ -141,10 +141,10 @@ boss plugin link . --json
 
 | Template | Primary Use Case | Default Permissions | MCP Tools |
 |---|---|---|---|
-| `mcp-tool` | Exposing MCP tools to AI agents | `mcp` | 1 sample action tool |
-| `ui-panel` | Custom Compose Desktop UI panels & tabs | `notifications` | None |
-| `background-service` | Autonomous background workers / daemons | `terminal`, `notifications` | None |
-| `full` | Enterprise plugins combining UI, MCP, and CLI | `mcp`, `terminal`, `notifications`, `network` | 1 action tool |
+| `mcp-tool` | Exposing MCP tools to AI agents | `[]` (Open to authenticated users) | 1 sample action tool |
+| `ui-panel` | Custom Compose Desktop UI panels & tabs | `[]` (Open to authenticated users) | None |
+| `background-service` | Autonomous background workers / daemons | `[]` (Open to authenticated users) | None |
+| `full` | Enterprise plugins combining UI, MCP, and CLI | `[]` (Open to authenticated users) | 1 action tool |
 
 ---
 
@@ -160,9 +160,7 @@ boss plugin link . --json
   "author": "Boss Developer",
   "apiVersion": "1.0.88",
   "mainClass": "com.example.sampleplugin.SamplePluginPlugin",
-  "permissions": [
-    "mcp"
-  ],
+  "requiredPermissions": [],
   "mcpTools": [
     {
       "name": "mcp__com_example_sample_plugin__action",
@@ -173,19 +171,11 @@ boss plugin link . --json
 }
 ```
 
-### Allowed Permissions
-- `network`
-- `filesystem`
-- `terminal`
-- `browser`
-- `notifications`
-- `auth`
-- `mcp`
-- `editor`
-- `clipboard`
-- `settings`
-- `system`
-- `storage`
+### Permission Model & RBAC
+`requiredPermissions` declares the host RBAC permissions (e.g. `plugins.create`, `secret.read`, `api_key.create`) required to access and run the plugin.
+- An empty list (`[]`) means the plugin is accessible to all authenticated users.
+- Scaffolded starter templates emit `[]` by default so any non-admin developer can build, test, and link without hitting RBAC permission gating (`pluginAccessAllowed`).
+- When non-empty, permissions must follow the standard dot/dash/underscore RBAC identifier format (`^[a-zA-Z0-9]+([._-][a-zA-Z0-9]+)*$`).
 
 ---
 
