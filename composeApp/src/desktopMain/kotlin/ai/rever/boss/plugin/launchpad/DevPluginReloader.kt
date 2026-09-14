@@ -60,9 +60,25 @@ object DevPluginReloader {
                     ),
                 )
 
+                val priorStates =
+                    activeManagers.map { manager ->
+                        val info = manager.getPluginInfo(pluginId)
+                        PriorManagerState(
+                            manager = manager,
+                            priorJarPath = info?.jarPath,
+                            wasLoaded = info?.state == PluginState.LOADED,
+                            wasEnabled = info?.enabled ?: true,
+                        )
+                    }
+
                 preflightCheck(pluginId, activeManagers)
-                unloadManagers(pluginId, activeManagers)
-                installManagers(pluginId, stagedJar, activeManagers)
+                try {
+                    unloadManagers(pluginId, activeManagers)
+                    installManagers(pluginId, stagedJar, activeManagers)
+                } catch (e: Exception) {
+                    rollbackManagers(pluginId, priorStates)
+                    throw e
+                }
                 pruneStaging(pluginId, devRoot)
 
                 logger.info(
@@ -72,6 +88,47 @@ object DevPluginReloader {
                 )
             }
         }
+
+    internal data class PriorManagerState(
+        val manager: DynamicPluginManager,
+        val priorJarPath: String?,
+        val wasLoaded: Boolean,
+        val wasEnabled: Boolean,
+    )
+
+    internal suspend fun rollbackManagers(
+        pluginId: String,
+        priorStates: List<PriorManagerState>,
+    ) {
+        logger.warn(
+            LogCategory.SYSTEM,
+            "Rolling back dev plugin reload across managers",
+            mapOf("pluginId" to pluginId, "managersCount" to priorStates.size),
+        )
+        for (priorState in priorStates) {
+            try {
+                if (priorState.wasLoaded && priorState.priorJarPath != null && File(priorState.priorJarPath).exists()) {
+                    // Hot-reload case: reinstall the prior working JAR with previous enabled state
+                    if (priorState.manager.getPluginInfo(pluginId) != null) {
+                        priorState.manager.uninstallPlugin(pluginId, force = true, waitForGC = false)
+                    }
+                    priorState.manager.installPlugin(priorState.priorJarPath, enabled = priorState.wasEnabled)
+                } else {
+                    // First link case: was newly installed during this reload cycle; uninstall it to restore clean initial state
+                    if (priorState.manager.getPluginInfo(pluginId) != null) {
+                        priorState.manager.uninstallPlugin(pluginId, force = true, waitForGC = false)
+                    }
+                }
+            } catch (e: Exception) {
+                logger.error(
+                    LogCategory.SYSTEM,
+                    "Failed to rollback plugin $pluginId on manager",
+                    mapOf("pluginId" to pluginId),
+                    e,
+                )
+            }
+        }
+    }
 
     private suspend fun preflightCheck(
         pluginId: String,

@@ -297,15 +297,25 @@ class PluginValidatorEvalTest {
         assertNotNull(permsCheck)
         assertTrue(permsCheck.passed, "All canonical permissions must pass")
 
-        // Test invalid permission
+        // Test real RBAC permissions (plugins.create, secret.read)
+        val rbacDir = File(tempDir.toFile(), "rbac-perms-dir")
+        rbacDir.mkdirs()
+        val rbacManifest = manifest.copy(requiredPermissions = listOf("plugins.create", "secret.read", "api_key.create"))
+        File(rbacDir, "plugin.json").writeText(launchpadJson.encodeToString(rbacManifest))
+        val rbacResult = PluginValidator.validate(rbacDir)
+        val rbacCheck = rbacResult.checks.firstOrNull { it.name == "permissions" }
+        assertNotNull(rbacCheck)
+        assertTrue(rbacCheck.passed, "Real host RBAC permissions must pass validation")
+
+        // Test invalid permission format (spaces/special characters)
         val invalidDir = File(tempDir.toFile(), "invalid-perms-dir")
         invalidDir.mkdirs()
-        val invalidManifest = manifest.copy(requiredPermissions = listOf("invalid_perm_xyz"))
+        val invalidManifest = manifest.copy(requiredPermissions = listOf("invalid permission with spaces!"))
         File(invalidDir, "plugin.json").writeText(launchpadJson.encodeToString(invalidManifest))
         val invalidResult = PluginValidator.validate(invalidDir)
         val invalidCheck = invalidResult.checks.firstOrNull { it.name == "permissions" }
         assertNotNull(invalidCheck)
-        assertFalse(invalidCheck.passed, "Unknown permission must fail")
+        assertFalse(invalidCheck.passed, "Malformed permission identifier must fail")
     }
 
     @Test
@@ -360,26 +370,31 @@ class PluginValidatorEvalTest {
     @Test
     fun `tests closed archive does not crash bytecode fallback parser`() {
         val jarFile = File(tempDir.toFile(), "closed-archive-fallback.jar")
+        val unresolvableClassName = "com.example.synthetic.UnresolvablePlugin"
         val manifest =
             PluginManifest(
                 pluginId = "com.example.fallback-plugin",
                 displayName = "Fallback Plugin",
                 version = "1.0.0",
                 apiVersion = HostMeta.CURRENT_API_VERSION,
-                mainClass = ValidatorTestFixturePlugin::class.java.name,
+                mainClass = unresolvableClassName,
             )
         val manifestBytes = launchpadJson.encodeToString(manifest).toByteArray(StandardCharsets.UTF_8)
-        val classEntryPath = ValidatorTestFixturePlugin::class.java.name.replace('.', '/') + ".class"
-        val realClassBytes =
-            ValidatorTestFixturePlugin::class.java.classLoader
-                .getResourceAsStream(classEntryPath)!!
-                .readBytes()
+        val classEntryPath = unresolvableClassName.replace('.', '/') + ".class"
+        // Class bytes inherit from a missing superclass absent from the JAR and classpath,
+        // forcing Class.forName to throw NoClassDefFoundError and exercising the manual bytecode parser.
+        val syntheticClassBytes =
+            generateSyntheticPluginClassBytes(
+                className = unresolvableClassName.replace('.', '/'),
+                superClassName = "com/example/missing/MissingSuperClass",
+                interfaceName = "ai/rever/boss/plugin/api/Plugin",
+            )
 
         createJar(
             jarFile,
             mapOf(
                 "META-INF/boss-plugin/plugin.json" to manifestBytes,
-                classEntryPath to realClassBytes,
+                classEntryPath to syntheticClassBytes,
             ),
         )
 
@@ -387,7 +402,69 @@ class PluginValidatorEvalTest {
         assertTrue(result.isValid, "Valid JAR must pass validation without closed zip errors")
         val implementsCheck = result.checks.firstOrNull { it.name == "bytecode-implements-plugin" }
         assertNotNull(implementsCheck)
-        assertTrue(implementsCheck.passed)
+        assertTrue(implementsCheck.passed, "Fallback bytecode parser must detect direct Plugin interface implementation")
+    }
+
+    @Test
+    fun `tests truncated classfile bytes returns false without throwing BufferUnderflowException`() {
+        val truncatedBytes = byteArrayOf(
+            0xCA.toByte(), 0xFE.toByte(), 0xBA.toByte(), 0xBE.toByte(),
+            0, 0, // minor
+            0, 52, // major
+            0, 2, // cp count = 2
+        )
+        assertFalse(
+            PluginValidator.checkDirectInterfaceImplementation(truncatedBytes),
+            "Truncated bytecode must safely return false and not throw BufferUnderflowException",
+        )
+    }
+
+    private fun generateSyntheticPluginClassBytes(
+        className: String,
+        superClassName: String,
+        interfaceName: String,
+    ): ByteArray {
+        val baos = java.io.ByteArrayOutputStream()
+        val dos = java.io.DataOutputStream(baos)
+        dos.writeInt(0xCAFEBABE.toInt())
+        dos.writeShort(0) // minor
+        dos.writeShort(52) // major (Java 8)
+        dos.writeShort(7) // cp count = 7 (indices 1..6)
+        // 1: Utf8 className
+        dos.writeByte(1)
+        dos.writeUTF(className)
+        // 2: Class className
+        dos.writeByte(7)
+        dos.writeShort(1)
+        // 3: Utf8 superClassName
+        dos.writeByte(1)
+        dos.writeUTF(superClassName)
+        // 4: Class superClassName
+        dos.writeByte(7)
+        dos.writeShort(3)
+        // 5: Utf8 interfaceName
+        dos.writeByte(1)
+        dos.writeUTF(interfaceName)
+        // 6: Class interfaceName
+        dos.writeByte(7)
+        dos.writeShort(5)
+        // access flags
+        dos.writeShort(0x0021)
+        // this_class
+        dos.writeShort(2)
+        // super_class
+        dos.writeShort(4)
+        // interfaces
+        dos.writeShort(1)
+        dos.writeShort(6)
+        // fields
+        dos.writeShort(0)
+        // methods
+        dos.writeShort(0)
+        // attributes
+        dos.writeShort(0)
+        dos.flush()
+        return baos.toByteArray()
     }
 
     private fun createJar(

@@ -302,7 +302,7 @@ private fun validMcpToolName(toolName: String): Boolean =
 private fun validPluginDevId(pluginId: String): Boolean =
     pluginId.length in 1..MAX_TOOL_NAME_LENGTH &&
         pluginId.none { it.isWhitespace() || it.isISOControl() || it == '/' || it == '\\' } &&
-        pluginId != ".."
+        pluginId != ".." && pluginId != "."
 
 private fun parseMcpInvokeRequest(
     token: String,

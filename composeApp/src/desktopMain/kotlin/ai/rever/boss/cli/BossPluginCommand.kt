@@ -307,9 +307,6 @@ class BossPluginLinkCommand : CliktCommand(name = "link") {
         }
 
         val reloadResult = SingleInstanceManager.reloadDevPlugin(pluginId)
-        if (reloadResult is ReloadResult.HostOffline) {
-            DevPluginArtifacts.pruneStagingHistory(pluginDevBase, maxVersionsToKeep = 3)
-        }
         when (reloadResult) {
             is ReloadResult.Success -> {
                 if (json) {

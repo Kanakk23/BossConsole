@@ -43,12 +43,44 @@ object DevPluginArtifacts {
     }
 
     /**
+     * Deeply validates a candidate dev plugin JAR to ensure:
+     * 1. It is a readable ZIP/JAR archive.
+     * 2. It contains META-INF/boss-plugin/plugin.json.
+     * 3. (Optional) The manifest's pluginId matches [expectedPluginId].
+     */
+    fun isValidDevJar(
+        jarFile: File,
+        expectedPluginId: String? = null,
+    ): Boolean {
+        if (!jarFile.isFile || jarFile.extension != "jar" || jarFile.name.endsWith(".part") || jarFile.length() <= 0) {
+            return false
+        }
+        return try {
+            java.util.jar.JarFile(jarFile).use { jar ->
+                val entry = jar.getJarEntry("META-INF/boss-plugin/plugin.json") ?: return false
+                if (expectedPluginId != null) {
+                    val text = jar.getInputStream(entry).bufferedReader().readText()
+                    val match = Regex(""""(?:id|pluginId)"\s*:\s*"([^"]+)"""").find(text)
+                    val manifestId = match?.groupValues?.get(1)
+                    manifestId == expectedPluginId
+                } else {
+                    true
+                }
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
      * Finds the active dev JAR for [pluginId] by inspecting version directories in descending order.
      * Skips empty or corrupt version directories and returns the latest directory containing a valid JAR.
+     * When [deepValidate] is true, candidates must also pass [isValidDevJar].
      */
     fun findActiveDevJar(
         pluginId: String,
         devRoot: File = stagingRoot(),
+        deepValidate: Boolean = false,
     ): File? {
         val pluginDir = File(devRoot, pluginId)
         if (!pluginDir.exists() || !pluginDir.isDirectory) return null
@@ -71,7 +103,9 @@ object DevPluginArtifacts {
                         file.isFile && file.extension == "jar" && !file.name.endsWith(".part") && file.length() > 0
                     }?.firstOrNull()
             if (candidate != null) {
-                return candidate
+                if (!deepValidate || isValidDevJar(candidate, pluginId)) {
+                    return candidate
+                }
             }
         }
         return null
@@ -87,14 +121,18 @@ object DevPluginArtifacts {
 
     /**
      * Discovers all active dev plugin JARs under [devRoot].
+     * When [deepValidate] is true, only JARs passing [isValidDevJar] are returned.
      */
-    fun findAllActiveDevJars(devRoot: File = stagingRoot()): List<File> {
+    fun findAllActiveDevJars(
+        devRoot: File = stagingRoot(),
+        deepValidate: Boolean = false,
+    ): List<File> {
         if (!devRoot.exists() || !devRoot.isDirectory) return emptyList()
 
         val activeJars = mutableListOf<File>()
         val pluginDirs = devRoot.listFiles { file -> file.isDirectory } ?: emptyArray()
         for (pDir in pluginDirs) {
-            val jar = findActiveDevJar(pDir.name, devRoot)
+            val jar = findActiveDevJar(pDir.name, devRoot, deepValidate)
             if (jar != null) {
                 activeJars.add(jar)
             }

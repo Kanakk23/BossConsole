@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin
 
 import ai.rever.boss.components.plugin.PluginBuildInfo
+import ai.rever.boss.plugin.launchpad.DevPluginArtifacts
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -118,7 +119,7 @@ object PluginBuildProbe {
                 reloadStamp = reloadStamp,
             )
 
-        if (!ai.rever.boss.plugin.launchpad.DevPluginArtifacts
+        if (!DevPluginArtifacts
                 .isDevPluginJar(File(jarPath))
         ) {
             hooks.record(pluginId, jarPath, mtime ?: previous?.buildStamp, tagFor(info), plugin.version)

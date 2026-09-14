@@ -81,7 +81,7 @@ boss plugin validate . --json
   - `version-format`: Validates SemVer conformance (`MAJOR.MINOR.PATCH`).
   - `minApiVersion`: Asserts requirement $\le$ `HostMeta.CURRENT_API_VERSION` (`1.0.88`).
   - `entrypoint-class`: Validates fully qualified class name syntax.
-  - `permissions`: Validates declared permissions against the allowed host registry.
+  - `permissions`: Validates declared permissions against host RBAC permission identifier format.
   - `mcp-tools`: Validates tool names against `^mcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_-]+$`.
   - `host-manifest-contract`: Validates against host `PluginManifestReader.parseManifest` and `validateManifest`.
 - **Archive Mode (`.jar` / `.zip`)**:
@@ -97,9 +97,9 @@ Validating plugin at C:\Users\dev\my-tools...
 [✓] manifest-json-valid: plugin.json parsed successfully
 [✓] id-format: Plugin ID 'com.example.my-tools' follows reverse domain notation
 [✓] version-format: Plugin version '0.1.0' is valid SemVer
-[✓] min-api-version: apiVersion '1.0.88' is compatible (host: 1.0.88)
+[✓] min-api-version: apiVersion '1.0.89' is compatible (host: 1.0.89)
 [✓] entrypoint-class: Entrypoint class 'com.example.mytools.MyToolsPlugin' is a valid fully-qualified class name
-[✓] permissions: All declared permissions (1) are allowed
+[✓] permissions: Declared permissions list is empty (accessible to all authenticated users)
 [✓] mcp-tools: All 1 MCP tool declarations are valid
 [✓] host-manifest-contract: Manifest conforms to host PluginManifestReader contract
 

@@ -1750,7 +1750,7 @@ object PluginStoreSetup {
                 val loaded = result.getOrNull() ?: continue
                 val persisted = persistedById[pluginId] ?: continue
                 if (persisted.jarPath != loaded.jarPath &&
-                    !ai.rever.boss.plugin.launchpad.DevPluginArtifacts
+                    !DevPluginArtifacts
                         .isDevPluginJar(File(loaded.jarPath))
                 ) {
                     PluginPersistence.addInstalledPlugin(
@@ -1790,7 +1790,18 @@ object PluginStoreSetup {
                 File(_pluginDir, "dev"),
             )
         if (devJar != null && devJar.exists() && !isProtectedFromDevSwap(entry.pluginId)) {
-            return devJar.absolutePath
+            if (DevPluginArtifacts.isValidDevJar(devJar, entry.pluginId)) {
+                return devJar.absolutePath
+            }
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Skipping corrupted or incomplete dev build at ${devJar.absolutePath}; falling back to store build",
+                mapOf(
+                    "pluginId" to entry.pluginId,
+                    "devJarPath" to devJar.absolutePath,
+                    "storeJarPath" to entry.jarPath,
+                ),
+            )
         }
         return entry.jarPath
     }

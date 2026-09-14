@@ -178,8 +178,8 @@ class DefaultPlugin(
         }
 
         internal fun findActiveDevJars(devDir: File): List<File> =
-            ai.rever.boss.plugin.launchpad.DevPluginArtifacts
-                .findAllActiveDevJars(devDir)
+            DevPluginArtifacts
+                .findAllActiveDevJars(devDir, deepValidate = true)
 
         internal fun extractPluginId(jarFile: File): String =
             try {
@@ -205,7 +205,7 @@ class DefaultPlugin(
                 .mapValues { (_, group) ->
                     group.maxByOrNull { file ->
                         val isDev =
-                            ai.rever.boss.plugin.launchpad.DevPluginArtifacts
+                            DevPluginArtifacts
                                 .isDevPluginJar(file)
                         val versionBonus = if (isDev) 10_000_000_000_000L else 0L
                         versionBonus + file.lastModified()

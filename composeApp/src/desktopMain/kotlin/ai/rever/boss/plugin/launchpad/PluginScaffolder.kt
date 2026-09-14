@@ -83,13 +83,9 @@ object PluginScaffolder {
         val packageName = "com.example.$packageSuffix"
         val packageDirRel = "com/example/$packageSuffix"
 
-        val permissions =
-            when (template) {
-                Template.MCP_TOOL -> listOf("mcp")
-                Template.UI_PANEL -> listOf("notifications")
-                Template.BACKGROUND_SERVICE -> listOf("terminal", "notifications")
-                Template.FULL -> listOf("mcp", "terminal", "notifications", "network")
-            }
+        // Starter templates are unconstrained by default so any authenticated non-admin developer
+        // can load and test them without hitting RBAC permission gating (pluginAccessAllowed).
+        val permissions = emptyList<String>()
 
         val mcpTools =
             when (template) {

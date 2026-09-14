@@ -5,6 +5,7 @@ import ai.rever.boss.plugin.loader.PluginManifestReader
 import java.io.File
 import java.io.IOException
 import java.net.URLClassLoader
+import java.nio.BufferUnderflowException
 import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.Path
@@ -348,97 +349,97 @@ object PluginValidator {
      */
     internal fun checkDirectInterfaceImplementation(classBytes: ByteArray): Boolean {
         if (classBytes.size < 10) return false
-        val buffer = ByteBuffer.wrap(classBytes)
-        if (buffer.int != 0xCAFEBABE.toInt()) return false
-        buffer.short // minor
-        buffer.short // major
-        val cpCount = buffer.short.toInt() and 0xFFFF
-        val strings = arrayOfNulls<String>(cpCount)
-        val classRefs = IntArray(cpCount)
+        return try {
+            val buffer = ByteBuffer.wrap(classBytes)
+            if (buffer.int != 0xCAFEBABE.toInt()) return false
+            buffer.short // minor
+            buffer.short // major
+            val cpCount = buffer.short.toInt() and 0xFFFF
+            val strings = arrayOfNulls<String>(cpCount)
+            val classRefs = IntArray(cpCount)
 
-        var i = 1
-        while (i < cpCount) {
-            when (buffer.get().toInt() and 0xFF) {
-                1 -> { // Utf8
-                    val length = buffer.short.toInt() and 0xFFFF
-                    val bytes = ByteArray(length)
-                    buffer.get(bytes)
-                    strings[i] = String(bytes, Charsets.UTF_8)
+            var i = 1
+            while (i < cpCount) {
+                when (buffer.get().toInt() and 0xFF) {
+                    1 -> { // Utf8
+                        val length = buffer.short.toInt() and 0xFFFF
+                        val bytes = ByteArray(length)
+                        buffer.get(bytes)
+                        strings[i] = String(bytes, Charsets.UTF_8)
+                    }
+
+                    7 -> { // Class
+                        classRefs[i] = buffer.short.toInt() and 0xFFFF
+                    }
+
+                    8 -> { // String
+                        buffer.short
+                    }
+
+                    3, 4 -> { // Integer, Float
+                        buffer.int
+                    }
+
+                    5, 6 -> { // Long, Double (takes 2 CP slots)
+                        buffer.long
+                        i++
+                    }
+
+                    9, 10, 11 -> { // Fieldref, Methodref, InterfaceMethodref
+                        buffer.short
+                        buffer.short
+                    }
+
+                    12 -> { // NameAndType
+                        buffer.short
+                        buffer.short
+                    }
+
+                    15 -> { // MethodHandle
+                        buffer.get()
+                        buffer.short
+                    }
+
+                    16 -> { // MethodType
+                        buffer.short
+                    }
+
+                    17, 18 -> { // Dynamic, InvokeDynamic
+                        buffer.short
+                        buffer.short
+                    }
+
+                    19, 20 -> { // Module, Package
+                        buffer.short
+                    }
+
+                    else -> {
+                        return false
+                    }
                 }
+                i++
+            }
 
-                7 -> { // Class
-                    classRefs[i] = buffer.short.toInt() and 0xFFFF
-                }
-
-                8 -> {
-                    buffer.short
-                }
-
-                // String
-                3, 4 -> {
-                    buffer.int
-                }
-
-                // Integer, Float
-                5, 6 -> { // Long, Double (takes 2 CP slots)
-                    buffer.long
-                    i++
-                }
-
-                9, 10, 11 -> {
-                    buffer.short
-                    buffer.short
-                }
-
-                // Fieldref, Methodref, InterfaceMethodref
-                12 -> {
-                    buffer.short
-                    buffer.short
-                }
-
-                // NameAndType
-                15 -> {
-                    buffer.get()
-                    buffer.short
-                }
-
-                // MethodHandle
-                16 -> {
-                    buffer.short
-                }
-
-                // MethodType
-                17, 18 -> {
-                    buffer.short
-                    buffer.short
-                }
-
-                // Dynamic, InvokeDynamic
-                19, 20 -> {
-                    buffer.short
-                }
-
-                // Module, Package
-                else -> {
-                    return false
+            buffer.short // access flags
+            buffer.short // this class
+            buffer.short // super class
+            val interfacesCount = buffer.short.toInt() and 0xFFFF
+            repeat(interfacesCount) {
+                val ifaceRef = buffer.short.toInt() and 0xFFFF
+                val nameIndex = classRefs.getOrNull(ifaceRef) ?: 0
+                val ifaceName = strings.getOrNull(nameIndex)
+                if (ifaceName == "ai/rever/boss/plugin/api/Plugin") {
+                    return true
                 }
             }
-            i++
+            false
+        } catch (_: BufferUnderflowException) {
+            false
+        } catch (_: IndexOutOfBoundsException) {
+            false
+        } catch (_: Exception) {
+            false
         }
-
-        buffer.short // access flags
-        buffer.short // this class
-        buffer.short // super class
-        val interfacesCount = buffer.short.toInt() and 0xFFFF
-        repeat(interfacesCount) {
-            val ifaceRef = buffer.short.toInt() and 0xFFFF
-            val nameIndex = classRefs.getOrNull(ifaceRef) ?: 0
-            val ifaceName = strings.getOrNull(nameIndex)
-            if (ifaceName == "ai/rever/boss/plugin/api/Plugin") {
-                return true
-            }
-        }
-        return false
     }
 
     private fun parseManifest(
@@ -530,20 +531,26 @@ object PluginValidator {
                     },
             )
 
-        // Permissions registry check
+        // Permissions registry check: permissions correspond to host RBAC permissions (e.g. plugins.create, secret.read)
         val permissionsToCheck = manifest.requiredPermissions.ifEmpty { manifest.permissions }
-        val invalidPermissions = permissionsToCheck.filter { !PluginPermission.isValid(it) }
+        val invalidPermissions = permissionsToCheck.filter { !HostMeta.isValidPermissionIdentifier(it) }
         val permissionsValid = invalidPermissions.isEmpty()
         checks +=
             ValidationCheck(
                 name = "permissions",
                 passed = permissionsValid,
                 message =
-                    if (permissionsValid) {
-                        "All declared permissions (${permissionsToCheck.size}) are allowed"
-                    } else {
-                        "Unknown permission(s): ${invalidPermissions.joinToString(", ")}. " +
-                            "Allowed: ${HostMeta.ALLOWED_PERMISSIONS}"
+                    when {
+                        !permissionsValid -> {
+                            "Invalid permission format: ${invalidPermissions.joinToString(", ")}. " +
+                                "Permissions must follow RBAC identifier format (e.g. 'plugins.create', 'secret.read')"
+                        }
+                        permissionsToCheck.isEmpty() -> {
+                            "Declared permissions list is empty (accessible to all authenticated users)"
+                        }
+                        else -> {
+                            "All declared permissions (${permissionsToCheck.size}) follow valid RBAC identifier format"
+                        }
                     },
             )
 

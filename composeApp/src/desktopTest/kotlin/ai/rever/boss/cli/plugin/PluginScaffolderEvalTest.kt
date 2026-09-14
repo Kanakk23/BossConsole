@@ -74,9 +74,9 @@ class PluginScaffolderEvalTest {
             assertEquals("0.1.0", manifest.version)
             assertEquals(HostMeta.CURRENT_API_VERSION, manifest.minApiVersion)
 
+            assertTrue(manifest.permissions.isEmpty(), "Templates emit emptyList() by default for open access")
             when (tmpl) {
                 "mcp-tool" -> {
-                    assertTrue(manifest.permissions.contains("mcp"))
                     assertEquals(1, manifest.mcpTools.size)
                     assertTrue(
                         manifest.mcpTools
@@ -87,21 +87,14 @@ class PluginScaffolderEvalTest {
                 }
 
                 "ui-panel" -> {
-                    assertTrue(manifest.permissions.contains("notifications"))
                     assertTrue(manifest.mcpTools.isEmpty())
                 }
 
                 "background-service" -> {
-                    assertTrue(manifest.permissions.contains("terminal"))
-                    assertTrue(manifest.permissions.contains("notifications"))
                     assertTrue(manifest.mcpTools.isEmpty())
                 }
 
                 "full" -> {
-                    assertTrue(manifest.permissions.contains("mcp"))
-                    assertTrue(manifest.permissions.contains("terminal"))
-                    assertTrue(manifest.permissions.contains("notifications"))
-                    assertTrue(manifest.permissions.contains("network"))
                     assertEquals(1, manifest.mcpTools.size)
                 }
             }

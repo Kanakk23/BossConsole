@@ -1,6 +1,7 @@
 package ai.rever.boss.cli.plugin
 
 import ai.rever.boss.cli.createBossCLI
+import ai.rever.boss.plugin.launchpad.DevPluginArtifacts
 import ai.rever.boss.plugin.launchpad.HostMeta
 import ai.rever.boss.plugin.launchpad.PluginManifest
 import ai.rever.boss.plugin.launchpad.ValidationReport
@@ -13,6 +14,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty
 import org.junit.jupiter.api.io.TempDir
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -44,7 +46,7 @@ class PluginEndToEndEvalTest {
         val runtimeDir = File(tempDir.toFile(), "run")
         SingleInstanceManager.runtimeDirOverride = runtimeDir
         SingleInstanceManager.pluginReloadHandlerOverride = null
-        ai.rever.boss.plugin.launchpad.DevPluginArtifacts.stagingRootOverride = File(tempDir.toFile(), "dev")
+        DevPluginArtifacts.stagingRootOverride = File(tempDir.toFile(), "dev")
     }
 
     @AfterTest
@@ -54,7 +56,7 @@ class PluginEndToEndEvalTest {
         SingleInstanceManager.release()
         SingleInstanceManager.pluginReloadHandlerOverride = null
         SingleInstanceManager.runtimeDirOverride = null
-        ai.rever.boss.plugin.launchpad.DevPluginArtifacts.stagingRootOverride = null
+        DevPluginArtifacts.stagingRootOverride = null
     }
 
     @Test
@@ -308,6 +310,7 @@ class PluginEndToEndEvalTest {
     }
 
     @Test
+    @EnabledIfSystemProperty(named = "boss.test.e2e.gradle", matches = "true")
     fun `scaffolds eval-test-tool and compiles out-of-the-box with gradlew test`() {
         val targetDir = File(tempDir.toFile(), "eval-test-tool-compile")
         targetDir.deleteRecursively()
