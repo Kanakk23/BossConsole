@@ -1,6 +1,7 @@
 package ai.rever.boss.components.window_panel.components.main_window_panels
 
 import ai.rever.boss.components.common.rememberFaviconLoader
+import ai.rever.boss.components.model.DraggingTabInfo
 import ai.rever.boss.components.model.TabDraggableComponent
 import ai.rever.boss.components.model.TabDropResult
 import ai.rever.boss.components.overlays.ContextMenuItem
@@ -263,7 +264,7 @@ private fun Modifier.tabChipDrag(
     onDragEnd: (TabDropResult?) -> Unit,
 ): Modifier =
     pointerInput(tabId, panelId, tabDragComponent) {
-        var ownedDrag: ai.rever.boss.components.model.DraggingTabInfo? = null
+        var ownedDrag: DraggingTabInfo? = null
         try {
             detectDragGestures(
                 onDragStart = { offset ->

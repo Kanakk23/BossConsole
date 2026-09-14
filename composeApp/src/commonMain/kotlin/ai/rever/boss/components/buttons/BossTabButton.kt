@@ -1,5 +1,6 @@
 package ai.rever.boss.components.buttons
 
+import ai.rever.boss.components.model.DraggingTabInfo
 import ai.rever.boss.components.model.TabDraggableComponent
 import ai.rever.boss.components.model.TabDropResult
 import ai.rever.boss.components.overlays.ContextMenu
@@ -403,7 +404,7 @@ fun BossTabButton(
                     if (isDragEnabled) {
                         // Stable identity survives title/index updates; a new owner cancels the gesture.
                         Modifier.pointerInput(tabInfo.id, panelId, tabDragComponent) {
-                            var ownedDrag: ai.rever.boss.components.model.DraggingTabInfo? = null
+                            var ownedDrag: DraggingTabInfo? = null
                             try {
                                 detectDragGestures(
                                     onDragStart = { offset ->
