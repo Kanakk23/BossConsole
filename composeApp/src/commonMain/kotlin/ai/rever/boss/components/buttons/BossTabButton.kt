@@ -247,8 +247,9 @@ fun BossTabButton(
     // restart cancels the coroutine WITHOUT calling onDragEnd or onDragCancel - so the ghost was
     // left on screen following the cursor with no gesture left alive to put it down.
     val currentTabInfo by rememberUpdatedState(tabInfo)
-    val currentPanelId by rememberUpdatedState(panelId)
     val currentTabIndex by rememberUpdatedState(tabIndex)
+    val currentOnDragStart by rememberUpdatedState(onDragStart)
+    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
 
     // Reported on change rather than written from the setter, so a tab disposed with its menu
     // still open (closing the tab from the menu does exactly that) clears the flag it set.
@@ -400,50 +401,51 @@ fun BossTabButton(
                     }
                 }.then(
                     if (isDragEnabled) {
-                        // Keyed on Unit: this handler has to outlive every change to the tab it is
-                        // dragging. What it needs is read through rememberUpdatedState above.
-                        Modifier.pointerInput(Unit) {
+                        // Stable identity survives title/index updates; a new owner cancels the gesture.
+                        Modifier.pointerInput(tabInfo.id, panelId, tabDragComponent) {
+                            var ownedDrag: ai.rever.boss.components.model.DraggingTabInfo? = null
                             try {
                                 detectDragGestures(
                                     onDragStart = { offset ->
                                         val info = currentTabInfo ?: return@detectDragGestures
-                                        val panel = currentPanelId ?: return@detectDragGestures
                                         // Calculate absolute position for drag start
                                         val absolutePosition = windowPosition + offset
                                         tabDragComponent.startDragging(
                                             tabInfo = info,
-                                            panelId = panel,
+                                            panelId = panelId,
                                             index = currentTabIndex,
                                             startPosition = absolutePosition,
                                         )
-                                        onDragStart()
+                                        ownedDrag = tabDragComponent.draggingTab
+                                        currentOnDragStart()
                                     },
                                     onDrag = { change, dragAmount ->
                                         change.consume()
-                                        tabDragComponent.updateDrag(dragAmount)
+                                        if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
+                                            tabDragComponent.updateDrag(dragAmount)
+                                        }
                                     },
                                     onDragEnd = {
                                         // Always clean up drag state first to prevent stuck ghost
-                                        val result = tabDragComponent.endDrag()
-                                        onDragEnd(result)
+                                        if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
+                                            val result = tabDragComponent.endDrag(currentTabIndex)
+                                            ownedDrag = null
+                                            currentOnDragEnd(result)
+                                        }
                                     },
                                     onDragCancel = {
-                                        tabDragComponent.cancelDrag()
+                                        if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
+                                            tabDragComponent.cancelDrag()
+                                            ownedDrag = null
+                                            currentOnDragEnd(null)
+                                        }
                                     },
                                 )
                             } finally {
-                                // The backstop for every OTHER way this coroutine can go away
-                                // without the gesture ending: a pointerInput reset, the node being
-                                // detached, the composition leaving. None of those call
-                                // onDragCancel, and a drag left running has no gesture behind it -
-                                // just a ghost window tracking the cursor for the rest of the
-                                // session. Plain state writes, so running during cancellation is
-                                // safe. Scoped to THIS tab's drag, so a drag that already ended
-                                // (the common path: endDrag above, then the drop reshuffles the
-                                // panel and resets us) is left alone.
-                                val draggedId = tabDragComponent.draggingTab?.tabInfo?.id
-                                if (draggedId != null && draggedId == currentTabInfo?.id) {
+                                // Only the gesture that picked this tab up owns its cleanup.
+                                if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
                                     tabDragComponent.cancelDrag()
+                                    currentOnDragEnd(null)
                                 }
                             }
                         }

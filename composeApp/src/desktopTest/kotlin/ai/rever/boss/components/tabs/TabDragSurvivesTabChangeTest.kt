@@ -1,5 +1,7 @@
 package ai.rever.boss.components.tabs
 
+import ai.rever.boss.components.buttons.BossTabButton
+import ai.rever.boss.components.model.TabDropResult
 import ai.rever.boss.components.model.TabDraggableComponent
 import ai.rever.boss.components.window_panel.components.main_window_panels.TabFaviconChip
 import ai.rever.boss.plugin.api.TabInfo
@@ -12,6 +14,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.onNodeWithTag
@@ -107,6 +110,85 @@ class TabDragSurvivesTabChangeTest {
             chip.performTouchInput { up() }
             assertNull(component.draggingTab, "the release must put the ghost down")
         }
+    @Test
+    fun `button title and index updates preserve gesture and use latest callback`() =
+        runComposeUiTest {
+            val component = TabDraggableComponent()
+            var title by mutableStateOf("Running")
+            var index by mutableStateOf(2)
+            var callbackVersion by mutableStateOf(1)
+            var endedBy = 0
+            setContent {
+                val version = callbackVersion
+                Row(Modifier.testTag(CHIP_TAG)) {
+                    BossTabButton(
+                        fileName = title,
+                        onClick = {},
+                        tabInfo = DragTestTab("tab-1", title = title),
+                        panelId = "panel-1",
+                        tabIndex = index,
+                        tabDragComponent = component,
+                        onDragEnd = { endedBy = version },
+                    )
+                }
+            }
+            val chip = onNodeWithTag(CHIP_TAG)
+            chip.performTouchInput { down(center); moveBy(Offset(160f, 0f)) }
+            assertNotNull(component.draggingTab)
+            title = "Changed"
+            index = 1
+            callbackVersion = 2
+            waitForIdle()
+            assertNotNull(component.draggingTab)
+            chip.performTouchInput { up() }
+            assertNull(component.draggingTab)
+            assertEquals(2, endedBy)
+        }
+
+    @Test
+    fun `disposing an idle copy does not cancel another chip gesture`() =
+        runComposeUiTest {
+            val component = TabDraggableComponent()
+            var showCopy by mutableStateOf(true)
+            var showSource by mutableStateOf(true)
+            setContent {
+                Row {
+                    if (showSource) {
+                        Row(Modifier.testTag(CHIP_TAG)) {
+                            TabFaviconChip(
+                                tab = DragTestTab("tab-1"), isActive = true, onClick = {},
+                                tabDragComponent = component, panelId = "panel-1", tabIndex = 0,
+                            )
+                        }
+                    }
+                    if (showCopy) {
+                        TabFaviconChip(
+                            tab = DragTestTab("tab-1"), isActive = false, onClick = {},
+                            tabDragComponent = component, panelId = "panel-2", tabIndex = 0,
+                        )
+                    }
+                }
+            }
+            onNodeWithTag(CHIP_TAG).performTouchInput { down(center); moveBy(Offset(160f, 0f)) }
+            assertNotNull(component.draggingTab)
+            showCopy = false
+            waitForIdle()
+            assertNotNull(component.draggingTab, "a node which never started this drag cannot cancel it")
+            showSource = false
+            waitForIdle()
+            assertNull(component.draggingTab, "disposing the owner clears the ghost")
+        }
+
+    @Test
+    fun `reindexed source is the tab reordered on release`() {
+        val component = TabDraggableComponent()
+        component.registerTabBarBounds("panel-1", Rect(0f, 0f, 400f, 40f), vertical = false)
+        component.registerTabBounds("panel-1:target", Rect(0f, 0f, 100f, 40f), 0)
+        component.startDragging(DragTestTab("tab-1"), "panel-1", 2, Offset(10f, 20f))
+        assertEquals(TabDropResult.Reorder("panel-1", 1, 0), component.endDrag(sourceIndex = 1))
+        assertNull(component.draggingTab)
+    }
+
 }
 
 private const val CHIP_TAG = "drag-chip"

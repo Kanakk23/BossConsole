@@ -132,6 +132,7 @@ internal fun TabFaviconChip(
     // running with nothing behind it - a ghost following the cursor for the rest of the session.
     val currentTab by rememberUpdatedState(tab)
     val currentTabIndex by rememberUpdatedState(tabIndex)
+    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
 
     val background =
         when {
@@ -191,7 +192,7 @@ internal fun TabFaviconChip(
                                     tabIndex = { currentTabIndex },
                                     windowPosition = { windowPosition },
                                     tabDragComponent = tabDragComponent,
-                                    onDragEnd = onDragEnd,
+                                    onDragEnd = { currentOnDragEnd(it) },
                                 )
                             },
                         ).clickable(onClick = onClick),
@@ -261,7 +262,8 @@ private fun Modifier.tabChipDrag(
     tabDragComponent: TabDraggableComponent,
     onDragEnd: (TabDropResult?) -> Unit,
 ): Modifier =
-    pointerInput(tabId, panelId) {
+    pointerInput(tabId, panelId, tabDragComponent) {
+        var ownedDrag: ai.rever.boss.components.model.DraggingTabInfo? = null
         try {
             detectDragGestures(
                 onDragStart = { offset ->
@@ -271,22 +273,38 @@ private fun Modifier.tabChipDrag(
                         index = tabIndex(),
                         startPosition = windowPosition() + offset,
                     )
+                    ownedDrag = tabDragComponent.draggingTab
                 },
                 onDrag = { change, dragAmount ->
                     change.consume()
-                    tabDragComponent.updateDrag(dragAmount)
+                    if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
+                        tabDragComponent.updateDrag(dragAmount)
+                    }
                 },
                 // Cleaned up first either way: a result that throws must not leave a ghost stuck to
                 // the pointer.
-                onDragEnd = { onDragEnd(tabDragComponent.endDrag()) },
-                onDragCancel = { tabDragComponent.cancelDrag() },
+                onDragEnd = {
+                    if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
+                        val result = tabDragComponent.endDrag(tabIndex())
+                        ownedDrag = null
+                        onDragEnd(result)
+                    }
+                },
+                onDragCancel = {
+                    if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
+                        tabDragComponent.cancelDrag()
+                        ownedDrag = null
+                        onDragEnd(null)
+                    }
+                },
             )
         } finally {
             // Plain state writes, so this is safe to run while the coroutine is being cancelled.
             // Scoped to THIS tab's drag so the common path - endDrag above, then the drop
             // reshuffles the panel and resets us - is left alone.
-            if (tabDragComponent.draggingTab?.tabInfo?.id == tabId) {
+            if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
                 tabDragComponent.cancelDrag()
+                onDragEnd(null)
             }
         }
     }
