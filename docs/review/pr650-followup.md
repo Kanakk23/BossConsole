@@ -2,6 +2,14 @@
 
 This change addresses the four blocking findings in the [maintainer review](https://github.com/risa-labs-inc/BossConsole/pull/650#issuecomment-5663173004).
 The companion transport consumer is updated in [fluck-browser #45](https://github.com/risa-labs-inc/boss-plugin-fluck-browser/pull/45).
+The [latest host re-review](https://github.com/risa-labs-inc/BossConsole/pull/650#issuecomment-5671215711) is addressed as follows:
+
+- Active records now carry the preceding native termination callback time. Deterministic tests pin ordinary release, direct replacement, publication order and disable/restart persistence. The companion rejects events at or before that cutoff while accepting old three-field active records.
+- Input Monitoring instructions cover a fresh install where BOSS is absent from the pane, and the physical checklist makes that case unconditional. Permission denial intentionally retries after the documented off/on transition; failed observation may retry immediately.
+- Native release vetoes are debug-logged, and the zoom check explicitly compares native point thresholds with the page's CSS-pixel decision.
+- Listener callbacks are documented as enqueue-only while the tap monitor is held. The observable flag remains deliberate redundancy at the claim boundary, and the page-visible gesture token is recorded with browser telemetry.
+- Redundant page hot-path gates, an unused test import and a self-comparison were removed. Node absence now reports a useful parity-test error; STARTING copy and leading horizontal jitter have regressions.
+- The terminal field is named `nativeRejected` throughout the contract. No threshold, sign convention, permission prompt or locking design changed.
 
 ## Changes and evidence
 
@@ -10,7 +18,7 @@ The companion transport consumer is updated in [fluck-browser #45](https://githu
 | Native/page cancellation differs | Native code retains leading vertical travel but evaluates cancellation only on horizontal samples, as the page does. Commit qualification waits for three horizontal samples; zero-crossing reversal matches the page. | Shared sample fixtures run through the actual native reducer and page script, including leading noise, vertical curl, easing, reversal, post-threshold drift, short flick and cancellation. Constants are pinned across languages. |
 | Element blur cancels a swipe | Only a blur targeted at the window resets the detector. | Element focus transfer commits; window blur and hidden-document transitions cancel. |
 | Off switch and failure lifecycle | Startup binds observation to the effective setting. Native setup/poll/cleanup runs on a daemon worker. Disabled sessions cancel immediately; their callbacks cannot join a replacement session. Setup failures release partial resources, and run-loop failures cancel and permit retry. | Disabled startup, queued startup cancellation, disable/re-enable, denied permission, run-loop return/exception, partial allocation, replacement, tap interruption and concurrent claim/release tests. Settings descriptions distinguish permission denial from failure, including environment-owned settings. |
-| Wheel hot path and lossy companion transport | Disabled and line-mode wheels avoid host IPC. Vertical pixel samples still retain initial scroll ownership. Active publication occurs once per contact. The host retains 32 terminal records, which the companion reconciles before a new pointer event or watchdog poll can discard the old contact. | Existing nested-scroller tests retained. Publication-count and bounded-history tests cover rapid contacts; companion tests cover recovery, cancellation, missing/evicted evidence and stale watchdog ownership. |
+| Wheel hot path and lossy companion transport | Disabled and line-mode wheels avoid host IPC. Vertical pixel samples still retain initial scroll ownership. Active publication occurs once per contact and carries the previous native termination cutoff. The host retains 32 terminal records, which the companion reconciles before a new pointer event or watchdog poll can discard the old contact. | Existing nested-scroller tests retained. Publication-order, cutoff and bounded-history tests cover rapid contacts; companion tests cover recovery, cancellation, missing/evicted evidence and stale watchdog ownership. |
 
 Terminal history is a bounded, non-destructive record, not an unbounded delivery queue. A consumer delayed past 32 subsequent releases cancels if its record has been evicted. Updated companion code also recognizes that these hosts cancel on failure themselves, so the old ten-second watchdog does not cancel a stationary native hold.
 
@@ -46,7 +54,7 @@ Still to be performed on the paired host/plugin build; no new hardware validatio
 - Try a short flick with a large momentum tail: momentum must not supply missing finger travel.
 - Scroll nested horizontal content from its interior and either edge: retain ownership throughout.
 - Repeat on the browser home surface, including rapid successive contacts while navigation is busy.
-- Compare affordance progress and release behavior for slow/fractional drags and browser zoom. Native points, CSS pixels and Compose units remain different coordinate spaces; the companion's existing calibration is preserved.
-- Disable/re-enable in Settings; where applicable, verify denied Input Monitoring and recovery after granting it.
+- Compare affordance progress and release behavior for slow/fractional drags and browser zoom. At non-100% zoom, explicitly check whether the native point-based vertical threshold vetoes a gesture the CSS-pixel page detector accepts; native rejection is logged for diagnosis. The companion's existing calibration is preserved.
+- On a Mac that has never granted BOSS Input Monitoring, confirm BOSS appears in System Settings > Privacy & Security > Input Monitoring. The app only preflights access and does not prompt; if absent, use the pane's `+` control and select BOSS.app when that option is available. Grant access, then turn swipe navigation off and on to retry.
 
 The reviewer requested this check before merge. Keep that requirement visible rather than treating green automated tests as a substitute.

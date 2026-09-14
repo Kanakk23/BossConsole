@@ -416,7 +416,7 @@
         }
         nativeGestureId = activeId;
 
-        if (rejected || switchedOff()) {
+        if (rejected) {
             return;
         }
         // Run in bubble phase so a page widget gets the first chance to claim a synthetic or
@@ -427,11 +427,6 @@
         }
         if (!scrollPath) {
             scrollPath = eventPath(event);
-        }
-        // Line and page modes come from sources that are never a trackpad.
-        if (event.deltaMode !== 0) {
-            abandon();
-            return;
         }
         var dx = event.deltaX || 0;
         var dy = event.deltaY || 0;

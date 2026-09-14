@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicLong
 internal data class ScrollGestureSnapshot(
     val id: Long,
     val active: Boolean,
+    /** Redundant with active today; retained to make claim visibility an explicit state boundary. */
     val observable: Boolean = active,
     val horizontalEvents: Int = 0,
     val accumX: Double = 0.0,
@@ -204,6 +205,7 @@ internal class ScrollPhaseObserver(
     private val launch: (() -> Unit) -> Unit,
     private val publish: (String, String) -> Unit,
     private val reportFailure: (Throwable) -> Unit,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val lock = Any()
     private val listeners = mutableMapOf<Long, (ScrollGestureEnd) -> Unit>()
@@ -211,6 +213,7 @@ internal class ScrollPhaseObserver(
     private var snapshot = ScrollGestureSnapshot(0, false)
     private var generation = 0L
     private var enabled = false
+    private var previousTerminatedAtEpochMs: Long? = null
     private val terminals = ArrayDeque<String>()
     private val mutableAvailability = MutableStateFlow(ScrollPhaseAvailability.DISABLED)
     val availability = mutableAvailability.asStateFlow()
@@ -223,6 +226,8 @@ internal class ScrollPhaseObserver(
     fun setEnabled(value: Boolean) {
         val sessionId =
             synchronized(lock) {
+                // Permission denial retries only after an explicit off/on transition, matching the
+                // Settings recovery instructions; ordinary failures may retry a redundant enable.
                 if (enabled == value && (!value || availability.value != ScrollPhaseAvailability.FAILED)) return
                 enabled = value
                 generation++
@@ -260,7 +265,7 @@ internal class ScrollPhaseObserver(
             if (!isCurrent(id)) return
             open(
                 { phase, momentum, dx, dy -> consume(id, phase, momentum, dx, dy) },
-                { synchronized(lock) { if (isCurrent(id)) cancelCurrent() } },
+                { synchronized(lock) { if (isCurrent(id)) cancelCurrent(clock()) } },
             ).use { session ->
                 synchronized(lock) {
                     if (!isCurrent(id)) return
@@ -277,7 +282,7 @@ internal class ScrollPhaseObserver(
         } finally {
             synchronized(lock) {
                 if (isCurrent(id)) {
-                    cancelCurrent()
+                    cancelCurrent(clock())
                     publish(MacOSScrollGesturePhases.PHASE_PROPERTY, "unavailable")
                     if (availability.value == ScrollPhaseAvailability.AVAILABLE) {
                         mutableAvailability.value = ScrollPhaseAvailability.FAILED
@@ -293,7 +298,7 @@ internal class ScrollPhaseObserver(
     ): Unit =
         synchronized(lock) {
             if (!isCurrent(id)) return
-            cancelCurrent()
+            cancelCurrent(clock())
             mutableAvailability.value =
                 if (error is ScrollPhasePermissionDenied) {
                     ScrollPhaseAvailability.PERMISSION_DENIED
@@ -312,23 +317,32 @@ internal class ScrollPhaseObserver(
     ): Unit =
         synchronized(lock) {
             if (!isCurrent(id)) return
+            val callbackAt = clock()
             val before = snapshot
-            val (after, end) = scrollGestureTransition(before, phase, momentum, dx, dy, System.currentTimeMillis())
+            val (after, end) = scrollGestureTransition(before, phase, momentum, dx, dy, callbackAt)
             snapshot = after
             // Publish the replaced contact's cancellation before announcing the new contact.
-            end?.let(::deliver)
+            end?.let { deliver(it, callbackAt) }
             if (after.active && (!before.active || after.id != before.id)) {
-                publish(MacOSScrollGesturePhases.PHASE_PROPERTY, "${after.id}:active:${after.beganAtEpochMs}")
+                val previous = previousTerminatedAtEpochMs?.let { ":$it" }.orEmpty()
+                publish(
+                    MacOSScrollGesturePhases.PHASE_PROPERTY,
+                    "${after.id}:active:${after.beganAtEpochMs}$previous",
+                )
             }
         }
 
-    private fun cancelCurrent() {
+    private fun cancelCurrent(endedAtEpochMs: Long = clock()) {
         val (after, end) = scrollGestureTransition(snapshot, CG_SCROLL_PHASE_CANCELLED, 0)
         snapshot = after
-        end?.let(::deliver)
+        end?.let { deliver(it, endedAtEpochMs) }
     }
 
-    private fun deliver(end: ScrollGestureEnd) {
+    private fun deliver(
+        end: ScrollGestureEnd,
+        endedAtEpochMs: Long,
+    ) {
+        previousTerminatedAtEpochMs = endedAtEpochMs
         val state = if (end.cancelled) "cancelled" else "ended"
         val wire = "${end.id}:$state:${end.accumX}:${end.verticalPath}:${end.rejected}:${end.reversed}"
         terminals.addLast(wire)
@@ -336,6 +350,8 @@ internal class ScrollPhaseObserver(
         // History comes first: a reader observing the next active id can already recover the end.
         publish(MacOSScrollGesturePhases.TERMINALS_PROPERTY, terminals.joinToString(";"))
         publish(MacOSScrollGesturePhases.PHASE_PROPERTY, wire)
+        // Listener callbacks must only enqueue work. This tap thread holds the monitor also used
+        // by page claims, so synchronously entering the renderer here would deadlock.
         end.claimantIds.forEach { id -> listeners[id]?.let { runCatching { it(end) } } }
     }
 

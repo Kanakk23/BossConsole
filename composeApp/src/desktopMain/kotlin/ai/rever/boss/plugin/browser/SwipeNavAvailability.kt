@@ -13,7 +13,8 @@ internal fun swipeNavSettingsDescription(
     val capability =
         when (availability) {
             ScrollPhaseAvailability.PERMISSION_DENIED -> {
-                "Allow BOSS under System Settings > Privacy & Security > Input Monitoring. $retry"
+                "Allow BOSS under System Settings > Privacy & Security > Input Monitoring. " +
+                    "If BOSS is absent, use + and select BOSS.app. $retry"
             }
 
             ScrollPhaseAvailability.FAILED -> {

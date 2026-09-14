@@ -768,6 +768,9 @@ restart. There is no Settings row and no per-site exclusion.
   `window.__bossInteractionStarted`. The sanitizers bound what can be *smuggled*
   through; nothing bounds a site lying about its own usage. Treat these as
   indicative, not as measurements, wherever a site has an incentive to lie.
+- **A page can observe the current trackpad gesture token.** The injected swipe bridge exposes
+  the process-wide contact id and begin epoch while fingers are down. It does not expose deltas,
+  but a page can poll the bridge and infer that a trackpad contact is active.
 - **Every project the user opens is now on the bus, not only plugin-initiated ones.**
   `ProjectChangeEvent` used to be published from `ProjectDataProviderImpl.selectProject`
   alone, so a path reached plugins only when a plugin had asked for the switch. It is
@@ -817,8 +820,9 @@ the native source and tap within the bounded run-loop poll. Re-enabling retries 
 run-loop failures cancel the contact, clean up resources and report a distinct failure state.
 Availability reads and browser registration do not start native observation.
 
-`boss.browser.swipe.phase` remains compatible: `id:active:beganAtEpochMs` or
-`id:ended|cancelled:netX:verticalPath:pageRejected:reversed`. Active publication occurs only at
+`boss.browser.swipe.phase` remains compatible: `id:active:beganAtEpochMs[:previousTerminatedAtEpochMs]`
+or `id:ended|cancelled:netX:verticalPath:nativeRejected:reversed`. The fifth terminal field is the
+native reducer's verdict, not the page's. Active publication occurs only at
 contact begin, not on every movement. `boss.browser.swipe.terminals` additionally retains the last
 32 terminal records, separated by semicolons, published before the next active contact. Companion
 fluck-browser#45 reconciles by contact ID both before handling a new wheel and in its watchdog.
@@ -828,12 +832,10 @@ trackpad calibration still needs to cover browser zoom, slow drags and the separ
 surface. `SwipeNavParityTest` runs shared sample fixtures through the native reducer and the actual
 page script, including the host-generated release statement; it also pins cancellation constants.
 
-One cross-process ordering limit remains: JxBrowser drops the AWT event timestamp before building
-the renderer wheel event. The epoch check can reject an event Chromium timestamps before the new
-native Begin, but a renderer backlog could stamp an old event after that Begin and associate it
-with the new id. Native final displacement still prevents a delayed reversal from committing; the
-remaining cross-gesture attribution case needs real backlog testing before adding a custom FIFO
-between the CoreGraphics tap and JxBrowser's input callback.
+One cross-process ordering limit remains: the cutoff rejects AWT events stamped at or before the
+previous native termination, but cannot identify an old OS event that AWT dispatch stamps only
+after the new contact begins. Arbitrarily delayed dispatch still needs real backlog testing
+before adding a custom FIFO between the CoreGraphics tap and JxBrowser's input callback.
 
 **Past the commit distance, vertical drift stops cancelling** (`reachedCommit`). Vertical is a path
 length and only ever grows, so every event after the crossing was one more chance to cancel a swipe

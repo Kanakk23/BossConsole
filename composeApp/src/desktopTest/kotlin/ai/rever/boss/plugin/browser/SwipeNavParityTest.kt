@@ -8,6 +8,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -72,12 +73,16 @@ class SwipeNavParityTest {
         try {
             evidence.writeText(results.toString())
             val process =
-                ProcessBuilder(
-                    "node",
-                    File(root, "scripts/test/test-swipe-nav.js").absolutePath,
-                    "--native-results",
-                    evidence.absolutePath,
-                ).redirectErrorStream(true).redirectOutput(output).start()
+                try {
+                    ProcessBuilder(
+                        "node",
+                        File(root, "scripts/test/test-swipe-nav.js").absolutePath,
+                        "--native-results",
+                        evidence.absolutePath,
+                    ).redirectErrorStream(true).redirectOutput(output).start()
+                } catch (error: IOException) {
+                    throw IOException("SwipeNavParityTest requires node on PATH", error)
+                }
             val completed = process.waitFor(30, TimeUnit.SECONDS)
             if (!completed) process.destroyForcibly()
             assertTrue(completed, "page parity suite timed out")

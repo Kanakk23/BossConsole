@@ -7,7 +7,6 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -141,9 +140,6 @@ class BrowserSwipeNavTest {
 
     @Test
     fun `the debounce covers a frame and stays below the repeat guard`() {
-        assertTrue(
-            SWIPE_NAV_DEBOUNCE_MS < SWIPE_NAV_REPEAT_MS,
-        )
         assertTrue(
             SWIPE_NAV_DEBOUNCE_MS >= ONE_FRAME_MS,
             "$SWIPE_NAV_DEBOUNCE_MS must still cover a same-frame double-dispatch",

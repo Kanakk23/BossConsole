@@ -19,6 +19,7 @@ class ScrollPhaseObserverTest {
         var opens = 0
         var closes = 0
         var deny = false
+        var now = 1_000L
         var duringPoll: () -> Boolean = { false }
         val observer =
             ScrollPhaseObserver(
@@ -41,6 +42,7 @@ class ScrollPhaseObserverTest {
                     publications.add(key to value)
                 },
                 reportFailure = { errors.add(it) },
+                clock = { now },
             )
 
         fun run() = tasks.removeFirst().invoke()
@@ -173,6 +175,41 @@ class ScrollPhaseObserverTest {
     }
 
     @Test
+    fun `active publication carries the previous callback cutoff across replacement and restart`() {
+        val h = Harness()
+        h.observer.setEnabled(true)
+        h.duringPoll = {
+            h.begin()
+            assertEquals("1:active:1000", h.properties[MacOSScrollGesturePhases.PHASE_PROPERTY])
+            h.now = 1_960
+            h.event(4, 0, 0.0, 0.0)
+            h.now = 2_000
+            h.begin()
+            assertEquals("2:active:2000:1960", h.properties[MacOSScrollGesturePhases.PHASE_PROPERTY])
+            h.now = 2_100
+            h.begin()
+            assertEquals("3:active:2100:2100", h.properties[MacOSScrollGesturePhases.PHASE_PROPERTY])
+            val replacementPublications = h.publications.takeLast(3)
+            assertEquals(MacOSScrollGesturePhases.TERMINALS_PROPERTY, replacementPublications[0].first)
+            assertEquals(MacOSScrollGesturePhases.PHASE_PROPERTY, replacementPublications[1].first)
+            assertEquals("3:active:2100:2100", replacementPublications[2].second)
+            h.now = 2_200
+            h.observer.setEnabled(false)
+            h.observer.setEnabled(true)
+            true
+        }
+        h.run()
+        h.duringPoll = {
+            h.now = 2_300
+            h.begin()
+            assertEquals("4:active:2300:2200", h.properties[MacOSScrollGesturePhases.PHASE_PROPERTY])
+            h.observer.setEnabled(false)
+            true
+        }
+        h.run()
+    }
+
+    @Test
     fun `replacement and interrupted taps cancel every registered claimant once`() {
         val h = Harness()
         val first = mutableListOf<ScrollGestureEnd>()
@@ -250,6 +287,7 @@ class ScrollPhaseObserverTest {
 
     @Test
     fun `settings distinguish permission failure and environment ownership`() {
+        assertTrue("Starting" in swipeNavSettingsDescription(null, ScrollPhaseAvailability.STARTING))
         val denied = swipeNavSettingsDescription(null, ScrollPhaseAvailability.PERMISSION_DENIED)
         assertTrue("Input Monitoring" in denied)
         val failure = swipeNavSettingsDescription(null, ScrollPhaseAvailability.FAILED)

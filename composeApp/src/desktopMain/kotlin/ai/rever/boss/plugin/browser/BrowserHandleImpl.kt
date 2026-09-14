@@ -2053,6 +2053,13 @@ internal class BrowserHandleImpl(
     private fun onSwipeGestureEnded(end: ScrollGestureEnd) {
         if (!isValid) return
         pageInjectScope.launch(pageInjectDispatcher) {
+            if (end.rejected && !end.cancelled) {
+                logger.debug(
+                    LogCategory.BROWSER,
+                    "Native trackpad release vetoed browser swipe",
+                    mapOf("gestureId" to end.id, "horizontal" to end.accumX, "verticalPath" to end.verticalPath),
+                )
+            }
             val statement = BrowserSwipeNavScript.release(end)
             runCatching { browser.mainFrame().ifPresent { it.executeJavaScript<Any?>(statement) } }
         }
