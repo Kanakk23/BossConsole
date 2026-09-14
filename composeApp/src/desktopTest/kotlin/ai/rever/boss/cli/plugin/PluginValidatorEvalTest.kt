@@ -1,5 +1,6 @@
 package ai.rever.boss.cli.plugin
 
+import ai.rever.boss.plugin.launchpad.DevPluginArtifacts
 import ai.rever.boss.plugin.launchpad.HostMeta
 import ai.rever.boss.plugin.launchpad.PluginManifest
 import ai.rever.boss.plugin.launchpad.PluginValidator
@@ -15,6 +16,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class PluginValidatorEvalTest {
@@ -416,6 +418,31 @@ class PluginValidatorEvalTest {
         assertFalse(
             PluginValidator.checkDirectInterfaceImplementation(truncatedBytes),
             "Truncated bytecode must safely return false and not throw BufferUnderflowException",
+        )
+    }
+
+    @Test
+    fun `manifest exceeding 512 KB limit fails validation safely`() {
+        val jarFile = File(tempDir.toFile(), "oversized-manifest.jar")
+        val padding = "x".repeat(525 * 1024)
+        val oversizedJson = """{"pluginId":"com.example.big","version":"1.0.0","description":"$padding"}"""
+        createJar(
+            jarFile,
+            mapOf("META-INF/boss-plugin/plugin.json" to oversizedJson.toByteArray(StandardCharsets.UTF_8)),
+        )
+
+        val result = PluginValidator.validate(jarFile)
+        assertFalse(result.isValid, "JAR with manifest > 512 KB must fail validation")
+        val manifestCheck = result.checks.firstOrNull { it.name == "manifest-valid" }
+        assertNotNull(manifestCheck, "Must record manifest-valid failure check")
+        assertFalse(manifestCheck.passed)
+        assertTrue(manifestCheck.message.contains("512 KB"))
+
+        val manifest = PluginValidator.readManifestFromJar(jarFile)
+        assertNull(manifest, "readManifestFromJar must return null for manifest exceeding limit")
+        assertFalse(
+            DevPluginArtifacts.isValidDevJar(jarFile),
+            "DevPluginArtifacts.isValidDevJar must reject oversized manifest",
         )
     }
 

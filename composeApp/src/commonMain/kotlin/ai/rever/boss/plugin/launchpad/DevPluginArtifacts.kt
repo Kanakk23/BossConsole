@@ -19,10 +19,26 @@ object DevPluginArtifacts {
     private val manifestJson = Json { ignoreUnknownKeys = true }
 
     const val DEFAULT_MAX_VERSIONS_TO_KEEP: Int = 3
+    const val MAX_MANIFEST_BYTES: Int = 512 * 1024
 
     /** Staging root directory override for isolated unit and integration tests. */
     @Volatile
     internal var stagingRootOverride: File? = null
+
+    /**
+     * Reads up to [maxBytes] from [stream] as UTF-8.
+     * Returns null if the stream exceeds [maxBytes] or cannot be read.
+     */
+    internal fun readBoundedUtf8String(
+        stream: java.io.InputStream,
+        maxBytes: Int = MAX_MANIFEST_BYTES,
+    ): String? =
+        try {
+            val bytes = stream.readNBytes(maxBytes + 1)
+            if (bytes.size > maxBytes) null else bytes.toString(Charsets.UTF_8)
+        } catch (_: Exception) {
+            null
+        }
 
     /**
      * Resolves the root staging directory for dev plugins (~/.boss/plugins/dev or ~/.boss_debug/plugins/dev).
@@ -84,7 +100,7 @@ object DevPluginArtifacts {
         try {
             java.util.jar.JarFile(jarFile).use { jar ->
                 val entry = jar.getJarEntry("META-INF/boss-plugin/plugin.json") ?: return null
-                jar.getInputStream(entry).bufferedReader().use { it.readText() }
+                jar.getInputStream(entry).use { readBoundedUtf8String(it) }
             }
         } catch (_: Exception) {
             null

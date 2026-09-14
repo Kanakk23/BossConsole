@@ -115,15 +115,18 @@ object PluginValidator {
             checks = result.checks,
         )
 
-    fun readManifestFromJar(file: File): PluginManifest {
-        JarFile(file).use { jar ->
-            val entry =
-                jar.getJarEntry("META-INF/boss-plugin/plugin.json")
-                    ?: error("plugin.json missing in archive at META-INF/boss-plugin/plugin.json: ${file.name}")
-            val content = jar.getInputStream(entry).bufferedReader().use { it.readText() }
-            return launchpadJson.decodeFromString<PluginManifest>(content)
+    fun readManifestFromJar(file: File): PluginManifest? =
+        try {
+            JarFile(file).use { jar ->
+                val entry =
+                    jar.getJarEntry("META-INF/boss-plugin/plugin.json") ?: return null
+                val content =
+                    jar.getInputStream(entry).use { DevPluginArtifacts.readBoundedUtf8String(it) } ?: return null
+                launchpadJson.decodeFromString<PluginManifest>(content)
+            }
+        } catch (_: Exception) {
+            null
         }
-    }
 
     private fun validateDirectory(
         dir: File,
@@ -274,7 +277,19 @@ object PluginValidator {
                         message = "plugin.json found in archive",
                     )
 
-                val manifestContent = jarFile.getInputStream(manifestEntry).bufferedReader().use { it.readText() }
+                val manifestContent =
+                    jarFile.getInputStream(manifestEntry).use { DevPluginArtifacts.readBoundedUtf8String(it) }
+                if (manifestContent == null) {
+                    checks +=
+                        ValidationCheck(
+                            name = "manifest-valid",
+                            passed = false,
+                            message =
+                                "plugin.json exceeds maximum allowed size limit of " +
+                                    "${DevPluginArtifacts.MAX_MANIFEST_BYTES / 1024} KB",
+                        )
+                    return null
+                }
                 val allEntries =
                     jarFile
                         .entries()

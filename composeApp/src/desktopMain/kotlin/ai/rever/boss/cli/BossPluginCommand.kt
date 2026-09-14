@@ -228,6 +228,7 @@ class BossPluginLinkCommand : CliktCommand(name = "link") {
         val manifest =
             try {
                 PluginValidator.readManifestFromJar(targetJarFile)
+                    ?: error("Failed to extract plugin manifest from JAR: ${targetJarFile.name}")
             } catch (e: Exception) {
                 val msg = "Failed to extract plugin manifest from JAR: ${e.message}"
                 logger.error(LogCategory.SYSTEM, msg, error = e)

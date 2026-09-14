@@ -136,8 +136,8 @@ internal const val MAX_REQUEST_BYTES = 1024 * 1024
 internal const val MAX_ARGUMENT_BYTES = 768 * 1024 - 1024
 internal const val MAX_TOOL_NAME_LENGTH = 256
 
-/** A response is one short word; nothing legitimate approaches this. */
-private const val MAX_RESPONSE_BYTES = 256
+/** A response ceiling expanded to 1024 bytes to support diagnostic dev reload error payloads. */
+internal const val MAX_RESPONSE_BYTES = 1024
 
 /** Ceiling on data responses (status, MCP tool list, Base64 tool invocation output). */
 private const val MAX_DATA_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -888,7 +888,7 @@ private fun buildPluginDevReloadResponse(
             val sanitizedMessage =
                 "$errorName: $errorDetail"
                     .replace(Regex("[\\r\\n]+"), " ")
-                    .take(250)
+                    .take(400)
             "RELOAD_FAILED $sanitizedMessage"
         },
     )

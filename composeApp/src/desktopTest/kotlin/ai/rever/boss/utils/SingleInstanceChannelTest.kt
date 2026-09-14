@@ -724,6 +724,22 @@ class SingleInstanceChannelTest {
         assertTrue(assertNotNull(failure).message.orEmpty().contains("response size limit"))
     }
 
+    @Test
+    fun `reloadDevPlugin transmits diagnostic error over 256 bytes`() {
+        val longDetail = "DiagnosticContextInfo_".repeat(16)
+        SingleInstanceManager.pluginReloadHandlerOverride = { _ ->
+            throw IllegalStateException(longDetail)
+        }
+        assertTrue(SingleInstanceManager.acquireLock())
+        val result = SingleInstanceManager.reloadDevPlugin("diagnostic-plugin")
+        kotlin.test.assertIs<ReloadResult.Failed>(result)
+        assertTrue(
+            result.reason.length >= 350,
+            "Error response must preserve 350+ char diagnostic message: ${result.reason.length}",
+        )
+        assertTrue(result.reason.contains("DiagnosticContextInfo_"))
+    }
+
     // ==================== Helpers ====================
 
     private fun runtimeDirPath(): Path = File(tempDir.toFile(), "run").toPath()
