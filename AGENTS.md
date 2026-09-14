@@ -694,7 +694,7 @@ console at INFO and the file at DEBUG, the file gets INFO. Blank is unset at eve
 unrecognised level falls through to the next source rather than to INFO. File and console receive the same
 entries; callers must use `LogSanitizer` before logging sensitive data, since `BossLogger` does not sanitize them.
 `BossLogger.configureFromEnvironment()` in
-`main.kt` is the only host entry point; `configure()` has no caller. Flipping
+`main.kt` is the only host entry point; `configure()` has no host caller. Flipping
 `FILE_LOGGING_ON_BY_DEFAULT` in `BossLogger` makes it default-on at `~/.boss/logs/boss.log` for every
 install; that switch is deliberately one constant, because whether to default on was raised on #394 and
 is a policy call.

@@ -32,6 +32,26 @@ class FileLogThresholdTest {
     }
 
     @Test
+    fun `a directory cannot become an enabled file destination`() {
+        dir.mkdirs()
+
+        BossLogger.enableFileLogging(dir, LogLevel.ERROR)
+
+        assertFalse(BossLogger.writesToFile(LogLevel.ERROR))
+    }
+
+    @Test
+    fun `a parent that is a file cannot become an enabled destination`() {
+        dir.mkdirs()
+        val parent = File(dir, "parent")
+        parent.writeText("existing file")
+
+        BossLogger.enableFileLogging(File(parent, "boss.log"), LogLevel.ERROR)
+
+        assertFalse(BossLogger.writesToFile(LogLevel.ERROR))
+    }
+
+    @Test
     fun `the file receives its threshold and above`() {
         BossLogger.enableFileLogging(File(dir, "boss.log"), LogLevel.WARN)
 

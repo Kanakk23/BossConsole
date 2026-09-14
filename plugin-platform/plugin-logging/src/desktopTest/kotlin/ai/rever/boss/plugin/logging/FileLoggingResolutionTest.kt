@@ -8,7 +8,7 @@ import kotlin.test.assertNull
  * Pins how the host decides whether, where and at what level to write a log file.
  *
  * Nothing in the host has ever turned file logging on: `BossLoggerConfig.fileLoggingEnabled` is
- * applied only by `configure()`, which has no caller, and `configureFromEnvironment()` read only
+ * applied only by `configure()`, which has no host caller, and `configureFromEnvironment()` read only
  * the console level. The result was that a plugin disabled by the restart budget left an ERROR on
  * stdout and nothing on disk (#394). This resolver is what `configureFromEnvironment()` now asks.
  *

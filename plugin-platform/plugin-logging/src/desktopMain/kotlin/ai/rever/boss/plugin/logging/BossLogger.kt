@@ -398,8 +398,11 @@ object BossLogger {
     ) {
         try {
             file.parentFile?.mkdirs()
+            // Open the destination now so an invalid/unwritable path fails before enabling the gate.
+            file.appendText("")
             logFile = file
             fileMinLevel = minLevel
+            // Publish enabled last so logging threads observe the configured path and threshold.
             fileLoggingEnabled = true
             startFileWriter()
         } catch (e: Exception) {
@@ -411,6 +414,7 @@ object BossLogger {
      * Disable file logging.
      */
     fun disableFileLogging() {
+        // Close the gate before clearing the destination and threshold.
         fileLoggingEnabled = false
         stopFileWriter()
         logFile = null
