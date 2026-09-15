@@ -224,7 +224,7 @@ case "$1" in
         esac
         ;;
 
-    status|mcp|completion)
+    status|doctor|mcp|completion)
         forward_to_boss "$@"
         ;;
 
@@ -245,6 +245,7 @@ Usage:
 
 Commands:
   status                 Queries status and health of the running BOSS instance
+  doctor                 Reports problems in the running BOSS instance (exit 2 when degraded)
   mcp <action> [args]    Discovers and invokes desktop MCP tools (list, describe, invoke)
   completion <shell>     Generates shell completion script (bash, zsh, fish)
   url <url>              Opens a URL in Fluck browser
