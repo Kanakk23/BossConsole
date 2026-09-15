@@ -1,4 +1,4 @@
-# Tab ghost stuck to pointer — #690
+# Tab ghost stuck to pointer - #690
 
 Issue: https://github.com/risa-labs-inc/BossConsole/issues/690
 
