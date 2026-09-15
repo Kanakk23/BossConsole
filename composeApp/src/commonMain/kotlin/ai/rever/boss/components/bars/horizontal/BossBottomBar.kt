@@ -7,6 +7,7 @@ import ai.rever.boss.components.bars.rememberBarContextMenuItems
 import ai.rever.boss.components.buttons.BossActionButton
 import ai.rever.boss.components.dialogs.McpPolicyManagerDialog
 import ai.rever.boss.components.dialogs.McpProviderTrustDialog
+import ai.rever.boss.components.dialogs.McpToolIdentity
 import ai.rever.boss.components.events.PanelEventBus
 import ai.rever.boss.components.overlays.contextMenu
 import ai.rever.boss.components.plugin.registries.StatusBarRegistryImpl
@@ -19,6 +20,7 @@ import ai.rever.boss.mcp.McpToolPolicyConfig
 import ai.rever.boss.mcp.McpToolRegistryImpl
 import ai.rever.boss.performance.PerformanceState
 import ai.rever.boss.plugin.api.PanelId
+import ai.rever.boss.plugin.api.RegisteredMcpTool
 import ai.rever.boss.plugin.api.StatusBarAlignment
 import ai.rever.boss.plugin.sandbox.ui.PluginExtensionBoundary
 import ai.rever.boss.plugin.tab.codeeditor.EditorTabInfo
@@ -239,34 +241,13 @@ fun BossRightBottomBar() {
     }
 
     // Inspection/revocation for a rule saved via the approval dialog's "Always Allow"/"Always
-    // Deny" - the gap AGENTS.md's governance section names as reachable only by hand-editing
-    // ~/.boss/mcp-tool-policy.json and restarting.
+    // Deny", plus proactively setting one for a tool nothing has asked about yet - the gap
+    // AGENTS.md's governance section names as reachable only by hand-editing
+    // ~/.boss/mcp-tool-policy.json and restarting. Collected once here, like the other
+    // per-window state above, and shared with the trusted-plugins controls below rather than
+    // each subscribing to McpPolicyEngine.config on its own.
     val persistedPolicyConfig by McpToolRegistryImpl.policyEngine.config.collectAsState()
-    var showPolicyManager by remember { mutableStateOf(false) }
-    if (persistedPolicyConfig.rules.isNotEmpty()) {
-        androidx.compose.material.TextButton(onClick = { showPolicyManager = true }) {
-            Text(
-                "Persisted MCP policies (${persistedPolicyConfig.rules.size})",
-                color = BossTheme.colors.textSecondary,
-            )
-        }
-    }
-    if (showPolicyManager) {
-        McpPolicyManagerDialog(
-            rules = persistedPolicyConfig.rules,
-            // Dispatchers.IO: revokePersistedPolicy does a synchronized atomicWriteText disk
-            // write, and setToolPolicy already made the equivalent invocation-path write take
-            // this same dispatcher (McpToolRegistryImpl) - this call site was the one still
-            // running it on the UI thread, where a click could block behind another write
-            // holding the same lock from a slow, networked or AV-scanned home directory.
-            onRevoke = { toolName ->
-                withContext(Dispatchers.IO) {
-                    McpToolRegistryImpl.policyEngine.revokePersistedPolicy(toolName)
-                }
-            },
-            onDismiss = { showPolicyManager = false },
-        )
-    }
+    McpPolicyManagerStatusItem(persistedPolicyConfig)
 
     // "Trust This Plugin" grants from the approval dialog - a persisted, provider-wide ALLOW,
     // listed and revoked individually (see the controls below) from the same config the
@@ -357,6 +338,109 @@ fun BossRightBottomBar() {
         },
     )
 }
+
+/**
+ * Inspect and revoke a persisted MCP tool policy, or set one proactively for a tool nothing has
+ * asked about yet. Split out of [BossRightBottomBar], whose own branching was already at
+ * detekt's [CyclomaticComplexMethod] ceiling before this grew a second dialog and a proactive
+ * candidate list. [persistedPolicyConfig] is collected by the caller, once, and shared with
+ * [McpProviderTrustControls] rather than each subscribing on its own.
+ */
+@Composable
+private fun McpPolicyManagerStatusItem(persistedPolicyConfig: McpToolPolicyConfig) {
+    val allTools by McpToolRegistryImpl.allTools.collectAsState()
+    var showPolicyManager by remember { mutableStateOf(false) }
+    val ruleCount = persistedPolicyConfig.rules.size
+    if (ruleCount > 0 || allTools.isNotEmpty()) {
+        androidx.compose.material.TextButton(onClick = { showPolicyManager = true }) {
+            Text(
+                if (ruleCount > 0) "Persisted MCP policies ($ruleCount)" else "Set MCP tool policies",
+                color = BossTheme.colors.textSecondary,
+            )
+        }
+    }
+    if (showPolicyManager) {
+        val disabledToolNames by McpToolRegistryImpl.disabledToolNames.collectAsState()
+        var candidateRefresh by remember { mutableStateOf(0) }
+        val availableTools =
+            remember(allTools, persistedPolicyConfig.rules, disabledToolNames, candidateRefresh) {
+                mcpProactivePolicyCandidates(
+                    allTools,
+                    persistedPolicyConfig.rules,
+                    disabledToolNames,
+                    McpToolRegistryImpl.policyEngine::revocationVersion,
+                )
+            }
+        McpPolicyManagerDialog(
+            rules = persistedPolicyConfig.rules,
+            availableTools = availableTools,
+            // Dispatchers.IO: revokePersistedPolicy and setToolPolicyIfAbsent both do a
+            // synchronized atomicWriteText disk write - this call site was the one still running
+            // it on the UI thread, where a click could block behind another write holding the
+            // same lock from a slow, networked or AV-scanned home directory.
+            onRevoke = { toolName ->
+                withContext(Dispatchers.IO) {
+                    McpToolRegistryImpl.policyEngine.revokePersistedPolicy(toolName)
+                }
+            },
+            // setToolPolicyIfAbsent, not setToolPolicy: this path must add a rule only while the
+            // tool still has none of its own, atomically re-checked at write time - not just
+            // refuse a DENY, and not only when the revocation counter moved. An intervening
+            // explicit ASK or ALLOW, made through the reactive approval dialog for this same tool
+            // between "this row was offered" and this click reaching disk, never bumps that
+            // counter, so a `preserveDeny`-style guard alone would let this write silently
+            // clobber it (review on #636). tool.expectedRevocation is still passed, and still
+            // checked first, to catch a DENY or provider-wide reset the same way the reactive
+            // path's own capture-then-recheck does.
+            onSetPolicy = { tool, action ->
+                withContext(Dispatchers.IO) {
+                    McpToolRegistryImpl.policyEngine.setToolPolicyIfAbsent(
+                        tool.toolName,
+                        action,
+                        expectedRevocation = tool.expectedRevocation,
+                        providerId = tool.providerId,
+                    )
+                }
+            },
+            onRefreshCandidates = { candidateRefresh++ },
+            onDismiss = { showPolicyManager = false },
+        )
+    }
+}
+
+/**
+ * Every registered tool [McpPolicyManagerDialog] may write a proactive rule for: not disabled by
+ * the kill switch (a proactive rule for a disabled tool would do nothing - [McpToolRegistryImpl]
+ * resolves invocation against `tools`, which already excludes it), and not already in [rules]
+ * (that tool has its row in the saved-rules list instead). Sorted here, once, rather than by the
+ * composable on every recomposition - the caller already [remember]s the result.
+ *
+ * A pure function, not a `@Composable`, because the exclusion this expresses - never offer a rule
+ * for a tool that already has one, or that a rule could not affect - is the one thing standing
+ * between the dialog's Allow/Deny buttons and silently overwriting an existing DENY or granting a
+ * dead tool nothing can invoke. That is worth pinning on its own, not only through the dialog it
+ * feeds (review on #636).
+ *
+ * [revocationVersion] is injected - normally
+ * [ai.rever.boss.mcp.McpPolicyEngine.revocationVersion] - rather than reached for directly, so
+ * this stays a pure, testable mapping over its arguments; each candidate's own generation is
+ * stamped onto it as [McpToolIdentity.expectedRevocation], for [McpPolicyManagerDialog]'s write
+ * path to pass back to `setToolPolicyIfAbsent` unchanged.
+ */
+internal fun mcpProactivePolicyCandidates(
+    allTools: List<RegisteredMcpTool>,
+    rules: Map<String, McpPolicyAction>,
+    disabledToolNames: Set<String>,
+    revocationVersion: (toolName: String, providerId: String?) -> Long,
+): List<McpToolIdentity> =
+    allTools
+        .asSequence()
+        .filter { it.definition.name !in rules }
+        .filter { it.definition.name !in disabledToolNames }
+        .map {
+            McpToolIdentity(it.definition.name, it.providerId, revocationVersion(it.definition.name, it.providerId))
+        }.sortedBy { it.toolName }
+        .toList()
 
 /**
  * The "Trusted plugins" control for the provider-wide ALLOWs ("Trust This Plugin") granted

@@ -47,6 +47,25 @@ sealed interface McpPolicyFault {
 }
 
 /**
+ * Result of an atomic proactive write. Refusals need a refreshed candidate and a new
+ * operator decision; storage failures need storage recovery. Neither is a saved rule.
+ */
+sealed interface McpProactivePolicyOutcome {
+    data object Saved : McpProactivePolicyOutcome
+
+    /** The candidate is stale, a rule exists, or an effective DENY/fault blocks the write. */
+    data object Refused : McpProactivePolicyOutcome
+
+    data object PolicyUnreadable : McpProactivePolicyOutcome
+
+    data object Denied : McpProactivePolicyOutcome
+
+    data class Failed(
+        val error: String,
+    ) : McpProactivePolicyOutcome
+}
+
+/**
  * Manages MCP tool execution policies (ALLOW / ASK / DENY).
  *
  * Persisted to `~/.boss/mcp-tool-policy.json`. A damaged or unreadable file
@@ -211,19 +230,36 @@ class McpPolicyEngine(
         successMessage: String,
         failureMessage: String,
         faultFor: (key: String, error: String) -> McpPolicyFault,
-    ): Boolean {
+    ): Boolean =
+        writeConfig(key, logKey, updated, successMessage, failureMessage, faultFor) is McpProactivePolicyOutcome.Saved
+
+    /**
+     * The persist-publish-log-fault sequence every durable write shares, returning
+     * [McpProactivePolicyOutcome] so [setToolPolicyIfAbsent] can report [McpProactivePolicyOutcome.Failed]
+     * distinctly from a guard refusal. [applyConfig] is the `Boolean`-returning adapter its four
+     * existing callers keep using unchanged.
+     */
+    @Suppress("LongParameterList") // Mirrors applyConfig's own six fields; see its KDoc.
+    private fun writeConfig(
+        key: String,
+        logKey: String,
+        updated: McpToolPolicyConfig,
+        successMessage: String,
+        failureMessage: String,
+        faultFor: (key: String, error: String) -> McpPolicyFault,
+    ): McpProactivePolicyOutcome {
         val error = persistConfig(updated)
         return if (error != null) {
             val faultObj = faultFor(key, error)
             if (_fault.value !is McpPolicyFault.PersistedPolicyUnreadable) _fault.value = faultObj
             notifyFault(faultObj)
             logger.warn(LogCategory.SYSTEM, failureMessage, mapOf(logKey to key, "error" to error))
-            false
+            McpProactivePolicyOutcome.Failed(error)
         } else {
             _config.value = updated
             _fault.value = null
             logger.info(LogCategory.SYSTEM, successMessage, mapOf(logKey to key))
-            true
+            McpProactivePolicyOutcome.Saved
         }
     }
 
@@ -244,6 +280,48 @@ class McpPolicyEngine(
             }
             if (preserveDeny && policyFor(toolName, providerId) == McpPolicyAction.DENY) return@synchronized false
             applyConfig(
+                key = toolName,
+                logKey = "tool",
+                updated = _config.value.copy(rules = _config.value.rules + (toolName to action)),
+                successMessage = "Updated tool policy: ${action.name}",
+                failureMessage = "Failed to persist MCP policy update",
+                faultFor = { k, e -> McpPolicyFault.PolicyPersistFailed(k, e) },
+            )
+        }
+
+    /**
+     * The proactive path's write: set a persistent rule for [toolName], but only while it still
+     * has none of its own. [setToolPolicy]'s [expectedRevocation] guard alone does not close
+     * this - only a *revoke* ([revokePersistedPolicy]/[revokeProviderPolicy]) bumps
+     * [revocationVersion], so an intervening explicit ASK or ALLOW made through the reactive
+     * approval dialog for this same tool never trips it, and a candidate offered while the tool
+     * had no rule could otherwise silently overwrite a decision made in between (review on
+     * #636). Checking `toolName !in rules` under the same [lock] the write itself takes closes
+     * that: any rule present at write time - ASK or ALLOW, not only DENY the way
+     * [setToolPolicy]'s `preserveDeny` protects - refuses the write, which is the "add only if
+     * absent" contract this call exists for.
+     *
+     * Returns [McpProactivePolicyOutcome] rather than [Boolean]: the caller needs to tell a
+     * refusal (refresh policy context before retrying) apart from a genuine disk
+     * failure (this operator's own choice did not take), which a bare `false` cannot express.
+     */
+    fun setToolPolicyIfAbsent(
+        toolName: String,
+        action: McpPolicyAction,
+        expectedRevocation: Long,
+        providerId: String? = null,
+    ): McpProactivePolicyOutcome =
+        synchronized(lock) {
+            if (_fault.value is McpPolicyFault.PersistedPolicyUnreadable) {
+                return@synchronized McpProactivePolicyOutcome.PolicyUnreadable
+            }
+            if (revocationVersion(toolName, providerId) != expectedRevocation || toolName in _config.value.rules) {
+                return@synchronized McpProactivePolicyOutcome.Refused
+            }
+            if (policyFor(toolName, providerId) == McpPolicyAction.DENY) {
+                return@synchronized McpProactivePolicyOutcome.Denied
+            }
+            writeConfig(
                 key = toolName,
                 logKey = "tool",
                 updated = _config.value.copy(rules = _config.value.rules + (toolName to action)),
