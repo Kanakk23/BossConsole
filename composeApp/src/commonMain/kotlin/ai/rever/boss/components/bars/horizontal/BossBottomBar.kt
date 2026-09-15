@@ -5,10 +5,13 @@ import ai.rever.boss.components.bars.getBarScrollbarConfig
 import ai.rever.boss.components.bars.horizontalScrollWithScrollbar
 import ai.rever.boss.components.bars.rememberBarContextMenuItems
 import ai.rever.boss.components.buttons.BossActionButton
+import ai.rever.boss.components.dialogs.McpActivityLogDialog
 import ai.rever.boss.components.dialogs.McpPolicyManagerDialog
 import ai.rever.boss.components.dialogs.McpProviderTrustDialog
 import ai.rever.boss.components.dialogs.McpToolIdentity
 import ai.rever.boss.components.events.PanelEventBus
+import ai.rever.boss.components.overlays.HoverTooltipBox
+import ai.rever.boss.components.overlays.TooltipPlacement
 import ai.rever.boss.components.overlays.contextMenu
 import ai.rever.boss.components.plugin.registries.StatusBarRegistryImpl
 import ai.rever.boss.components.plugin.registries.owningPluginId
@@ -30,6 +33,7 @@ import ai.rever.boss.utils.SystemUtils
 import ai.rever.boss.window.LocalWindowId
 import ai.rever.boss.window.LocalWindowProjectState
 import ai.rever.boss.window.Project
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.Divider
@@ -48,6 +52,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -266,20 +276,11 @@ fun BossRightBottomBar() {
         )
     }
 
-    // Governed Autonomy telemetry: show last executed tool, duration, and status
-    val recentOps by McpToolRegistryImpl.ledger.recentOperations.collectAsState()
-    recentOps.firstOrNull()?.let { lastOp ->
-        val statusSymbol = if (lastOp.isError) "✕" else "✓"
-        val statusColor = if (lastOp.isError) BossTheme.colors.alert else BossTheme.colors.textSecondary
-        Text(
-            text = "MCP: ${lastOp.toolName} (${lastOp.durationMs}ms) $statusSymbol",
-            color = statusColor,
-            fontSize = 11.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 6.dp),
-        )
-    }
+    // Governed Autonomy telemetry: show last executed tool, duration, and status. Clickable
+    // because this line used to be the ONLY visibility into MCP activity - every call before
+    // the current one, and the policy/approval decision behind it, was reachable only by
+    // opening the rotated MCP ledger file in a text editor.
+    McpActivityStatusItem()
 
     // Status message (temporary messages like "Space Saved")
     val statusMessage by StatusMessageManager.currentMessage.collectAsState()
@@ -441,6 +442,75 @@ internal fun mcpProactivePolicyCandidates(
             McpToolIdentity(it.definition.name, it.providerId, revocationVersion(it.definition.name, it.providerId))
         }.sortedBy { it.toolName }
         .toList()
+
+/**
+ * The single most recent MCP tool call, clickable into [McpActivityLogDialog] for everything
+ * behind it. Split out of [BossRightBottomBar] because that function's own branching was already
+ * at detekt's [CyclomaticComplexMethod] ceiling before this existed.
+ *
+ * Reachable even with no activity yet ([McpToolRegistryImpl.ledger]'s ring buffer empty): "has
+ * anything used MCP this session?" is a question worth being able to ask before the first call,
+ * not only after one - and is when an operator is most likely to be checking (review on #636).
+ */
+@Composable
+private fun McpActivityStatusItem() {
+    val recentOps by McpToolRegistryImpl.ledger.recentOperations.collectAsState()
+    var showActivityLog by remember { mutableStateOf(false) }
+    val tools by McpToolRegistryImpl.tools.collectAsState()
+    if (recentOps.isEmpty() && tools.isEmpty() && !showActivityLog) return
+    val lastOp = recentOps.firstOrNull()
+    val statusText =
+        if (lastOp != null) {
+            "MCP: ${lastOp.toolName} (${lastOp.durationMs}ms) ${if (lastOp.isError) "✕" else "✓"}"
+        } else {
+            "MCP: no activity yet"
+        }
+    val statusColor = if (lastOp?.isError == true) BossTheme.colors.alert else BossTheme.colors.textSecondary
+    McpActivityStatusText(
+        text = statusText,
+        color = statusColor,
+        onClick = { showActivityLog = true },
+    )
+    if (showActivityLog) {
+        val totalCalls by McpToolRegistryImpl.ledger.totalCalls.collectAsState()
+        val totalErrors by McpToolRegistryImpl.ledger.totalErrors.collectAsState()
+        McpActivityLogDialog(
+            operations = recentOps,
+            totalCalls = totalCalls,
+            totalErrors = totalErrors,
+            ledgerPath = McpToolRegistryImpl.ledger.persistencePath,
+            onDismiss = { showActivityLog = false },
+        )
+    }
+}
+
+/**
+ * The clickable status line's own affordance: a hand cursor on hover, a tooltip naming what the
+ * click does, and [Role.Button] semantics for assistive tech - a bare clickable [Text] next to
+ * [androidx.compose.material.TextButton]s that do look pressable had none of the three.
+ */
+@Composable
+private fun McpActivityStatusText(
+    text: String,
+    color: Color,
+    onClick: () -> Unit,
+) {
+    HoverTooltipBox(text = "Open the MCP activity log", placement = TooltipPlacement.TOP) {
+        Text(
+            text = text,
+            color = color,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier =
+                Modifier
+                    .pointerHoverIcon(PointerIcon.Hand)
+                    .clickable(onClickLabel = "Open the MCP activity log", onClick = onClick)
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .semantics { role = Role.Button },
+        )
+    }
+}
 
 /**
  * The "Trusted plugins" control for the provider-wide ALLOWs ("Trust This Plugin") granted

@@ -2084,6 +2084,37 @@ HIGH/CRITICAL names use the mutating default, while unknown names remain allowed
 by default. Risk reasons and sanitized arguments appear together in the existing
 approval dialog. #362 is closed pending extraction into a management plugin.
 
+**The bottom bar's "MCP: `<tool>`" status line is clickable into an activity log of the last 100
+calls this session.** Before this it was the only visibility into MCP activity at all - every
+call before the current one, and the policy/approval decision behind it, was reachable only by
+opening the rotated ledger file in a text editor. The dialog is a read-only view over
+`McpOperationLedger.recentOperations`, scoped to calls that actually reached the policy engine -
+`McpOperationLedger`'s own KDoc records that an unregistered, unpermitted or kill-switch-disabled
+tool call is refused before that, so this is not a view over every MCP invocation attempt.
+Retention is described as finite and best-effort (the active ledger file plus up to 5 rotated
+backups, and a write failure there is logged rather than retried), not a guarantee older calls
+are still on disk. Unsuccessful calls are broken down by `McpUnsuccessfulCategory` - denied,
+cancelled, withheld (approval queue overflow or a host disk fault that stopped the call from running) or failed - through an exhaustive `when` over `McpApprovalDisposition` rather
+than a `setOf`-based membership check, so a disposition the enum grows later is a compile error
+here rather than silently counted as a tool fault.
+
+This is host UI for now; #416 is where activity/history UI and its ownership are meant to move
+into a dynamic plugin. Should that move happen, the read surface it needs must be
+**host-implemented and permission-gated** (an `mcp.activity.read`-shaped permission, the way MCP
+tool calls already gate on `project.replace` and similar), never a member added to the ungated
+`PluginContext.applicationEventBus`/`projectSearchProvider` surface this file documents elsewhere
+- an ungated ledger read would hand any installed plugin every *other* plugin's tool names,
+sanitized arguments and error snippets, and this file's own sanitizer caveat ("bounded and best
+effort, not a guarantee for secrets under arbitrary keys") is acceptable for an operator-only host
+dialog and not for a cross-plugin observation channel. Until that move happens, keeping this host
+UI is also the stronger guarantee for a second reason: a governance viewer that can be disabled or
+uninstalled by the plugins it governs is weaker than one that ships with the host.
+
+The idle activity entry appears only while MCP tools are exposed (existing history remains reachable).
+The viewer uses the ledger instance's actual optional persistence path. Its tooltip follows the host
+heavyweight overlay route. Width and height follow the originating window, with a fixed-cap fallback
+while window metadata is not yet measured; Close stays outside the scrolling body.
+
 **The "Persisted MCP policies" bottom bar button also lets an operator set a rule
 *proactively*, for a registered tool without a saved rule.** It is present even with zero saved
 rules (labeled "Set MCP tool policies" then). Allow requires a second confirming tap
