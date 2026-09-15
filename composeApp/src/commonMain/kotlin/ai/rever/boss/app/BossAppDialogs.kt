@@ -109,6 +109,7 @@ internal fun BossAppDialogs(state: BossAppState) {
     val splitViewState = state.splitViewState
     val windowProjectState = state.windowProjectState
     val selectedProject by windowProjectState.selectedProject.collectAsState()
+    val spotlightFileIndexer = state.spotlightFileIndexes.indexerFor(selectedProject.path)
 
     // Keymap settings (used by ShortcutHelpDialog)
     val keymapSettings by KeymapSettingsManager.currentSettings.collectAsState()
@@ -473,6 +474,8 @@ internal fun BossAppDialogs(state: BossAppState) {
 
         GlobalSearchDialog(
             projectPath = selectedProject.path,
+            fileIndexer = spotlightFileIndexer,
+            onIndexProject = { state.spotlightFileIndexes.ensureIndexed(selectedProject.path) },
             workspaceManager = workspaceManager,
             windowId = windowId,
             onDismiss = {
