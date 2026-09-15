@@ -889,7 +889,9 @@ private fun buildPluginDevReloadResponse(
                 "$errorName: $errorDetail"
                     .replace(Regex("[\\r\\n]+"), " ")
                     .take(400)
-            "RELOAD_FAILED $sanitizedMessage"
+            val recoveryWarning =
+                if (error.suppressedExceptions.isNotEmpty()) "Rollback failed; check the host log. " else ""
+            "RELOAD_FAILED $recoveryWarning$sanitizedMessage"
         },
     )
 }
@@ -1531,16 +1533,12 @@ object SingleInstanceManager {
                 }
 
             when {
-                response.startsWith("RELOAD_OK") -> {
+                response == "RELOAD_OK $pluginId" -> {
                     ReloadResult.Success
                 }
 
                 response.startsWith("RELOAD_FAILED") -> {
                     ReloadResult.Failed(response.removePrefix("RELOAD_FAILED").trim())
-                }
-
-                response == RESPONSE_OK -> {
-                    ReloadResult.Success
                 }
 
                 else -> {

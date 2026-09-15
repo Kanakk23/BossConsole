@@ -703,6 +703,63 @@ class DevPluginRollbackTest {
         }
 
     @Test
+    fun `binary incompatible restoration is reported as rollback failure`() =
+        runBlocking {
+            val pluginId = "com.example.failed.restore"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            val v1Jar =
+                createDevTestJar(
+                    stagingRoot = stagingRoot,
+                    pluginId = pluginId,
+                    versionDir = "v1000",
+                    version = "1.0.0",
+                    mainClass = ControllableFailingPlugin::class.java.name,
+                    includeMainClassBytecode = true,
+                )
+
+            val dummyContext = TestPluginContext()
+            val manager1 = createManager()
+            var failManager2Install = false
+            val manager2 =
+                createManager { _, _ ->
+                    if (failManager2Install) {
+                        failManager2Install = false
+                        error("Simulated v2 install failure on manager 2")
+                    }
+                    dummyContext
+                }
+
+            System.clearProperty("boss.test.fail_rollback_binary")
+            val res1 = manager1.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res1.isSuccess, "Manager 1 must install v1.jar")
+            val res2 = manager2.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res2.isSuccess, "Manager 2 must install v1.jar")
+
+            createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
+            failManager2Install = true
+            System.setProperty("boss.test.fail_rollback_binary", "true")
+
+            try {
+                val result = DevPluginReloader.reload(pluginId, stagingRoot)
+                assertTrue(result.isFailure, "Reload must fail")
+                val root = result.exceptionOrNull()
+                assertNotNull(root, "Root exception must be present")
+                assertTrue(
+                    root.suppressedExceptions.isNotEmpty(),
+                    "Expected recovery failure to be attached as suppressed exception",
+                )
+                assertTrue(
+                    root.suppressedExceptions.any {
+                        it.message?.contains("Failed to reinstall prior JAR") == true
+                    },
+                    "Suppressed exceptions must contain rollback reinstall failure",
+                )
+            } finally {
+                System.clearProperty("boss.test.fail_rollback_binary")
+            }
+        }
+
+    @Test
     fun `protected dev candidate is dropped before deduplication`() {
         val pluginId = ai.rever.boss.components.plugin.MicrokernelRuntime.PLUGIN_ID
         val stagingRoot = DevPluginArtifacts.stagingRoot()
@@ -866,6 +923,10 @@ class ControllableFailingPlugin : ai.rever.boss.plugin.api.Plugin {
     override val displayName = "Controllable Failing Plugin"
 
     override fun register(context: PluginContext) {
+        if (System.getProperty("boss.test.fail_rollback_binary") == "true") {
+            System.clearProperty("boss.test.fail_rollback_binary")
+            throw NoSuchMethodError("Simulated binary incompatible rollback")
+        }
         if (System.getProperty("boss.test.fail_rollback_register") == "true") {
             System.clearProperty("boss.test.fail_rollback_register")
             error("Simulated rollback reinstall failure in register()")

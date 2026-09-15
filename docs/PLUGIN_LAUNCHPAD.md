@@ -128,7 +128,7 @@ boss plugin link . --json
 3. **Version-Rotated Staging**: Stages the JAR into:
    `~/.boss/plugins/dev/<plugin-id>/v<timestamp>/<plugin-id>.jar`
    (or `~/.boss_debug/plugins/dev/...` in dev mode).
-   This prevents Windows file-locking collisions on running classloaders. Retains the latest 3 builds and prunes older versions automatically.
+   This prevents Windows file-locking collisions on running classloaders. The host keeps the latest 3 builds plus every build that may have acquired a classloader during this session, including failed reload candidates. Those extra paths remain until restart; a later successful reload can prune them. The offline CLI never prunes staging.
 4. **Instance Detection & Hot-Reload**:
    - **If BossConsole is running**: Dispatches `<TOKEN> PLUGIN_DEV_RELOAD <PLUGIN_ID>\n` over loopback socket and awaits synchronous host acknowledgment (`RELOAD_OK`). Any host-side exceptions are captured and returned as `RELOAD_FAILED <message>` without dropping the socket.
    - **If BossConsole is offline**: Stages the plugin cleanly into the version-rotated dev folder and reports ready for next launch (`status: "staged", running: false`).

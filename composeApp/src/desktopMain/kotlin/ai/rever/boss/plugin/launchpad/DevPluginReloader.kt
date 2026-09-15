@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin.launchpad
 
 import ai.rever.boss.components.plugin.DefaultPlugin
+import ai.rever.boss.components.plugin.DynamicPluginInfo
 import ai.rever.boss.components.plugin.DynamicPluginManager
 import ai.rever.boss.components.plugin.HotReloadPolicy
 import ai.rever.boss.plugin.api.CanUnloadResult
@@ -176,10 +177,12 @@ object DevPluginReloader {
                 }
                 val installResult =
                     priorState.manager.installPlugin(priorState.priorJarPath, enabled = priorState.wasEnabled)
-                if (installResult.isFailure) {
+                val restored = installResult.getOrNull()
+                if (!isLoadedOrHidden(restored, priorState.wasEnabled, priorState.manager)) {
                     val error = installResult.exceptionOrNull()
                     val message =
-                        "Failed to reinstall prior JAR ${priorState.priorJarPath} during rollback: ${error?.message}"
+                        "Failed to reinstall prior JAR ${priorState.priorJarPath} during rollback: " +
+                            (error?.message ?: "restored plugin is not running (state: ${restored?.state})")
                     logger.error(LogCategory.SYSTEM, message, mapOf("pluginId" to pluginId), error)
                     throw IllegalStateException(message, error)
                 }
@@ -269,13 +272,7 @@ object DevPluginReloader {
             val targetEnabled = priorByManager[manager]?.wasEnabled ?: true
             val installResult = manager.installPlugin(stagedJar.absolutePath, enabled = targetEnabled)
             val installed = installResult.getOrNull()
-            val isLoadedOrHidden =
-                installed != null && (
-                    installed.state == PluginState.LOADED ||
-                        (!targetEnabled && installed.state == PluginState.DISABLED) ||
-                        (installed.state == PluginState.DISABLED && !manager.canAccess(installed.manifest))
-                )
-            if (!isLoadedOrHidden) {
+            if (!isLoadedOrHidden(installed, targetEnabled, manager)) {
                 val error = installResult.exceptionOrNull()
                 val state = installed?.state?.name ?: "unknown"
                 val message =
@@ -314,3 +311,13 @@ object DevPluginReloader {
         )
     }
 }
+
+private fun isLoadedOrHidden(
+    installed: DynamicPluginInfo?,
+    enabled: Boolean,
+    manager: DynamicPluginManager,
+): Boolean =
+    installed != null && (
+        installed.state == PluginState.LOADED ||
+            (installed.state == PluginState.DISABLED && (!enabled || !manager.canAccess(installed.manifest)))
+    )
