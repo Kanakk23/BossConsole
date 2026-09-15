@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.launchpad
 
+import ai.rever.boss.components.plugin.DefaultPlugin
 import ai.rever.boss.components.plugin.DynamicPluginManager
 import ai.rever.boss.components.plugin.HotReloadPolicy
 import ai.rever.boss.plugin.api.CanUnloadResult
@@ -22,6 +23,10 @@ object DevPluginReloader {
     private val logger = BossLogger.forComponent("DevPluginReloader")
     private val reloadLocks = ConcurrentHashMap<String, Mutex>()
     private val sessionPreservedPaths = ConcurrentHashMap<String, MutableSet<String>>()
+
+    internal fun clearSessionPreservedPathsForTest() {
+        sessionPreservedPaths.clear()
+    }
 
     /**
      * Reloads the active dev build of [pluginId] into all running host [DynamicPluginManager] instances.
@@ -68,6 +73,8 @@ object DevPluginReloader {
             DevPluginArtifacts.findActiveDevJar(pluginId, devRoot)
                 ?: error("No staged dev JAR found for plugin $pluginId in ${devRoot.absolutePath}")
 
+        recordSessionPreservedPaths(pluginId, listOf(stagedJar.absolutePath))
+
         logger.info(
             LogCategory.SYSTEM,
             "Initiating dev plugin reload",
@@ -88,6 +95,8 @@ object DevPluginReloader {
                     wasEnabled = info?.enabled ?: true,
                 )
             }
+        val priorPaths = priorStates.mapNotNull { it.priorJarPath }
+        recordSessionPreservedPaths(pluginId, priorPaths)
 
         preflightCheck(pluginId, activeManagers)
         val modifiedManagers = mutableSetOf<DynamicPluginManager>()
@@ -104,8 +113,6 @@ object DevPluginReloader {
             throw e
         }
 
-        val priorPaths = priorStates.mapNotNull { it.priorJarPath }
-        recordSessionPreservedPaths(pluginId, priorPaths)
         pruneStaging(pluginId, devRoot, sessionPreservedPaths[pluginId].orEmpty())
 
         logger.info(
@@ -207,6 +214,12 @@ object DevPluginReloader {
         pluginId: String,
         managers: List<DynamicPluginManager>,
     ) {
+        if (DefaultPlugin.isAuthoritativeSystemPlugin(pluginId)) {
+            val message = "Plugin '$pluginId' is a protected system plugin and cannot be hot-reloaded"
+            logger.warn(LogCategory.SYSTEM, message, mapOf("pluginId" to pluginId))
+            error(message)
+        }
+
         for (manager in managers) {
             val info = manager.getPluginInfo(pluginId) ?: continue
             if (manager.isSystemPlugin(pluginId) || info.manifest.canUnload == false) {

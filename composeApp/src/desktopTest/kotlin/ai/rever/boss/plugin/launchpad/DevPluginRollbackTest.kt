@@ -44,6 +44,7 @@ class DevPluginRollbackTest {
     @BeforeTest
     fun setUp() {
         DevPluginArtifacts.stagingRootOverride = tempDir.resolve("dev-root").toFile().apply { mkdirs() }
+        DevPluginReloader.clearSessionPreservedPathsForTest()
     }
 
     @AfterTest
@@ -55,6 +56,7 @@ class DevPluginRollbackTest {
             activeManagersToClean.clear()
         }
         DevPluginArtifacts.stagingRootOverride = null
+        DevPluginReloader.clearSessionPreservedPathsForTest()
     }
 
     private class TestPluginContext(
@@ -772,6 +774,83 @@ class DevPluginRollbackTest {
             assertTrue(result1.isSuccess, "First concurrent reload must succeed")
             assertTrue(result2.isSuccess, "Second concurrent reload must succeed")
             assertEquals("2.0.0", manager.getPluginInfo(pluginId)?.manifest?.version)
+        }
+
+    @Test
+    fun `failed reload jar is retained across subsequent successful reloads`() =
+        runBlocking {
+            DevPluginReloader.clearSessionPreservedPathsForTest()
+            val pluginId = "com.example.failed.retention"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            val v1Jar = createDevTestJar(stagingRoot, pluginId, "v1000", "1.0.0")
+
+            val dummyContext = TestPluginContext()
+            val manager1 = createManager()
+            var manager2FailV2Install = false
+            val manager2 =
+                createManager { _, _ ->
+                    if (manager2FailV2Install) {
+                        manager2FailV2Install = false
+                        error("Simulated v2 install failure on manager 2")
+                    }
+                    dummyContext
+                }
+
+            val res1 = manager1.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res1.isSuccess, "Manager 1 must load v1.jar successfully")
+            val res2 = manager2.installPlugin(v1Jar.absolutePath, enabled = true)
+            assertTrue(res2.isSuccess, "Manager 2 must load v1.jar successfully")
+
+            val v2Jar = createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
+            manager2FailV2Install = true
+
+            val reloadV2Result = DevPluginReloader.reload(pluginId, stagingRoot)
+            assertTrue(reloadV2Result.isFailure, "Reload with failing manager 2 must fail")
+
+            assertRestoredToV1(manager1, pluginId, v1Jar)
+            assertRestoredToV1(manager2, pluginId, v1Jar)
+
+            val v3Jar = createDevTestJar(stagingRoot, pluginId, "v3000", "3.0.0")
+            val resV3 = DevPluginReloader.reload(pluginId, stagingRoot)
+            assertTrue(resV3.isSuccess, "Reload v3 must succeed")
+
+            val v4Jar = createDevTestJar(stagingRoot, pluginId, "v4000", "4.0.0")
+            val resV4 = DevPluginReloader.reload(pluginId, stagingRoot)
+            assertTrue(resV4.isSuccess, "Reload v4 must succeed")
+
+            val v5Jar = createDevTestJar(stagingRoot, pluginId, "v5000", "5.0.0")
+            val resV5 = DevPluginReloader.reload(pluginId, stagingRoot)
+            assertTrue(resV5.isSuccess, "Reload v5 must succeed")
+
+            assertTrue(v3Jar.exists(), "v3 JAR must exist")
+            assertTrue(v4Jar.exists(), "v4 JAR must exist")
+            assertTrue(v5Jar.exists(), "v5 JAR must exist")
+            assertTrue(
+                v2Jar.exists(),
+                "Candidate v2 JAR from failed reload must be retained across subsequent successful reloads",
+            )
+        }
+
+    @Test
+    fun `preflight rejects reload of unloaded system plugin`() =
+        runBlocking {
+            val pluginId = "ai.rever.boss.system.core"
+            val stagingRoot = DevPluginArtifacts.stagingRoot()
+            createDevTestJar(stagingRoot, pluginId, "v1000", "1.0.0")
+
+            val manager = createManager()
+            assertNull(
+                manager.getPluginInfo(pluginId),
+                "System plugin must not be loaded prior to reload",
+            )
+
+            val result = DevPluginReloader.reload(pluginId, stagingRoot)
+            assertTrue(result.isFailure, "Reload of unloaded protected system plugin must fail")
+            val message = result.exceptionOrNull()?.message.orEmpty()
+            assertTrue(
+                message.contains("protected system plugin"),
+                "Exception message must indicate protected system plugin: $message",
+            )
         }
 }
 

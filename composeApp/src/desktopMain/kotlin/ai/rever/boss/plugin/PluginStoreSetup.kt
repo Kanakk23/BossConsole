@@ -1804,9 +1804,12 @@ object PluginStoreSetup {
             val entry = persistedById[pluginId] ?: continue
             val attemptedPath = entries.firstOrNull { it.pluginId == pluginId }?.jarPath
             val isDevSwap = attemptedPath != null && attemptedPath != entry.jarPath
+            val loadedInfo = result.getOrNull()
             val isFailedDevSwap =
                 result.isFailure || (
-                    isDevSwap && entry.enabled && result.getOrNull()?.state == PluginState.DISABLED
+                    isDevSwap && entry.enabled &&
+                        loadedInfo?.state == PluginState.DISABLED &&
+                        dynamicPluginManager.canAccess(loadedInfo.manifest)
                 )
 
             if (isFailedDevSwap) {
