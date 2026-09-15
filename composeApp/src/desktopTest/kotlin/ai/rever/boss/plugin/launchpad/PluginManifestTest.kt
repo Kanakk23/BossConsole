@@ -100,7 +100,7 @@ class PluginManifestTest {
     }
 
     @Test
-    fun `pruneStagingHistory ignores empty and part-only directories from failed links`() {
+    fun `pruning leaves staging in progress intact so its writer can finish`() {
         val pluginDevDir = Files.createDirectory(tempDir.resolve("ignore-empty-test"))
         val v1 = Files.createDirectory(pluginDevDir.resolve("v1000"))
         Files.writeString(v1.resolve("ignore-empty-test.jar"), "valid jar 1")
@@ -119,7 +119,9 @@ class PluginManifestTest {
             Files.list(pluginDevDir).use { stream ->
                 stream.map { it.fileName.toString() }.toList().sorted()
             }
-        assertEquals(listOf("v1000", "v2000"), remaining, "Valid builds must be retained despite corrupt directories")
+        assertEquals(listOf("v1000", "v2000", "v3000", "v4000", "v5000"), remaining)
+        Files.move(v4.resolve("ignore-empty-test.jar.part"), v4.resolve("ignore-empty-test.jar"))
+        assertEquals("incomplete", Files.readString(v4.resolve("ignore-empty-test.jar")))
     }
 
     @Test

@@ -600,6 +600,18 @@ class DevPluginRollbackTest {
         }
 
     @Test
+    fun `persisted startup keeps the installed build for a protected prefix id`() {
+        val pluginId = "ai.rever.boss.system.fixture"
+        val stagingRoot = DevPluginArtifacts.stagingRoot()
+        createDevTestJar(stagingRoot, pluginId, "v2000", "2.0.0")
+        val storeJar = tempDir.resolve("protected-store.jar").toFile()
+        createStoreTestJar(storeJar, pluginId, "1.0.0")
+        val entry = PluginPersistence.InstalledPluginEntry(pluginId, storeJar.absolutePath, enabled = true)
+
+        assertEquals(storeJar.absolutePath, PluginStoreSetup.resolvePersistedEntryPath(entry, stagingRoot))
+    }
+
+    @Test
     fun `external scan falls back to standard jar on dev failure`() =
         runBlocking {
             val pluginId = "com.example.ext.fallback"

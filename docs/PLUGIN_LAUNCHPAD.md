@@ -130,8 +130,12 @@ boss plugin link . --json
    (or `~/.boss_debug/plugins/dev/...` in dev mode).
    This prevents Windows file-locking collisions on running classloaders. The host keeps the latest 3 builds plus every build that may have acquired a classloader during this session, including failed reload candidates. Those extra paths remain until restart; a later successful reload can prune them. The offline CLI never prunes staging.
 4. **Instance Detection & Hot-Reload**:
-   - **If BossConsole is running**: Dispatches `<TOKEN> PLUGIN_DEV_RELOAD <PLUGIN_ID>\n` over loopback socket and awaits synchronous host acknowledgment (`RELOAD_OK`). Any host-side exceptions are captured and returned as `RELOAD_FAILED <message>` without dropping the socket.
+   - **If BossConsole is running**: Dispatches `<PROTOCOL_VERSION> <TOKEN> PLUGIN_DEV_RELOAD <PLUGIN_ID>\n` over loopback socket and awaits synchronous host acknowledgment (`RELOAD_OK`). Any host-side exceptions are captured and returned as `RELOAD_FAILED <message>` without dropping the socket.
    - **If BossConsole is offline**: Stages the plugin cleanly into the version-rotated dev folder and reports ready for next launch (`status: "staged", running: false`).
+
+The API, Toolbox, terminal, browser and editor system plugins cannot be overridden through dev staging. Live reload refuses protected identities and plugins owning native resources; their normal installation/update workflow and an application restart remain necessary. A plugin that exists only in dev staging has no installed record, so disabling it is not persisted across restart. Remove its staging directory while BOSS is stopped to remove that dev override.
+
+A failed newest dev build falls back to the installed store build on startup, not to an older dev version. Rebuild and link a corrected version, or remove the failed staging directory while BOSS is stopped. A link during host startup can report failure before any plugin manager is ready; the staged build remains on disk. In-progress staging directories are left to their writer rather than pruned by another reload.
 
 > **Note on Startup Precedence**: At application launch, BossConsole prioritizes staged development JARs in `~/.boss/plugins/dev/<plugin-id>/` over installed store versions for that same plugin ID via pre-load resolution (`resolvePersistedEntryPath` and `deduplicateJars`). Since `boss plugin link` pre-validates JARs before staging, dev artifacts are well-formed; if a dev build is missing or corrupt, startup automatically falls back to the installed store build. Protected system plugins and plugins requiring application restart (`HotReloadPolicy`) are never overridden by development JARs.
 

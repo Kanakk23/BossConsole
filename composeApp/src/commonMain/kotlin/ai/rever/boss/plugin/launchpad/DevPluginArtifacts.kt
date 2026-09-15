@@ -192,16 +192,14 @@ object DevPluginArtifacts {
             pluginDevDir.listFiles { file -> file.isDirectory && file.name.startsWith("v") }
                 ?: return
 
-        val (validDirs, corruptDirs) =
-            allVersionDirs.partition { dir ->
+        val validDirs =
+            allVersionDirs.filter { dir ->
                 val jars =
                     dir.listFiles { file ->
                         file.isFile && file.extension == "jar" && !file.name.endsWith(".part") && file.length() > 0
                     }
                 !jars.isNullOrEmpty()
             }
-
-        cleanCorruptDirectories(corruptDirs)
 
         val sortedDirs =
             validDirs.sortedWith(
@@ -237,20 +235,6 @@ object DevPluginArtifacts {
             val abs = jar.absolutePath
             val canonical = runCatching { jar.canonicalPath }.getOrNull() ?: abs
             abs in activeJarPaths || canonical in normalizedActivePaths
-        }
-    }
-
-    private fun cleanCorruptDirectories(corruptDirs: List<File>) {
-        for (dir in corruptDirs) {
-            try {
-                dir.deleteRecursively()
-            } catch (e: Exception) {
-                logger.debug(
-                    LogCategory.SYSTEM,
-                    "Failed to delete empty or corrupt staging directory",
-                    mapOf("dir" to dir.absolutePath, "error" to (e.message ?: "unknown")),
-                )
-            }
         }
     }
 

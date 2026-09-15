@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin
 
+import ai.rever.boss.components.plugin.DefaultPlugin
 import ai.rever.boss.components.plugin.DynamicPluginInfo
 import ai.rever.boss.components.plugin.DynamicPluginManager
 import ai.rever.boss.components.plugin.HotReloadPolicy
@@ -1908,7 +1909,8 @@ object PluginStoreSetup {
     internal fun isSystemPluginId(pluginId: String): Boolean = systemPlugins.any { it.pluginId == pluginId }
 
     private fun isProtectedFromDevSwap(pluginId: String): Boolean =
-        isSystemPluginId(pluginId) ||
+        DefaultPlugin.isAuthoritativeSystemPlugin(pluginId) ||
+            isSystemPluginId(pluginId) ||
             HotReloadPolicy.requiresRestartInsteadOfHotReload(pluginId)
 
     /**
