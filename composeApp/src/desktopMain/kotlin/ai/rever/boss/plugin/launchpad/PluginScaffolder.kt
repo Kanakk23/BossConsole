@@ -52,8 +52,7 @@ object PluginScaffolder {
                     val path = targetDir.absolutePath
                     error("Target directory '$path' exists and is not empty. Use --force to overwrite.")
                 }
-                assertSafeToPurge(targetDir)
-                existingFiles.forEach { it.deleteRecursively() }
+                purgeExistingFiles(targetDir, existingFiles)
             }
         }
 
@@ -343,14 +342,19 @@ object PluginScaffolder {
                 import ai.rever.boss.plugin.api.McpToolResult
                 import ai.rever.boss.plugin.api.Plugin
                 import ai.rever.boss.plugin.api.PluginContext
+                import ai.rever.boss.plugin.logging.BossLogger
+                import ai.rever.boss.plugin.logging.ComponentLogger
+                import ai.rever.boss.plugin.logging.LogCategory
 
                 class $className : Plugin {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
+                    private val logger: ComponentLogger = BossLogger.forComponent("$escapedName")
                     private var toolProvider: McpToolProvider? = null
 
                     override fun register(context: PluginContext) {
+                        logger.info(LogCategory.GENERAL, "Registering $escapedName ($pluginId)")
                         val provider =
                             object : McpToolProvider {
                                 override val providerId: String = pluginId
@@ -362,6 +366,7 @@ object PluginScaffolder {
                                             description = "Executes $escapedName action tool",
                                             handler =
                                                 McpToolHandler { _ ->
+                                                    logger.info(LogCategory.GENERAL, "Executing action tool for $escapedName")
                                                     McpToolResult("Action executed successfully for $escapedName")
                                                 },
                                         ),
@@ -373,7 +378,7 @@ object PluginScaffolder {
 
                     override fun dispose() {
                         toolProvider = null
-                        println("Disposed $escapedName ($pluginId)")
+                        logger.info(LogCategory.GENERAL, "Disposed $escapedName ($pluginId)")
                     }
                 }
                 """.trimIndent() + "\n"
@@ -388,14 +393,19 @@ object PluginScaffolder {
                 import ai.rever.boss.plugin.api.PanelMenuItem
                 import ai.rever.boss.plugin.api.Plugin
                 import ai.rever.boss.plugin.api.PluginContext
+                import ai.rever.boss.plugin.logging.BossLogger
+                import ai.rever.boss.plugin.logging.ComponentLogger
+                import ai.rever.boss.plugin.logging.LogCategory
 
                 class $className : Plugin {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
+                    private val logger: ComponentLogger = BossLogger.forComponent("$escapedName")
                     private var menuContribution: PanelMenuContribution? = null
 
                     override fun register(context: PluginContext) {
+                        logger.info(LogCategory.GENERAL, "Registering $escapedName ($pluginId)")
                         val contribution =
                             object : PanelMenuContribution {
                                 override val contributionId: String = "$pluginId.menu"
@@ -414,7 +424,7 @@ object PluginScaffolder {
                                     itemId: String,
                                     windowId: String?,
                                 ) {
-                                    println("Panel menu item clicked: ${'$'}itemId for $escapedName")
+                                    logger.info(LogCategory.UI, "Panel menu item clicked: ${'$'}itemId for $escapedName")
                                 }
                             }
                         menuContribution = contribution
@@ -423,7 +433,7 @@ object PluginScaffolder {
 
                     override fun dispose() {
                         menuContribution = null
-                        println("Disposed $escapedName ($pluginId)")
+                        logger.info(LogCategory.GENERAL, "Disposed $escapedName ($pluginId)")
                     }
                 }
                 """.trimIndent() + "\n"
@@ -435,6 +445,9 @@ object PluginScaffolder {
 
                 import ai.rever.boss.plugin.api.Plugin
                 import ai.rever.boss.plugin.api.PluginContext
+                import ai.rever.boss.plugin.logging.BossLogger
+                import ai.rever.boss.plugin.logging.ComponentLogger
+                import ai.rever.boss.plugin.logging.LogCategory
                 import kotlinx.coroutines.Job
                 import kotlinx.coroutines.delay
                 import kotlinx.coroutines.isActive
@@ -444,15 +457,16 @@ object PluginScaffolder {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
+                    private val logger: ComponentLogger = BossLogger.forComponent("$escapedName")
                     private var workerJob: Job? = null
 
                     override fun register(context: PluginContext) {
                         workerJob =
                             context.pluginScope.launch {
-                                println("Background service started for $escapedName ($pluginId)")
+                                logger.info(LogCategory.GENERAL, "Background service started for $escapedName ($pluginId)")
                                 while (isActive) {
                                     delay(30_000)
-                                    println("Background heartbeat for $escapedName")
+                                    logger.debug(LogCategory.GENERAL, "Background heartbeat for $escapedName")
                                 }
                             }
                     }
@@ -460,7 +474,7 @@ object PluginScaffolder {
                     override fun dispose() {
                         workerJob?.cancel()
                         workerJob = null
-                        println("Background service stopped for $escapedName ($pluginId)")
+                        logger.info(LogCategory.GENERAL, "Background service stopped for $escapedName ($pluginId)")
                     }
                 }
                 """.trimIndent() + "\n"
@@ -479,6 +493,9 @@ object PluginScaffolder {
                 import ai.rever.boss.plugin.api.PanelMenuItem
                 import ai.rever.boss.plugin.api.Plugin
                 import ai.rever.boss.plugin.api.PluginContext
+                import ai.rever.boss.plugin.logging.BossLogger
+                import ai.rever.boss.plugin.logging.ComponentLogger
+                import ai.rever.boss.plugin.logging.LogCategory
                 import kotlinx.coroutines.Job
                 import kotlinx.coroutines.delay
                 import kotlinx.coroutines.isActive
@@ -488,11 +505,13 @@ object PluginScaffolder {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
+                    private val logger: ComponentLogger = BossLogger.forComponent("$escapedName")
                     private var toolProvider: McpToolProvider? = null
                     private var menuContribution: PanelMenuContribution? = null
                     private var workerJob: Job? = null
 
                     override fun register(context: PluginContext) {
+                        logger.info(LogCategory.GENERAL, "Registering full plugin $escapedName ($pluginId)")
                         val provider =
                             object : McpToolProvider {
                                 override val providerId: String = pluginId
@@ -504,6 +523,7 @@ object PluginScaffolder {
                                             description = "Executes $escapedName action tool",
                                             handler =
                                                 McpToolHandler { _ ->
+                                                    logger.info(LogCategory.GENERAL, "Executing action tool for $escapedName")
                                                     McpToolResult("Action executed successfully for $escapedName")
                                                 },
                                         ),
@@ -530,7 +550,7 @@ object PluginScaffolder {
                                     itemId: String,
                                     windowId: String?,
                                 ) {
-                                    println("Panel menu item clicked: ${'$'}itemId for $escapedName")
+                                    logger.info(LogCategory.UI, "Panel menu item clicked: ${'$'}itemId for $escapedName")
                                 }
                             }
                         menuContribution = contribution
@@ -538,7 +558,7 @@ object PluginScaffolder {
 
                         workerJob =
                             context.pluginScope.launch {
-                                println("Full plugin service started for $escapedName ($pluginId)")
+                                logger.info(LogCategory.GENERAL, "Full plugin service started for $escapedName ($pluginId)")
                                 while (isActive) {
                                     delay(30_000)
                                 }
@@ -550,7 +570,7 @@ object PluginScaffolder {
                         workerJob = null
                         toolProvider = null
                         menuContribution = null
-                        println("Disposed full plugin $escapedName ($pluginId)")
+                        logger.info(LogCategory.GENERAL, "Disposed full plugin $escapedName ($pluginId)")
                     }
                 }
                 """.trimIndent() + "\n"
@@ -730,6 +750,16 @@ object PluginScaffolder {
         require(hasPluginJson || hasGradleBuild) {
             "Refusing to purge non-plugin directory in --force mode: ${targetDir.absolutePath}. " +
                 "Directory does not contain plugin.json or build.gradle.kts. Clear it manually if intended."
+        }
+    }
+
+    private fun purgeExistingFiles(targetDir: File, existingFiles: Array<File>) {
+        assertSafeToPurge(targetDir)
+        for (file in existingFiles) {
+            val deleted = file.deleteRecursively()
+            check(deleted && !file.exists()) {
+                "Failed to delete existing file or directory during --force overwrite: ${file.absolutePath}"
+            }
         }
     }
 }
