@@ -5,6 +5,7 @@ import ai.rever.boss.plugin.launchpad.PluginManifest
 import ai.rever.boss.plugin.launchpad.PluginScaffolder
 import ai.rever.boss.plugin.launchpad.launchpadJson
 import ai.rever.boss.plugin.loader.PluginManifestReader
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.nio.file.Path
@@ -258,6 +259,95 @@ class PluginScaffolderEvalTest {
             val hostManifest = PluginManifestReader.parseManifest(manifestFile.readText())
             PluginManifestReader.validateManifest(hostManifest)
             assertEquals("com.example.test-$tmpl", hostManifest.pluginId)
+        }
+    }
+
+    @Test
+    fun `asserts force overwrite fails cleanly when existing file cannot be deleted`() {
+        val targetFolder = File(tempDir.toFile(), "locked-collision-test")
+        targetFolder.mkdirs()
+        File(targetFolder, "plugin.json").writeText("{}")
+        val subDir = File(targetFolder, "locked-sub")
+        subDir.mkdirs()
+        val lockedFile = File(subDir, "locked.txt")
+        lockedFile.writeText("undeletable")
+
+        val isWindows = System.getProperty("os.name").lowercase().contains("win")
+        val raf =
+            if (isWindows) {
+                java.io.RandomAccessFile(lockedFile, "rw")
+            } else {
+                val madeReadOnly = subDir.setWritable(false, false)
+                // Linux root users (e.g. Docker CI) bypass directory write permissions
+                assumeTrue(
+                    madeReadOnly && !subDir.canWrite(),
+                    "Skipping deletion lock test on environment where root/FS permits write",
+                )
+                null
+            }
+        val fileLock = raf?.channel?.tryLock()
+
+        try {
+            val ex =
+                assertFailsWith<IllegalStateException> {
+                    PluginScaffolder.scaffold(
+                        name = "locked-plugin",
+                        templateName = "mcp-tool",
+                        targetDir = targetFolder,
+                        force = true,
+                    )
+                }
+            assertTrue(
+                ex.message!!.contains("Failed to delete existing file or directory during --force overwrite"),
+                "Expected deletion failure message, got: ${ex.message}",
+            )
+        } finally {
+            try {
+                fileLock?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                raf?.close()
+            } catch (_: Exception) {
+            }
+            try {
+                subDir.setWritable(true, false)
+                targetFolder.setWritable(true, false)
+                subDir.deleteRecursively()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    @Test
+    fun `scaffolded template source code uses BossLogger and avoids raw println`() {
+        val templates = listOf("mcp-tool", "ui-panel", "background-service", "full")
+        for (tmpl in templates) {
+            val targetFolder = File(tempDir.toFile(), "logger-test-$tmpl")
+            val result =
+                PluginScaffolder.scaffold(
+                    name = "logger-test-$tmpl",
+                    templateName = tmpl,
+                    targetDir = targetFolder,
+                    force = false,
+                )
+            assertEquals("com.example.logger-test-$tmpl", result.pluginId)
+            val manifestFile = File(targetFolder, "plugin.json")
+            val manifest = launchpadJson.decodeFromString<PluginManifest>(manifestFile.readText())
+            val entrypointClassPath = manifest.entrypointClass.replace('.', File.separatorChar) + ".kt"
+            val srcFile = File(targetFolder, "src/main/kotlin/$entrypointClassPath")
+            assertTrue(srcFile.exists(), "Source file must exist for $tmpl")
+            val code = srcFile.readText()
+            assertTrue(code.contains("BossLogger.forComponent"), "Must instantiate BossLogger in $tmpl")
+            assertTrue(
+                code.contains("import ai.rever.boss.plugin.logging.BossLogger"),
+                "Must import BossLogger in $tmpl",
+            )
+            assertTrue(
+                code.contains("import ai.rever.boss.plugin.logging.LogCategory"),
+                "Must import LogCategory in $tmpl",
+            )
+            assertFalse(code.contains("println("), "Must not use raw println in $tmpl")
         }
     }
 }
