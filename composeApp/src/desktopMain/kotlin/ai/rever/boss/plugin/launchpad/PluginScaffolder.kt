@@ -753,7 +753,10 @@ object PluginScaffolder {
         }
     }
 
-    private fun purgeExistingFiles(targetDir: File, existingFiles: Array<File>) {
+    private fun purgeExistingFiles(
+        targetDir: File,
+        existingFiles: Array<File>,
+    ) {
         assertSafeToPurge(targetDir)
         for (file in existingFiles) {
             val deleted = file.deleteRecursively()
