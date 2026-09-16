@@ -347,6 +347,7 @@ class PluginScaffolderEvalTest {
                 code.contains("import ai.rever.boss.plugin.logging.LogCategory"),
                 "Must import LogCategory in $tmpl",
             )
+            assertFalse(code.contains("ComponentLogger"), "Must not explicitly reference ComponentLogger in $tmpl")
             assertFalse(code.contains("println("), "Must not use raw println in $tmpl")
         }
     }

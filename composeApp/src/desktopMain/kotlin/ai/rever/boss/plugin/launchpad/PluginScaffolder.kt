@@ -343,14 +343,13 @@ object PluginScaffolder {
                 import ai.rever.boss.plugin.api.Plugin
                 import ai.rever.boss.plugin.api.PluginContext
                 import ai.rever.boss.plugin.logging.BossLogger
-                import ai.rever.boss.plugin.logging.ComponentLogger
                 import ai.rever.boss.plugin.logging.LogCategory
 
                 class $className : Plugin {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
-                    private val logger: ComponentLogger = BossLogger.forComponent("$escapedName")
+                    private val logger = BossLogger.forComponent("$escapedName")
                     private var toolProvider: McpToolProvider? = null
 
                     override fun register(context: PluginContext) {
@@ -394,14 +393,13 @@ object PluginScaffolder {
                 import ai.rever.boss.plugin.api.Plugin
                 import ai.rever.boss.plugin.api.PluginContext
                 import ai.rever.boss.plugin.logging.BossLogger
-                import ai.rever.boss.plugin.logging.ComponentLogger
                 import ai.rever.boss.plugin.logging.LogCategory
 
                 class $className : Plugin {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
-                    private val logger: ComponentLogger = BossLogger.forComponent("$escapedName")
+                    private val logger = BossLogger.forComponent("$escapedName")
                     private var menuContribution: PanelMenuContribution? = null
 
                     override fun register(context: PluginContext) {
@@ -446,7 +444,6 @@ object PluginScaffolder {
                 import ai.rever.boss.plugin.api.Plugin
                 import ai.rever.boss.plugin.api.PluginContext
                 import ai.rever.boss.plugin.logging.BossLogger
-                import ai.rever.boss.plugin.logging.ComponentLogger
                 import ai.rever.boss.plugin.logging.LogCategory
                 import kotlinx.coroutines.Job
                 import kotlinx.coroutines.delay
@@ -457,7 +454,7 @@ object PluginScaffolder {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
-                    private val logger: ComponentLogger = BossLogger.forComponent("$escapedName")
+                    private val logger = BossLogger.forComponent("$escapedName")
                     private var workerJob: Job? = null
 
                     override fun register(context: PluginContext) {
@@ -494,7 +491,6 @@ object PluginScaffolder {
                 import ai.rever.boss.plugin.api.Plugin
                 import ai.rever.boss.plugin.api.PluginContext
                 import ai.rever.boss.plugin.logging.BossLogger
-                import ai.rever.boss.plugin.logging.ComponentLogger
                 import ai.rever.boss.plugin.logging.LogCategory
                 import kotlinx.coroutines.Job
                 import kotlinx.coroutines.delay
@@ -505,7 +501,7 @@ object PluginScaffolder {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
-                    private val logger: ComponentLogger = BossLogger.forComponent("$escapedName")
+                    private val logger = BossLogger.forComponent("$escapedName")
                     private var toolProvider: McpToolProvider? = null
                     private var menuContribution: PanelMenuContribution? = null
                     private var workerJob: Job? = null
