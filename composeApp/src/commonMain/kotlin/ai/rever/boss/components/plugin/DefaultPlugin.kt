@@ -308,10 +308,8 @@ class DefaultPlugin(
                             val isDev =
                                 DevPluginArtifacts
                                     .isDevPluginJar(file)
-                            val isProtected = isProtectedPredicate(pluginId)
                             val versionBonus =
                                 when {
-                                    isProtected && isDev -> -10_000_000_000_000L
                                     isDev -> 10_000_000_000_000L
                                     else -> 0L
                                 }
