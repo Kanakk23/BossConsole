@@ -789,55 +789,56 @@ object PluginScaffolder {
         assertSafeToPurge(targetDir)
         val failures = mutableListOf<String>()
         for (file in existingFiles.sortedBy { it.name in pluginMarkerNames }) {
-            if (file.name in pluginMarkerNames && failures.isNotEmpty()) continue
+            val skipPurgedMarker = file.name in pluginMarkerNames && failures.isNotEmpty()
             val rootPath = file.toPath()
-            if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) continue
-            Files.walkFileTree(
-                rootPath,
-                emptySet(),
-                Int.MAX_VALUE,
-                object : SimpleFileVisitor<Path>() {
-                    override fun visitFile(
-                        file: Path,
-                        attrs: BasicFileAttributes,
-                    ): FileVisitResult {
-                        try {
-                            Files.delete(file)
-                        } catch (e: IOException) {
-                            failures.add("${file.toAbsolutePath()}: ${e.message}")
-                        } catch (e: SecurityException) {
-                            failures.add("${file.toAbsolutePath()}: ${e.message}")
-                        }
-                        return FileVisitResult.CONTINUE
-                    }
-
-                    override fun postVisitDirectory(
-                        dir: Path,
-                        exc: IOException?,
-                    ): FileVisitResult {
-                        if (exc != null) {
-                            failures.add("${dir.toAbsolutePath()}: ${exc.message}")
-                        } else {
+            if (!skipPurgedMarker && Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) {
+                Files.walkFileTree(
+                    rootPath,
+                    emptySet(),
+                    Int.MAX_VALUE,
+                    object : SimpleFileVisitor<Path>() {
+                        override fun visitFile(
+                            file: Path,
+                            attrs: BasicFileAttributes,
+                        ): FileVisitResult {
                             try {
-                                Files.delete(dir)
+                                Files.delete(file)
                             } catch (e: IOException) {
-                                failures.add("${dir.toAbsolutePath()}: ${e.message}")
+                                failures.add("${file.toAbsolutePath()}: ${e.message}")
                             } catch (e: SecurityException) {
-                                failures.add("${dir.toAbsolutePath()}: ${e.message}")
+                                failures.add("${file.toAbsolutePath()}: ${e.message}")
                             }
+                            return FileVisitResult.CONTINUE
                         }
-                        return FileVisitResult.CONTINUE
-                    }
 
-                    override fun visitFileFailed(
-                        file: Path,
-                        exc: IOException,
-                    ): FileVisitResult {
-                        failures.add("${file.toAbsolutePath()}: ${exc.message}")
-                        return FileVisitResult.CONTINUE
-                    }
-                },
-            )
+                        override fun postVisitDirectory(
+                            dir: Path,
+                            exc: IOException?,
+                        ): FileVisitResult {
+                            if (exc != null) {
+                                failures.add("${dir.toAbsolutePath()}: ${exc.message}")
+                            } else {
+                                try {
+                                    Files.delete(dir)
+                                } catch (e: IOException) {
+                                    failures.add("${dir.toAbsolutePath()}: ${e.message}")
+                                } catch (e: SecurityException) {
+                                    failures.add("${dir.toAbsolutePath()}: ${e.message}")
+                                }
+                            }
+                            return FileVisitResult.CONTINUE
+                        }
+
+                        override fun visitFileFailed(
+                            file: Path,
+                            exc: IOException,
+                        ): FileVisitResult {
+                            failures.add("${file.toAbsolutePath()}: ${exc.message}")
+                            return FileVisitResult.CONTINUE
+                        }
+                    },
+                )
+            }
         }
         check(failures.isEmpty()) {
             "Failed to delete existing file or directory during --force overwrite: " +
