@@ -652,20 +652,7 @@ object PluginStoreSetup {
                 val installedVersion =
                     PluginVersionComparator.extractVersionFromJarFileName(existingJar.name, systemPlugin.artifactPrefix)
                         ?: runCatching { readPluginManifest(existingJar)?.version }.getOrNull()
-                val pinnedRepo =
-                    SystemPluginManifestService.pinnedGithubRepoOrNull(
-                        systemPlugin.pluginId,
-                        systemPlugin.githubRepo,
-                    )
-                if (pinnedRepo == null) {
-                    logger.error(
-                        LogCategory.SYSTEM,
-                        "Refusing system-plugin update check from untrusted GitHub repo",
-                        mapOf("pluginId" to systemPlugin.pluginId, "repo" to systemPlugin.githubRepo),
-                    )
-                    return@launch
-                }
-                val latestVersion = fetchLatestReleaseVersion(pinnedRepo)
+                val latestVersion = fetchLatestReleaseVersion(systemPlugin.githubRepo)
                 when {
                     latestVersion == null -> {
                         logger.debug(
@@ -1339,23 +1326,23 @@ object PluginStoreSetup {
         // arbitrary GitHub repo. The currently installed JAR, if any, stays
         // on disk and the next launch retries the check, keeping the refusal
         // loud instead of warn-and-allow.
-        val pinnedRepo =
-            SystemPluginManifestService.pinnedGithubRepoOrNull(plugin.pluginId, plugin.githubRepo)
-        if (pinnedRepo == null) {
+        val untrustedRepoReason =
+            SystemPluginManifestService.untrustedGithubRepoReason(plugin.pluginId, plugin.githubRepo)
+        if (untrustedRepoReason != null) {
             logger.error(
                 LogCategory.SYSTEM,
                 "Refusing system-plugin download from untrusted GitHub repo",
                 mapOf(
                     "pluginId" to plugin.pluginId,
                     "repo" to plugin.githubRepo,
-                    "reason" to "plugin id and repo do not match a build-owned system-plugin pin",
+                    "reason" to untrustedRepoReason,
                 ),
             )
             return false
         }
         return withSystemPluginDownloadLock(plugin) {
             try {
-                val apiUrl = "https://api.github.com/repos/$pinnedRepo/releases/latest"
+                val apiUrl = "https://api.github.com/repos/${plugin.githubRepo}/releases/latest"
                 logger.debug(
                     LogCategory.SYSTEM,
                     "Fetching latest release from GitHub",
