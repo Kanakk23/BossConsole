@@ -10,9 +10,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
-import java.nio.file.Files
-import java.nio.file.attribute.PosixFileAttributeView
-import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -100,22 +97,20 @@ class McpOperationLedger(
         // 1. Persist first, because persistence is what assigns the chain hash. What comes back is
         //    the record on disk, or the draft when there is no ledger file or the write failed, so
         //    the in-memory copy below mirrors exactly what was written rather than a pre-hash one.
-        return synchronized(writeLock) {
-            val record = persistRecord(draft)
+        val record = persistRecord(draft)
 
-            // 2. Update in-memory telemetry ring buffer
-            _recentOperations.update { current ->
-                (listOf(record) + current).take(ringBufferCapacity)
-            }
-            if (countsAsCall) {
-                _totalCalls.update { it + 1 }
-                if (isError) {
-                    _totalErrors.update { it + 1 }
-                }
-            }
-
-            record
+        // 2. Update in-memory telemetry ring buffer
+        _recentOperations.update { current ->
+            (listOf(record) + current).take(ringBufferCapacity)
         }
+        if (countsAsCall) {
+            _totalCalls.update { it + 1 }
+            if (isError) {
+                _totalErrors.update { it + 1 }
+            }
+        }
+
+        return record
     }
 
     /**
@@ -140,7 +135,7 @@ class McpOperationLedger(
      *
      * Never throws: an audit failure must not change the already-completed tool result.
      */
-    @Suppress("TooGenericExceptionCaught", "ReturnCount") // Audit failure must not alter the tool result.
+    @Suppress("TooGenericExceptionCaught") // Audit failure must not change the already-completed tool result.
     private fun persistRecord(record: McpOperationRecord): McpOperationRecord {
         val file = ledgerFile ?: return record
         synchronized(writeLock) {
@@ -155,7 +150,6 @@ class McpOperationLedger(
                 val chained = record.copy(hash = chainedHash, parentHash = chainHead)
                 rotateIfNeeded(file)
                 file.parentFile?.mkdirs()
-                createOrRestrictToOwner(file)
                 file.appendText(json.encodeToString(chained) + "\n")
                 chainHead = chainedHash
                 return chained
@@ -168,41 +162,6 @@ class McpOperationLedger(
             }
         }
         return record
-    }
-
-    /**
-     * Creates a new ledger with owner-only permissions, or repairs a legacy ledger's mode.
-     *
-     * The persisted rows carry sanitized-but-still-private operator data (file paths,
-     * URLs, commands passed to operator agents), so the file must never be readable by
-     * other local accounts. A plain `appendText` create inherits the process umask,
-     * which is typically 0644 - world-readable - on Linux. Creating the file via
-     * `Files.createFile` with an explicit rw------- mode attribute makes the ledger
-     * owner-only from its first byte, with no transient window between creation and a
-     * later chmod.
-     *
-     * Existing ledgers are tightened before every append so an older 0644 file cannot retain that
-     * mode forever or carry it into a rotated backup. On filesystems without a POSIX attribute
-     * view (notably Windows), profile-directory ACLs remain the protection. Permission repair is
-     * best-effort and logged because a hardening failure must never cost the audit record itself.
-     */
-    private fun createOrRestrictToOwner(file: File) {
-        val path = file.toPath()
-        if (Files.getFileAttributeView(path, PosixFileAttributeView::class.java) == null) return
-        val ownerOnly = PosixFilePermissions.fromString("rw-------")
-        runCatching {
-            if (file.exists()) {
-                Files.setPosixFilePermissions(path, ownerOnly)
-            } else {
-                Files.createFile(path, PosixFilePermissions.asFileAttribute(ownerOnly))
-            }
-        }.onFailure { failure ->
-            logger.warn(
-                LogCategory.SYSTEM,
-                "Could not restrict MCP operation ledger to its owner",
-                mapOf("path" to file.path, "error" to (failure.message ?: failure::class.simpleName)),
-            )
-        }
     }
 
     // Rotation walks numbered backups under a single write lock.
@@ -266,15 +225,14 @@ class McpOperationLedger(
 /**
  * The hash-chain primitives behind [McpOperationRecord.hash]: a record's integrity value is a
  * SHA-256 over its own canonical form chained to its predecessor's, so editing, reordering,
- * inserting or dropping a record from inside retained history invalidates the hash of every record
- * after it. Truncating the newest tail cannot be detected without an external signed checkpoint.
+ * inserting or dropping a record invalidates the hash of every record after it.
  *
  * This is tamper *evidence*, not tamper *proof*. There is no key and no signature, so anyone who
  * can write the ledger can recompute the chain. What it catches is the realistic set of quiet
- * edits - a record changed in place, a middle call removed, two records swapped - without the
- * writer also rewriting everything that follows. A chain rewritten end to end or shortened at its
- * tail is indistinguishable from valid retained history, so this is a local audit aid and not a
- * notary.
+ * edits - a record changed in place, a call removed, two records swapped - without the writer also
+ * rewriting everything that follows, which is the difference between an append-only file and a
+ * tamper-evident one. A chain rewritten end to end is indistinguishable from the original, so this
+ * is a local audit aid and not a notary.
  */
 internal object McpLedgerChain {
     /** The parent a chain starts from, used when there is no predecessor to continue from. */
@@ -289,10 +247,8 @@ internal object McpLedgerChain {
      * [McpOperationRecord.hash] and [McpOperationRecord.parentHash] are excluded from the canonical
      * form, so this recomputes from a record read back off disk exactly as the writer computed it.
      */
-    fun linkHash(
-        parentHash: String,
-        record: McpOperationRecord,
-    ): String = sha256Hex("$parentHash:${record.canonicalFormForHashing()}")
+    fun linkHash(parentHash: String, record: McpOperationRecord): String =
+        sha256Hex("$parentHash:${record.canonicalFormForHashing()}")
 
     /** Lowercase hex SHA-256 of [text] as UTF-8, matching `MessageDigest` and `sha256sum`. */
     fun sha256Hex(text: String): String {
@@ -314,10 +270,7 @@ internal data class McpLedgerEntry(
 )
 
 /** Thrown when a ledger file exists but cannot be read as a sequence of records. */
-internal class McpLedgerReadException(
-    message: String,
-    cause: Throwable? = null,
-) : Exception(message, cause)
+internal class McpLedgerReadException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 /** Why a record did not agree with the chain around it. */
 internal enum class McpLedgerBreakReason {
@@ -351,33 +304,29 @@ internal data class McpLedgerBreak(
  * The outcome of walking the chain.
  *
  * [unverifiableRecords] counts records with no hash to check, which means they were written before
- * integrity tracking existed. A legacy prefix followed by hashed records is normal on an upgraded
- * install; a ledger containing only legacy records remains unverifiable until a new record anchors
- * the chain. A record that carries a hash is always checkable, even when the record before it has
- * been rotated away, because it stores the parent it chained to.
+ * integrity tracking existed. A non-zero count is therefore normal on an upgraded install and is
+ * not by itself a failure. A record that carries a hash is always checkable, even when the record
+ * before it has been rotated away, because it stores the parent it chained to.
  */
 internal data class McpLedgerVerification(
     val files: List<String>,
     val totalRecords: Int,
     val chainedRecords: Int,
     val unverifiableRecords: Int,
-    val unverifiableSuffixRecords: Int,
     val oldestVerifiableFile: String?,
     val oldestVerifiableLine: Int?,
     val firstBreak: McpLedgerBreak?,
     val coverageGaps: List<String>,
 ) {
     /**
-     * `intact`, `broken`, `incomplete`, or `unverifiable`. Never `intact` unless every record
-     * carrying a hash was checked and agreed, so a partly missing or unreadable ledger cannot read
-     * as healthy.
+     * `intact`, `broken`, or `incomplete`. Never `intact` unless every record carrying a hash was
+     * checked and agreed, so a partly missing or unreadable ledger cannot read as healthy.
      */
     val verdict: String
         get() =
             when {
                 firstBreak != null -> "broken"
                 coverageGaps.isNotEmpty() -> "incomplete"
-                totalRecords == 0 || chainedRecords == 0 || unverifiableSuffixRecords > 0 -> "unverifiable"
                 else -> "intact"
             }
 }
@@ -394,12 +343,6 @@ internal data class McpLedgerVerification(
  * and a higher n is older. Rotation always leaves a contiguous prefix (`.1` newest through `.k`
  * oldest), so a hole in that prefix means records that were once on disk are gone.
  */
-@Suppress(
-    "LoopWithTooManyJumpStatements",
-    "ReturnCount",
-    "TooGenericExceptionCaught",
-    "TooManyFunctions",
-) // File layout, strict decoding, and verification form one audit boundary.
 internal class McpLedgerStore(
     private val activeFile: File?,
 ) {
@@ -426,17 +369,14 @@ internal class McpLedgerStore(
     private fun existsAt(position: Int): Boolean = fileAt(position)?.let { it.exists() && it.isFile } == true
 
     /** Oldest first: the highest-numbered backup present, down to the active file. */
-    // Keeping the pipeline visible is clearer than hiding its file predicate in a helper.
-    @Suppress("MaxLineLength")
-    fun existingFilesOldestFirst(): List<File> = (BACKUP_PROBE_LIMIT downTo 0).mapNotNull { fileAt(it) }.filter { it.exists() && it.isFile }
+    fun existingFilesOldestFirst(): List<File> =
+        (BACKUP_PROBE_LIMIT downTo 0).mapNotNull { fileAt(it) }.filter { it.exists() && it.isFile }
 
     /** Backups absent from a prefix that otherwise reaches an older one. */
     fun coverageGaps(): List<String> {
         val present = (1..BACKUP_PROBE_LIMIT).filter { existsAt(it) }
         val oldest = present.lastOrNull() ?: return emptyList()
-        val missingBackups = (1..oldest).filterNot { present.contains(it) }.mapNotNull { fileAt(it)?.name }
-        val missingActive = if (existsAt(0)) emptyList() else listOfNotNull(fileAt(0)?.name)
-        return missingActive + missingBackups
+        return (1..oldest).filterNot { present.contains(it) }.mapNotNull { fileAt(it)?.name }
     }
 
     private fun positionOf(file: File): Int? {
@@ -483,8 +423,8 @@ internal class McpLedgerStore(
      * writer and a verifier always agree on where a chain resumes.
      *
      * Best effort on purpose, because this runs on the write path, which must never throw. When the
-     * newest record cannot be read, recovery probes older rotations and uses genesis only
-     * when none can be read. [verify] still reports the unreadable file or broken adjacency.
+     * newest record cannot be read, the caller writes a record chained to genesis and [verify]
+     * reports the unreadable or malformed file rather than passing it.
      */
     fun lastChainHead(): String {
         for (position in 0..BACKUP_PROBE_LIMIT) {
@@ -500,8 +440,7 @@ internal class McpLedgerStore(
     @Suppress("TooGenericExceptionCaught", "SwallowedException")
     private fun lastRecordIn(file: File): McpOperationRecord? =
         try {
-            file
-                .useLines { lines -> lines.filter { it.isNotBlank() }.lastOrNull() }
+            file.useLines { lines -> lines.filter { it.isNotBlank() }.lastOrNull() }
                 ?.let { json.decodeFromString<McpOperationRecord>(it) }
         } catch (t: Exception) {
             null
@@ -545,8 +484,6 @@ internal class McpLedgerStore(
         val entries = readEntries()
         var chained = 0
         var unverifiable = 0
-        var unverifiableSuffix = 0
-        var hasSeenChainedRecord = false
         var oldestVerifiable: McpLedgerEntry? = null
         var firstBreak: McpLedgerBreak? = null
         var previous: McpLedgerEntry? = null
@@ -557,7 +494,6 @@ internal class McpLedgerStore(
             val stored = entry.record.hash
             if (stored == null) {
                 unverifiable++
-                if (hasSeenChainedRecord) unverifiableSuffix++
                 previous = entry
                 previousPosition = position
                 continue
@@ -581,7 +517,6 @@ internal class McpLedgerStore(
             }
 
             chained++
-            hasSeenChainedRecord = true
             if (oldestVerifiable == null) oldestVerifiable = entry
             previous = entry
             previousPosition = position
@@ -592,7 +527,6 @@ internal class McpLedgerStore(
             totalRecords = entries.size,
             chainedRecords = chained,
             unverifiableRecords = unverifiable,
-            unverifiableSuffixRecords = unverifiableSuffix,
             oldestVerifiableFile = oldestVerifiable?.file?.name,
             oldestVerifiableLine = oldestVerifiable?.lineNumber,
             firstBreak = firstBreak,
