@@ -100,22 +100,18 @@ object UserDataStorage {
      * identity - the mutex cannot order a caller that already passed it. The save captures the
      * generation before acquiring the lock and re-checks it inside; a clear that happened while
      * it waited invalidates the save, so the resurrection path is closed.
-     *
-     * This deliberately fails closed: a save for a new identity that entered before a lagging
-     * clear is skipped too. That window is small, and preserving logged-out identity is the more
-     * serious failure; the skip is therefore logged as a warning for diagnosis.
      */
     private val clearGeneration = AtomicLong()
 
-    /** Test seam invoked after the production entry point captures the generation. */
-    internal var afterGenerationCaptureForTest: (suspend () -> Unit)? = null
+    /** Test seam: the generation a save entering now would capture. */
+    internal fun generationForTest(): Long = clearGeneration.get()
 
     /**
      * The save body with an explicit entry generation, so the fence's regression test can
      * hand a save the generation it *would have* captured before a logout interleaved,
      * driving the capture-clear-acquire order deterministically without coroutine scheduling.
      */
-    private suspend fun doSaveUserData(
+    internal suspend fun doSaveUserData(
         user: UserInfo,
         authenticatedVia: String?,
         generationAtEntry: Long,
@@ -123,7 +119,7 @@ object UserDataStorage {
         withContext(Dispatchers.IO) {
             fileLock.withLock {
                 if (generationAtEntry != clearGeneration.get()) {
-                    logger.warn(
+                    logger.debug(
                         LogCategory.AUTH,
                         "Skipping user data save: logout occurred while the save waited for the lock",
                     )
@@ -233,31 +229,6 @@ object UserDataStorage {
     }
 
     /**
-     * Flush pending user-data writes before the process exits.
-     *
-     * This object has no debounce - every save is a synchronous read-modify-write under
-     * [fileLock] - so unlike [ai.rever.boss.dashboard.RecentFilesManager.flushPendingSaves]
-     * there is no timer window a quit can fall inside and nothing buffered to force out.
-     * The seam still earns its place on the exit path: acquiring [fileLock] waits for a
-     * write that is already mid-flight to finish before returning, so the quit cannot cut
-     * down a half-written record. A write that has not started yet is not awaited - its
-     * caller awaits it in the normal flow - and keeping this beside the recent-files flush
-     * means a future debounced write here gets exit-safety without the quit path gaining a
-     * new step.
-     */
-    suspend fun flushPendingSaves() {
-        fileLock.withLock {
-            // Nothing is buffered: every write here is synchronous under this lock, so the
-            // wait itself is the contract - it lets an in-flight write finish first.
-            logger.debug(
-                LogCategory.AUTH,
-                "Flushed pending user-data saves on exit",
-                mapOf("present" to storageFile.exists()),
-            )
-        }
-    }
-
-    /**
      * Save user data to persistent storage
      *
      * Preserves the pluginWizardCompleted flag if it was previously set,
@@ -270,9 +241,7 @@ object UserDataStorage {
         // The fence's generation capture happens inside the delegate, before its lock
         // acquisition (BossConsole#762): a clear that runs while this save waits
         // invalidates it, so a save entered before logout cannot recreate the record.
-        val generationAtEntry = clearGeneration.get()
-        afterGenerationCaptureForTest?.invoke()
-        doSaveUserData(user, authenticatedVia, generationAtEntry)
+        doSaveUserData(user, authenticatedVia, clearGeneration.get())
     }
 
     /**

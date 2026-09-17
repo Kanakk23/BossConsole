@@ -36,7 +36,6 @@ class UserDataStorageWizardTest {
 
     @AfterTest
     fun tearDown() {
-        UserDataStorage.afterGenerationCaptureForTest = null
         // Point the singleton back at the user's directory before anything else uses it.
         UserDataStorage.resetForTesting(BossDirectories.rootDir)
         workDir.deleteRecursively()
@@ -89,8 +88,8 @@ class UserDataStorageWizardTest {
     /**
      * The logout generation fence (BossConsole#762, review follow-up on the merged #795):
      * a save that entered before logout but acquires the lock only after clearUserData ran
-     * must NOT recreate user_data.json. A hook after the production entry point captures its
-     * generation drives the interleaving deterministically without bypassing that capture.
+     * must NOT recreate user_data.json. Deterministic via the internal seam: hand the save
+     * the generation it *would have* captured before the interleaved clear.
      */
     @Test
     fun `a save that acquires the lock only after logout cannot resurrect the cleared record`() =
@@ -99,17 +98,15 @@ class UserDataStorageWizardTest {
             UserDataStorage.saveUserData(user)
             assertTrue(UserDataStorage.storageFile.exists())
 
-            var hookRan = false
-            UserDataStorage.afterGenerationCaptureForTest = {
-                UserDataStorage.afterGenerationCaptureForTest = null
-                UserDataStorage.clearUserData()
-                hookRan = true
-            }
+            // The generation a save that entered BEFORE logout would have captured.
+            val staleGeneration = UserDataStorage.generationForTest()
 
-            // saveUserData captures its generation, the hook completes logout, then the save
-            // reaches the lock with its pre-logout generation and must be skipped.
-            UserDataStorage.saveUserData(user)
-            assertTrue(hookRan, "the test must drive logout after the production capture point")
+            // Logout runs to completion while the save is "waiting".
+            UserDataStorage.clearUserData()
+            assertFalse(UserDataStorage.storageFile.exists(), "logout deleted the record")
+
+            // The waiting save acquires the lock with its pre-logout generation: the fence must skip it.
+            UserDataStorage.doSaveUserData(user, authenticatedVia = null, generationAtEntry = staleGeneration)
             assertFalse(
                 UserDataStorage.storageFile.exists(),
                 "a save entered before logout but executed after clearUserData must not recreate the record",
