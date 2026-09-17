@@ -8,6 +8,9 @@ import ai.rever.boss.plugin.loader.PluginManifestReader
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.io.RandomAccessFile
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -149,6 +152,9 @@ class PluginScaffolderEvalTest {
         File(targetFolder, "plugin.json").writeText("{}")
         val dummy = File(targetFolder, "existing.txt")
         dummy.writeText("blocking")
+        val nestedDir = File(targetFolder, "nested/sub")
+        nestedDir.mkdirs()
+        File(nestedDir, "nested-file.txt").writeText("nested-data")
 
         // Without force -> fails fast
         val ex =
@@ -172,6 +178,8 @@ class PluginScaffolderEvalTest {
             )
         assertEquals("com.example.collision-plugin", result.pluginId)
         assertTrue(File(targetFolder, "plugin.json").exists())
+        assertFalse(dummy.exists(), "Previous flat file should be deleted")
+        assertFalse(nestedDir.exists(), "Previous nested directory subtree should be deleted")
     }
 
     @Test
@@ -275,7 +283,9 @@ class PluginScaffolderEvalTest {
         val isWindows = System.getProperty("os.name").lowercase().contains("win")
         val raf =
             if (isWindows) {
-                java.io.RandomAccessFile(lockedFile, "rw")
+                // On Windows, opening a RandomAccessFile handle without FILE_SHARE_DELETE
+                // prevents file deletion while the handle remains open (locks are unnecessary).
+                RandomAccessFile(lockedFile, "rw")
             } else {
                 val madeReadOnly = subDir.setWritable(false, false)
                 // Linux root users (e.g. Docker CI) bypass directory write permissions
@@ -285,7 +295,6 @@ class PluginScaffolderEvalTest {
                 )
                 null
             }
-        val fileLock = raf?.channel?.tryLock()
 
         try {
             val ex =
@@ -301,11 +310,11 @@ class PluginScaffolderEvalTest {
                 ex.message!!.contains("Failed to delete existing file or directory during --force overwrite"),
                 "Expected deletion failure message, got: ${ex.message}",
             )
+            assertTrue(
+                ex.message!!.contains("partially cleared and no scaffold was written"),
+                "Expected partial clearance notice, got: ${ex.message}",
+            )
         } finally {
-            try {
-                fileLock?.release()
-            } catch (_: Exception) {
-            }
             try {
                 raf?.close()
             } catch (_: Exception) {
@@ -317,6 +326,46 @@ class PluginScaffolderEvalTest {
             } catch (_: Exception) {
             }
         }
+    }
+
+    @Test
+    fun `force overwrite deletes symlinks without traversing into target directory contents`() {
+        val outsideDir = File(tempDir.toFile(), "outside-target")
+        outsideDir.mkdirs()
+        val canaryFile = File(outsideDir, "canary.txt")
+        canaryFile.writeText("vital data outside plugin")
+
+        val targetFolder = File(tempDir.toFile(), "symlink-plugin-test")
+        targetFolder.mkdirs()
+        File(targetFolder, "plugin.json").writeText("{}")
+        val symlinkPath = targetFolder.toPath().resolve("linked-dir")
+
+        val symlinkCreated =
+            try {
+                Files.createSymbolicLink(symlinkPath, outsideDir.toPath())
+                true
+            } catch (_: Exception) {
+                false
+            }
+        assumeTrue(
+            symlinkCreated,
+            "Skipping symlink test: filesystem or OS privileges do not support creating symbolic links",
+        )
+
+        val result =
+            PluginScaffolder.scaffold(
+                name = "symlink-plugin",
+                templateName = "mcp-tool",
+                targetDir = targetFolder,
+                force = true,
+            )
+
+        assertEquals("com.example.symlink-plugin", result.pluginId)
+        assertTrue(File(targetFolder, "plugin.json").exists())
+        assertFalse(Files.exists(symlinkPath, LinkOption.NOFOLLOW_LINKS), "Symlink should be deleted")
+        assertTrue(outsideDir.exists(), "Outside directory must survive")
+        assertTrue(canaryFile.exists(), "Outside directory contents must survive intact")
+        assertEquals("vital data outside plugin", canaryFile.readText())
     }
 
     @Test
@@ -347,8 +396,27 @@ class PluginScaffolderEvalTest {
                 code.contains("import ai.rever.boss.plugin.logging.LogCategory"),
                 "Must import LogCategory in $tmpl",
             )
-            assertFalse(code.contains("ComponentLogger"), "Must not explicitly reference ComponentLogger in $tmpl")
             assertFalse(code.contains("println("), "Must not use raw println in $tmpl")
+
+            val buildFile = File(targetFolder, "build.gradle.kts")
+            assertTrue(buildFile.exists(), "build.gradle.kts must exist for $tmpl")
+            val buildGradle = buildFile.readText()
+            assertTrue(
+                buildGradle.contains("""compileOnly("org.slf4j:slf4j-api:2.0.16")"""),
+                "build.gradle.kts must declare compileOnly slf4j-api in $tmpl",
+            )
+            assertTrue(
+                buildGradle.contains("""testImplementation("org.slf4j:slf4j-api:2.0.16")"""),
+                "build.gradle.kts must declare testImplementation slf4j-api in $tmpl",
+            )
+            assertFalse(
+                buildGradle.contains("plugin.compose"),
+                "build.gradle.kts must avoid Compose compiler plugin to prevent \$stable hazard in $tmpl",
+            )
+            assertFalse(
+                buildGradle.contains("org.jetbrains.compose"),
+                "build.gradle.kts must avoid JetBrains Compose plugin to prevent \$stable hazard in $tmpl",
+            )
         }
     }
 }

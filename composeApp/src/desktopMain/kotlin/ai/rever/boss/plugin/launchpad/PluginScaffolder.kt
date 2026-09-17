@@ -2,7 +2,12 @@ package ai.rever.boss.plugin.launchpad
 
 import java.io.File
 import java.io.IOException
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermission
 
 /**
@@ -302,6 +307,8 @@ object PluginScaffolder {
         dependencies {
             compileOnly("ai.rever.boss:boss-plugin-api:$apiVersion")
             testImplementation("ai.rever.boss:boss-plugin-api:$apiVersion")
+            compileOnly("org.slf4j:slf4j-api:2.0.16")
+            testImplementation("org.slf4j:slf4j-api:2.0.16")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
             testImplementation(kotlin("test"))
@@ -349,6 +356,9 @@ object PluginScaffolder {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
+                    // Note: Templates avoid the Compose compiler plugin, so no ${'$'}stable field is synthesised
+                    // on the plugin class. If Compose is added later for UI components, keep the logger as a
+                    // top-level property or resolve per-call to avoid Compose stability metadata linkage hazards.
                     private val logger = BossLogger.forComponent("$escapedName")
                     private var toolProvider: McpToolProvider? = null
 
@@ -399,6 +409,9 @@ object PluginScaffolder {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
+                    // Note: Templates avoid the Compose compiler plugin, so no ${'$'}stable field is synthesised
+                    // on the plugin class. If Compose is added later for UI components, keep the logger as a
+                    // top-level property or resolve per-call to avoid Compose stability metadata linkage hazards.
                     private val logger = BossLogger.forComponent("$escapedName")
                     private var menuContribution: PanelMenuContribution? = null
 
@@ -454,6 +467,9 @@ object PluginScaffolder {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
+                    // Note: Templates avoid the Compose compiler plugin, so no ${'$'}stable field is synthesised
+                    // on the plugin class. If Compose is added later for UI components, keep the logger as a
+                    // top-level property or resolve per-call to avoid Compose stability metadata linkage hazards.
                     private val logger = BossLogger.forComponent("$escapedName")
                     private var workerJob: Job? = null
 
@@ -501,6 +517,9 @@ object PluginScaffolder {
                     override val pluginId: String = "$pluginId"
                     override val displayName: String = "$escapedName"
 
+                    // Note: Templates avoid the Compose compiler plugin, so no ${'$'}stable field is synthesised
+                    // on the plugin class. If Compose is added later for UI components, keep the logger as a
+                    // top-level property or resolve per-call to avoid Compose stability metadata linkage hazards.
                     private val logger = BossLogger.forComponent("$escapedName")
                     private var toolProvider: McpToolProvider? = null
                     private var menuContribution: PanelMenuContribution? = null
@@ -754,11 +773,61 @@ object PluginScaffolder {
         existingFiles: Array<File>,
     ) {
         assertSafeToPurge(targetDir)
+        val failures = mutableListOf<String>()
         for (file in existingFiles) {
-            val deleted = file.deleteRecursively()
-            check(deleted && !file.exists()) {
-                "Failed to delete existing file or directory during --force overwrite: ${file.absolutePath}"
-            }
+            val rootPath = file.toPath()
+            if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) continue
+            Files.walkFileTree(
+                rootPath,
+                emptySet(),
+                Int.MAX_VALUE,
+                object : SimpleFileVisitor<Path>() {
+                    override fun visitFile(
+                        file: Path,
+                        attrs: BasicFileAttributes,
+                    ): FileVisitResult {
+                        try {
+                            Files.delete(file)
+                        } catch (e: IOException) {
+                            failures.add("${file.toAbsolutePath()}: ${e.message}")
+                        } catch (e: SecurityException) {
+                            failures.add("${file.toAbsolutePath()}: ${e.message}")
+                        }
+                        return FileVisitResult.CONTINUE
+                    }
+
+                    override fun postVisitDirectory(
+                        dir: Path,
+                        exc: IOException?,
+                    ): FileVisitResult {
+                        if (exc != null) {
+                            failures.add("${dir.toAbsolutePath()}: ${exc.message}")
+                        } else {
+                            try {
+                                Files.delete(dir)
+                            } catch (e: IOException) {
+                                failures.add("${dir.toAbsolutePath()}: ${e.message}")
+                            } catch (e: SecurityException) {
+                                failures.add("${dir.toAbsolutePath()}: ${e.message}")
+                            }
+                        }
+                        return FileVisitResult.CONTINUE
+                    }
+
+                    override fun visitFileFailed(
+                        file: Path,
+                        exc: IOException,
+                    ): FileVisitResult {
+                        failures.add("${file.toAbsolutePath()}: ${exc.message}")
+                        return FileVisitResult.CONTINUE
+                    }
+                },
+            )
+        }
+        check(failures.isEmpty()) {
+            "Failed to delete existing file or directory during --force overwrite: " +
+                "${targetDir.absolutePath} was partially cleared and no scaffold was written. " +
+                "Failures:\n" + failures.joinToString("\n")
         }
     }
 }
