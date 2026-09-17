@@ -13,6 +13,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
 import java.io.File
+import java.io.IOException
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -123,12 +124,14 @@ class SettingsServiceImpl(
     @Suppress("TooGenericExceptionCaught")
     private fun applyPosixOwnerPermissions(path: Path) {
         if (!hasPosix(path)) return
-        // Fail closed when a filesystem advertises POSIX support but refuses the restriction;
-        // publishing the temporary file would violate the owner-only persistence contract.
-        Files.setPosixFilePermissions(
-            path,
-            setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
-        )
+        try {
+            Files.setPosixFilePermissions(
+                path,
+                setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+            )
+        } catch (_: Exception) {
+            // Best-effort on POSIX filesystems that disallow permission updates
+        }
     }
 
     private fun atomicMoveFile(
