@@ -307,8 +307,8 @@ object PluginScaffolder {
         dependencies {
             compileOnly("ai.rever.boss:boss-plugin-api:$apiVersion")
             testImplementation("ai.rever.boss:boss-plugin-api:$apiVersion")
-            compileOnly("org.slf4j:slf4j-api:2.0.16")
-            testImplementation("org.slf4j:slf4j-api:2.0.16")
+            compileOnly("org.slf4j:slf4j-api:2.0.18")
+            testImplementation("org.slf4j:slf4j-api:2.0.18")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
             testImplementation(kotlin("test"))
@@ -768,13 +768,26 @@ object PluginScaffolder {
         }
     }
 
+    /**
+     * Identifies a directory as a plugin project for [assertSafeToPurge]. Purged last so a failed
+     * purge leaves the directory recognizable and a --force retry is not refused.
+     */
+    private val pluginMarkerNames = setOf("plugin.json", "build.gradle.kts", "build.gradle")
+
+    /**
+     * Deletes every existing top-level entry in [targetDir] without following directory symlinks:
+     * each symlink is unlinked itself and its target is never traversed. If [targetDir] is itself
+     * a symlink, the caller's listFiles() already resolves it and the purge applies to the named
+     * directory's contents, as intended; assertSafeToPurge's canonical checks still protect
+     * home and system roots.
+     */
     private fun purgeExistingFiles(
         targetDir: File,
         existingFiles: Array<File>,
     ) {
         assertSafeToPurge(targetDir)
         val failures = mutableListOf<String>()
-        for (file in existingFiles) {
+        for (file in existingFiles.sortedBy { it.name in pluginMarkerNames }) {
             val rootPath = file.toPath()
             if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) continue
             Files.walkFileTree(
@@ -827,6 +840,7 @@ object PluginScaffolder {
         check(failures.isEmpty()) {
             "Failed to delete existing file or directory during --force overwrite: " +
                 "${targetDir.absolutePath} was partially cleared and no scaffold was written. " +
+                "Remove the remaining files manually before retrying --force. " +
                 "Failures:\n" + failures.joinToString("\n")
         }
     }

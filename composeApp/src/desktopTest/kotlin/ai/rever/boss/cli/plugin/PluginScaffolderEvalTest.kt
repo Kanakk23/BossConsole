@@ -314,6 +314,10 @@ class PluginScaffolderEvalTest {
                 ex.message!!.contains("partially cleared and no scaffold was written"),
                 "Expected partial clearance notice, got: ${ex.message}",
             )
+            assertTrue(
+                File(targetFolder, "plugin.json").exists(),
+                "Plugin marker must survive a failed purge so --force retry is not refused",
+            )
         } finally {
             try {
                 raf?.close()
@@ -334,23 +338,38 @@ class PluginScaffolderEvalTest {
         outsideDir.mkdirs()
         val canaryFile = File(outsideDir, "canary.txt")
         canaryFile.writeText("vital data outside plugin")
+        val outsideFile = File(tempDir.toFile(), "outside-file.txt")
+        outsideFile.writeText("vital file outside plugin")
 
         val targetFolder = File(tempDir.toFile(), "symlink-plugin-test")
         targetFolder.mkdirs()
         File(targetFolder, "plugin.json").writeText("{}")
-        val symlinkPath = targetFolder.toPath().resolve("linked-dir")
 
-        val symlinkCreated =
+        // Nested directory symlink one level down: a top-level-only guard would miss this.
+        val subDir = File(targetFolder, "sub")
+        subDir.mkdirs()
+        val nestedLink = subDir.toPath().resolve("linked-dir")
+        val nestedLinkCreated =
             try {
-                Files.createSymbolicLink(symlinkPath, outsideDir.toPath())
+                Files.createSymbolicLink(nestedLink, outsideDir.toPath())
                 true
             } catch (_: Exception) {
                 false
             }
         assumeTrue(
-            symlinkCreated,
+            nestedLinkCreated,
             "Skipping symlink test: filesystem or OS privileges do not support creating symbolic links",
         )
+
+        // File symlink at the top level, alongside the nested directory link.
+        val fileLink = targetFolder.toPath().resolve("linked-file.txt")
+        val fileLinkCreated =
+            try {
+                Files.createSymbolicLink(fileLink, outsideFile.toPath())
+                true
+            } catch (_: Exception) {
+                false
+            }
 
         val result =
             PluginScaffolder.scaffold(
@@ -362,10 +381,15 @@ class PluginScaffolderEvalTest {
 
         assertEquals("com.example.symlink-plugin", result.pluginId)
         assertTrue(File(targetFolder, "plugin.json").exists())
-        assertFalse(Files.exists(symlinkPath, LinkOption.NOFOLLOW_LINKS), "Symlink should be deleted")
+        assertFalse(Files.exists(nestedLink, LinkOption.NOFOLLOW_LINKS), "Nested directory symlink should be deleted")
+        if (fileLinkCreated) {
+            assertFalse(Files.exists(fileLink, LinkOption.NOFOLLOW_LINKS), "File symlink should be deleted")
+        }
         assertTrue(outsideDir.exists(), "Outside directory must survive")
         assertTrue(canaryFile.exists(), "Outside directory contents must survive intact")
         assertEquals("vital data outside plugin", canaryFile.readText())
+        assertTrue(outsideFile.exists(), "Symlink target file must survive")
+        assertEquals("vital file outside plugin", outsideFile.readText())
     }
 
     @Test
@@ -402,11 +426,11 @@ class PluginScaffolderEvalTest {
             assertTrue(buildFile.exists(), "build.gradle.kts must exist for $tmpl")
             val buildGradle = buildFile.readText()
             assertTrue(
-                buildGradle.contains("""compileOnly("org.slf4j:slf4j-api:2.0.16")"""),
+                buildGradle.contains("""compileOnly("org.slf4j:slf4j-api:2.0.18")"""),
                 "build.gradle.kts must declare compileOnly slf4j-api in $tmpl",
             )
             assertTrue(
-                buildGradle.contains("""testImplementation("org.slf4j:slf4j-api:2.0.16")"""),
+                buildGradle.contains("""testImplementation("org.slf4j:slf4j-api:2.0.18")"""),
                 "build.gradle.kts must declare testImplementation slf4j-api in $tmpl",
             )
             assertFalse(
