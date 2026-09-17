@@ -769,8 +769,9 @@ object PluginScaffolder {
     }
 
     /**
-     * Identifies a directory as a plugin project for [assertSafeToPurge]. Purged last so a failed
-     * purge leaves the directory recognizable and a --force retry is not refused.
+     * Identifies a directory as a plugin project for [assertSafeToPurge]. These entries are purged
+     * last, and are skipped entirely if any other purge failure occurred, so a partially cleared
+     * directory stays recognizable and a --force retry is not refused as a non-plugin directory.
      */
     private val pluginMarkerNames = setOf("plugin.json", "build.gradle.kts", "build.gradle")
 
@@ -788,6 +789,7 @@ object PluginScaffolder {
         assertSafeToPurge(targetDir)
         val failures = mutableListOf<String>()
         for (file in existingFiles.sortedBy { it.name in pluginMarkerNames }) {
+            if (file.name in pluginMarkerNames && failures.isNotEmpty()) continue
             val rootPath = file.toPath()
             if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) continue
             Files.walkFileTree(
