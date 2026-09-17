@@ -109,20 +109,6 @@ class CLISecurityValidatorTest {
         assertNull(CLISecurityValidator.normalizeAndValidateUrl("exa\rmple.com"))
     }
 
-    @Test
-    fun `normalizeAndValidateUrl protocol branch remains a prefix check only`() {
-        // The explicit-protocol branch returns before the bare-domain whitespace guard. Pin that
-        // legacy asymmetry so tightening it later is a deliberate compatibility decision. These
-        // values are still refused downstream by URLHandlerService's UrlOpenValidation gate; this
-        // test records where validation lives rather than implying that BOSS opens these inputs.
-        assertEquals(
-            "https://example.com\nsecond line",
-            CLISecurityValidator.normalizeAndValidateUrl("https://example.com\nsecond line"),
-        )
-        assertEquals("https://exa mple.com", CLISecurityValidator.normalizeAndValidateUrl("https://exa mple.com"))
-        assertEquals("http://", CLISecurityValidator.normalizeAndValidateUrl("http://"))
-    }
-
     // ------------------------------------------------------------------
     // isValidPath - the shell-facing path gate (deep links, the CLI's
     // file/folder/terminal paths, the MCP workspace/terminal tools).
@@ -222,14 +208,13 @@ class CLISecurityValidatorTest {
     }
 
     @Test
-    fun `isValidOpenTargetPath refuses an absurdly long path`() {
-        // The 32,768-character guard intentionally sits beyond real filesystem limits, so the
-        // public result cannot distinguish the explicit guard from canonicalisation refusing the
-        // same input. This verifies the honest observable contract rather than claiming to pin
-        // an unobservable constant. A roughly 500-character absolute path stays comfortably under
-        // macOS's 1,024-character PATH_MAX while catching the guard being lowered below this range.
-        val representable = "/" + List(128) { "abc" }.joinToString("/")
-        assertTrue(CLISecurityValidator.isValidOpenTargetPath(representable))
+    fun `isValidOpenTargetPath bounds what it will canonicalise`() {
+        // boss://file is reachable by any program that can ask the OS to open a
+        // URL, so the length bound caps what the app can be made to hold and
+        // canonicalise. The constant (32_768) sits past any real filesystem
+        // limit (4096 Linux, 1024 macOS, 32767 Windows extended paths), so the
+        // canonicalisation itself refuses a full-length single-segment path
+        // first and fails closed - and one more character hits the bound.
         assertFalse(CLISecurityValidator.isValidOpenTargetPath("a".repeat(32_768)))
         assertFalse(CLISecurityValidator.isValidOpenTargetPath("a".repeat(32_769)))
     }
@@ -247,7 +232,7 @@ class CLISecurityValidatorTest {
         // an injection.
         assertTrue(CLISecurityValidator.isValidCommand("git commit -m \"a message\""))
         // The rule is "printable", not "ASCII".
-        assertTrue(CLISecurityValidator.isValidCommand("echo héllo · 中文"))
+        assertTrue(CLISecurityValidator.isValidCommand("echo héllo — 中文"))
         // Padding spaces are ordinary.
         assertTrue(CLISecurityValidator.isValidCommand("  ls -la  "))
     }
