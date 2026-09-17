@@ -6,7 +6,6 @@ import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.serialization.json.Json
 import java.io.File
-import java.io.InputStream
 import java.util.jar.JarEntry
 import java.util.jar.JarFile
 
@@ -15,17 +14,9 @@ import java.util.jar.JarFile
  *
  * The manifest is expected at [PluginManifestConstants.MANIFEST_PATH]
  * (META-INF/boss-plugin/plugin.json) within the JAR. Entries that inflate
- * past [MAX_MANIFEST_BYTES] are rejected at the bound, so a zip-bomb
- * manifest entry cannot exhaust the heap through this reader.
- *
- * The bound covers this reader's own manifest read only, which happens
- * before BOSS's own sidecar signature verification trusts the JAR. It is
- * not a bound on the JDK's built-in signature verification: JarFile
- * defaults to verify = true, and on the first getInputStream call the
- * JDK's JarVerifier reads every META-INF signature entry (*.SF, *.DSA,
- * *.RSA, *.EC) fully into memory, unbounded, ahead of this bounded read.
+ * past [MAX_MANIFEST_BYTES] are rejected, bounding the read before any
+ * signature verification trusts the JAR.
  */
-@Suppress("TooManyFunctions") // 11 focused read/validate steps on one fail-closed path
 object PluginManifestReader {
     private val logger = BossLogger.forComponent("PluginManifestReader")
 
@@ -34,15 +25,10 @@ object PluginManifestReader {
      *
      * Shared with LocalPluginRepository in plugin-repository, which reads the
      * same manifest entry to list and serve local plugin JARs, and mirrors
-     * DevPluginArtifacts.MAX_MANIFEST_BYTES in the app module; keep the caps
-     * in sync - pinned by an explicit assertEquals in composeApp's
-     * desktopTest (ManifestByteCapTest) so the two cannot drift silently.
-     * The two readers fail differently on purpose:
-     * DevPluginArtifacts.readBoundedUtf8String returns null on overflow,
-     * while this reader throws [PluginManifestException] - the right failure
-     * mode for each caller, not an accident. A zip-bomb `plugin.json` entry
-     * that inflates past this cap must be rejected at the bound rather than
-     * being allowed to exhaust the heap.
+     * DevPluginArtifacts.MAX_MANIFEST_BYTES in the app module; keep the caps in
+     * sync. Manifests are read before signature verification, so a zip-bomb
+     * `plugin.json` entry that inflates past this cap must be rejected here
+     * rather than being allowed to exhaust the heap.
      */
     const val MAX_MANIFEST_BYTES: Int = 512 * 1024
 
@@ -102,39 +88,28 @@ object PluginManifestReader {
 
     /**
      * Reads the manifest JAR entry as UTF-8, refusing entries that inflate to
-     * more than [MAX_MANIFEST_BYTES] bytes: a zip-bomb `plugin.json` must be
-     * rejected at the bound, not allowed to exhaust the heap. This bounds
-     * only this reader's own manifest read; it is not a bound on the JDK's
-     * built-in signature verification, which reads META-INF signature
-     * entries unbounded on the first getInputStream (see the class KDoc).
+     * more than [MAX_MANIFEST_BYTES] bytes. Bounding the read prevents a
+     * zip-bomb `plugin.json` from exhausting the heap before signature
+     * verification can reject the JAR.
      *
-     * Shared with LocalPluginRepository in plugin-repository so both the
-     * loader and local-repository scans enforce the same bound. Other readers
-     * of this manifest entry must apply an equivalent streaming bound.
+     * Shared with LocalPluginRepository in plugin-repository: every reader of
+     * this manifest entry must go through this bound, not only the signed
+     * load path, so an untrusted JAR cannot exhaust the heap via a scan of
+     * the local plugin directory.
      */
     fun readManifestContent(
         jar: JarFile,
         entry: JarEntry,
-    ): String = jar.getInputStream(entry).use { readBoundedManifest(it) }
-
-    /**
-     * Reads up to [MAX_MANIFEST_BYTES] UTF-8 bytes from [stream], throwing
-     * [PluginManifestException] as soon as the stream holds more. Split out
-     * from [readManifestContent] so the byte bound is directly testable
-     * without a JAR: a test stream that fails once a reader asks for more
-     * than cap + 1 bytes pins the bound deterministically, where a
-     * readText-then-check-length implementation would pass every
-     * fixture-only test.
-     */
-    internal fun readBoundedManifest(stream: InputStream): String {
-        val bytes = stream.readNBytes(MAX_MANIFEST_BYTES + 1)
-        if (bytes.size > MAX_MANIFEST_BYTES) {
-            throw PluginManifestException(
-                "Plugin manifest exceeds $MAX_MANIFEST_BYTES bytes at ${PluginManifestConstants.MANIFEST_PATH}",
-            )
+    ): String =
+        jar.getInputStream(entry).use { stream ->
+            val bytes = stream.readNBytes(MAX_MANIFEST_BYTES + 1)
+            if (bytes.size > MAX_MANIFEST_BYTES) {
+                throw PluginManifestException(
+                    "Plugin manifest exceeds $MAX_MANIFEST_BYTES bytes at ${PluginManifestConstants.MANIFEST_PATH}",
+                )
+            }
+            bytes.toString(Charsets.UTF_8)
         }
-        return bytes.toString(Charsets.UTF_8)
-    }
 
     /**
      * Parse a manifest from JSON content.
