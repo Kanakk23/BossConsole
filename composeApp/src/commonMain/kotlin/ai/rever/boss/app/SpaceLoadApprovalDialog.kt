@@ -1,7 +1,5 @@
 package ai.rever.boss.app
 
-import ai.rever.boss.cli.HIDDEN_DISPLAY_CHARACTERS
-import ai.rever.boss.cli.isSupplementaryFormatCharacter
 import ai.rever.boss.components.dialogs.ConfirmationDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -45,14 +43,11 @@ internal fun SpaceLoadApprovalDialog(
 internal fun spaceLoadApprovalMessage(request: PendingSpaceLoad): String =
     buildString {
         append("BOSS was asked from outside the app to load the Space \"")
-        append(request.workspace.name.safeSpacePromptLabel())
+        append(request.workspace.name)
         append("\" from:\n")
-        append(request.workspacePath.safeSpacePromptLabel())
+        append(request.workspacePath)
         append("\n\nIts terminal tabs would run these commands. Nothing has loaded or run. ")
         append("Confirm only if you recognise them:\n")
-        if (request.commands.any { command -> SPACE_COMMAND_PLACEHOLDERS.any(command::contains) }) {
-            append("\nPlaceholders in braces expand when the Space loads, so the shell may receive different text.\n")
-        }
         request.commands.forEachIndexed { index, command ->
             append("\n")
             append(index + 1)
@@ -60,39 +55,3 @@ internal fun spaceLoadApprovalMessage(request: PendingSpaceLoad): String =
             append(command)
         }
     }
-
-private const val SPACE_PROMPT_LABEL_MAX_LENGTH = 512
-
-/** Keeps untrusted Space metadata from forging or overwhelming the command confirmation copy. */
-private fun String.safeSpacePromptLabel(): String {
-    val visible =
-        buildString {
-            var index = 0
-            while (index < this@safeSpacePromptLabel.length) {
-                val character = this@safeSpacePromptLabel[index]
-                val low = this@safeSpacePromptLabel.getOrNull(index + 1)
-                if (low != null && isSupplementaryFormatCharacter(character, low)) {
-                    append('\uFFFD')
-                    index += 2
-                } else {
-                    append(if (character.category in HIDDEN_DISPLAY_CHARACTERS) '\uFFFD' else character)
-                    index++
-                }
-            }
-        }
-    return if (visible.length <= SPACE_PROMPT_LABEL_MAX_LENGTH) {
-        visible
-    } else {
-        val proposedEnd = SPACE_PROMPT_LABEL_MAX_LENGTH - 1
-        val safeEnd =
-            if (visible[proposedEnd - 1].isHighSurrogate() && visible[proposedEnd].isLowSurrogate()) {
-                proposedEnd - 1
-            } else {
-                proposedEnd
-            }
-        visible.take(safeEnd) + "…"
-    }
-}
-
-private val SPACE_COMMAND_PLACEHOLDERS =
-    setOf("{projectPath}", "{gitRemoteUrl}", "{currentFile}", "{claudeContinueFlag}")

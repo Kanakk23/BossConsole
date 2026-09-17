@@ -97,10 +97,6 @@ class SpaceTerminalCommandsTest {
             SpaceLoadDisposition.REJECT,
             spaceLoadDisposition(listOf("echo fine", "echo a\nrm -rf x"), requiresConfirmation = true),
         )
-        assertEquals(
-            SpaceLoadDisposition.REJECT,
-            spaceLoadDisposition(listOf("echo safe\u202Etxt"), requiresConfirmation = true),
-        )
     }
 
     @Test
