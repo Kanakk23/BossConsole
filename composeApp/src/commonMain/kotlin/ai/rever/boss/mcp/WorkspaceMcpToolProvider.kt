@@ -1082,6 +1082,10 @@ private suspend fun checkProjectPath(rawPath: String): ProjectPathCheck {
                     "`|`, `$` and a backtick). Pass a plain absolute path to the project directory instead."
             }
 
+            CLISecurityValidator.isRestrictedSystemPath(expandedPath) -> {
+                "Refusing to open '$rawPath': target path is a restricted system directory."
+            }
+
             else -> {
                 null
             }
@@ -1090,6 +1094,12 @@ private suspend fun checkProjectPath(rawPath: String): ProjectPathCheck {
         return ProjectPathCheck(null, rejection)
     }
     val canonical = withContext(Dispatchers.IO) { canonicalizeOrNull(expandedPath) }
+    if (canonical != null && CLISecurityValidator.isRestrictedSystemPath(canonical)) {
+        return ProjectPathCheck(
+            null,
+            "Refusing to open '$rawPath': canonical path '$canonical' is a restricted system directory.",
+        )
+    }
     return ProjectPathCheck(canonical, "Path is not an existing directory: $rawPath".takeIf { canonical == null })
 }
 
