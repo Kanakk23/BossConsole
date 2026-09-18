@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -54,6 +55,7 @@ fun RushHourHelpSheet(onDismiss: () -> Unit) {
         Box(
             modifier =
                 Modifier
+                    .widthIn(max = 640.dp)
                     .fillMaxWidth(0.92f)
                     .clip(RushHourTheme.ModalShape)
                     .background(RushHourTheme.BoardSurface)
