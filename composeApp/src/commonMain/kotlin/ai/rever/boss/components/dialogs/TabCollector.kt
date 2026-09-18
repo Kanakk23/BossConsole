@@ -20,7 +20,7 @@ object TabCollector {
      * @param workspaceManager The workspace manager for resolving workspace info
      * @return List of all active tabs across all windows
      */
-    fun collectAllTabs(workspaceManager: WorkspaceManager): List<ActiveTab> {
+    fun collectAllTabs(workspaceManager: WorkspaceManager? = null): List<ActiveTab> {
         val allWindowStates = SplitViewStateRegistry.getAllStates()
         val allTabs = mutableListOf<ActiveTab>()
 
