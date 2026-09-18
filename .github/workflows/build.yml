@@ -434,32 +434,43 @@ jobs:
     steps:
       - name: 📊 Build Summary
         run: |
-          echo "## 🔨 Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version**: ${{ needs.version-check.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Build Number**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Job status
-          echo "### 📋 Job Results" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version Check**: ${{ needs.version-check.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Shell Script Tests**: ${{ needs.script-tests.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Build & Test**: ${{ needs.build-test.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Code Quality**: ${{ needs.code-quality.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Compatibility Test**: ${{ needs.compatibility-test.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Database (pgTAP)**: ${{ needs.database-tests.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **BOSS AI contracts**: ${{ needs.boss-ai-tests.result }}" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## 🔨 Build Summary"
+            echo ""
+            echo "**Version**: ${{ needs.version-check.outputs.version }}"
+            echo ""
+            echo "### 📋 Job Results"
+            echo "- **Version Check**: ${{ needs.version-check.result }}"
+            echo "- **Shell Script Tests**: ${{ needs.script-tests.result }}"
+            echo "- **Build & Test**: ${{ needs.build-test.result }}"
+            echo "- **Code Quality**: ${{ needs.code-quality.result }}"
+            echo "- **Compatibility Test**: ${{ needs.compatibility-test.result }}"
+            echo "- **Database (pgTAP)**: ${{ needs.database-tests.result }}"
+            echo "- **BOSS AI contracts**: ${{ needs.boss-ai-tests.result }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          # Overall status
-          if [[ "${{ needs.version-check.result }}" == "success" && "${{ needs.script-tests.result }}" == "success" && "${{ needs.build-test.result }}" == "success" && "${{ needs.code-quality.result }}" == "success" && "${{ needs.compatibility-test.result }}" == "success" && "${{ needs.database-tests.result }}" == "success" && "${{ needs.boss-ai-tests.result }}" == "success" ]]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "🎉 **Overall Status**: ✅ SUCCESS" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "❌ **Overall Status**: FAILED" >> $GITHUB_STEP_SUMMARY
+          failed=0
+          for result in \
+            "${{ needs.version-check.result }}" \
+            "${{ needs.script-tests.result }}" \
+            "${{ needs.build-test.result }}" \
+            "${{ needs.code-quality.result }}" \
+            "${{ needs.compatibility-test.result }}" \
+            "${{ needs.database-tests.result }}" \
+            "${{ needs.boss-ai-tests.result }}"; do
+            if [[ "$result" != "success" ]]; then
+              failed=1
+            fi
+          done
+
+          if (( failed )); then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "❌ **Overall Status**: FAILED" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "🎉 **Overall Status**: ✅ SUCCESS" >> "$GITHUB_STEP_SUMMARY"
 
 # Temporarily disabled for debugging
   # notify-build:
