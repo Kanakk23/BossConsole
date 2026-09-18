@@ -291,7 +291,7 @@ class DefaultPlugin(
             jars
                 .filterNot { file ->
                     val isDev = DevPluginArtifacts.isDevPluginJar(file)
-                    val pluginId = extractPluginId(file)
+                    val pluginId = if (isDev) extractPluginId(file) else ""
                     val shouldDrop = isDev && isProtectedPredicate(pluginId)
                     if (shouldDrop) {
                         logger.warn(

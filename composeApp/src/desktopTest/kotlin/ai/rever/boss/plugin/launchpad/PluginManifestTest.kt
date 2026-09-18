@@ -283,7 +283,7 @@ class PluginManifestTest {
             writeSyntheticJar(versionJar, "protected-plugin")
             versionJar.setLastModified(5000L)
 
-            // When isProtectedPredicate is true, dev JAR is penalized so standardJar wins even if older
+            // Protected dev JARs are removed before grouping, regardless of timestamps.
             val deduplicated =
                 DefaultPlugin.deduplicateJars(listOf(standardJar, versionJar)) { pluginId ->
                     pluginId == "protected-plugin"
@@ -327,6 +327,8 @@ class PluginManifestTest {
 
         val logs = java.util.concurrent.CopyOnWriteArrayList<LogEntry>()
         val listener = LogListener { entry -> logs.add(entry) }
+        val previousLevel = BossLogger.globalLevel
+        BossLogger.setGlobalLevel(LogLevel.TRACE)
         BossLogger.addListener(listener)
 
         try {
@@ -376,6 +378,7 @@ class PluginManifestTest {
             assertEquals(standardJar.absolutePath, dedupInfo.data?.get("dropped"))
         } finally {
             BossLogger.removeListener(listener)
+            BossLogger.setGlobalLevel(previousLevel)
             DevPluginArtifacts.stagingRootOverride = null
         }
     }
