@@ -9,7 +9,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -54,7 +53,6 @@ data class RecentFilesData(
  * The sibling [RecentBrowserPagesManager] had the same three defects and was fixed first; this
  * class is kept deliberately parallel to it so the two do not drift again.
  */
-@Suppress("TooManyFunctions")
 object RecentFilesManager {
     private const val MAX_FILES = 20
     private const val SAVE_DEBOUNCE_MS = 5000L // Debounce saves to max once per 5 seconds
@@ -234,30 +232,19 @@ object RecentFilesManager {
 
     /**
      * Reset manager state for hermetic unit testing and redirect [settingsFile] to [testFile].
-     * Cancels the init load (it reads [settingsFile] at execution time) and any pending debounced
-     * save, then clears both flows. When [reload] is true the load is re-run so the state matches
-     * [testFile], and [recorded] is seeded after it, so a test can observe the startup merge
-     * against a non-empty "recorded while the load was in flight" state.
-     *
-     * Tests must point this back at [BossDirectories] before finishing, so the singleton is left
-     * where later tests expect it, and pass `reload = false` when they do. Test tasks redirect
-     * `user.home` to a fresh build directory, so this is not the developer's real file; avoiding
-     * the reload still prevents teardown from scheduling work that can outlive the test.
+     * Cancels the init load (it reads [settingsFile] at execution time) and any pending
+     * debounced save, clears both flows, and re-runs the load so the state matches [testFile].
+     * When [recorded] is given it is seeded after the load, so a test can observe the startup
+     * merge against a non-empty "recorded while the load was in flight" state.
+     * Tests must call this again with the real path before finishing, so the singleton is left
+     * where the app and other tests expect it.
      */
     internal suspend fun resetForTesting(
         testFile: File,
         recorded: List<RecentFile>? = null,
-        reload: Boolean = true,
     ) {
-        initialLoadJob?.cancelAndJoin()
+        initialLoadJob?.cancel()
         initialLoadJob = null
-        // Finished before the swap, not merely cancelled, so reset cannot clear the shared list
-        // while an old save is serializing it. The destination itself is captured by scheduleSave.
-        val pendingSave =
-            synchronized(saveJobLock) {
-                saveJob.also { saveJob = null }
-            }
-        pendingSave?.cancelAndJoin()
         mutationLock.withLock {
             settingsFile = testFile
             _allFiles.value = emptyList()
@@ -265,7 +252,10 @@ object RecentFilesManager {
         // Keep refreshVisible as the only writer of the displayed flow. This orders the reset
         // against a derive already holding visibilityLock without nesting the two locks.
         refreshVisible()
-        if (!reload) return
+        synchronized(saveJobLock) {
+            saveJob?.cancel()
+            saveJob = null
+        }
         loadAsync()
         if (recorded != null) {
             mutationLock.withLock { _allFiles.value = recorded }
@@ -281,25 +271,20 @@ object RecentFilesManager {
         // Swap the debounce job under a lock: callers arrive from concurrent coroutines (an open
         // and a removal racing), and an unsynchronised cancel-then-assign can overwrite the
         // reference to a job that is still pending, leaving a timer nothing will ever cancel.
-        val target = settingsFile
         synchronized(saveJobLock) {
             saveJob?.cancel()
             saveJob =
                 scope.launch {
                     delay(SAVE_DEBOUNCE_MS)
-                    saveImmediately(target)
+                    saveImmediately()
                 }
         }
     }
 
     /**
      * Immediately save recent files to disk (bypasses debounce).
-     *
-     * @param target resolved by the caller, never read here: a debounced save that picked
-     *   its destination at execution time would follow [settingsFile] if it changed in
-     *   between, and write one test/profile's files into another's file.
      */
-    private suspend fun saveImmediately(target: File = settingsFile) =
+    private suspend fun saveImmediately() =
         withContext(Dispatchers.IO) {
             try {
                 // The recorded list, never the filtered view; see _allFiles.
@@ -309,37 +294,11 @@ object RecentFilesManager {
                 // a second writer arriving mid-write leaves JSON that fails to parse - and the
                 // load path swallows that as "no recent files", losing all twenty entries rather
                 // than one. atomicWriteText writes a unique sibling temp and moves it into place.
-                target.atomicWriteText(content)
+                settingsFile.atomicWriteText(content)
             } catch (e: Exception) {
                 recentFilesLogger.warn(LogCategory.FILE, "Error saving recent files", error = e)
             }
         }
-
-    /**
-     * Flush a debounced save that is still pending, writing the recorded list immediately.
-     *
-     * The exit-path half of the debounce: quitting inside [SAVE_DEBOUNCE_MS] of the last
-     * mutation used to drop it, because the pending job died with the process - the window
-     * #795's own body called out as a separate bug. The timer is cancelled under
-     * [saveJobLock] (the same swap [scheduleSave] uses, so a save landing during the flush
-     * cannot install a job around it) and the write goes through [saveImmediately], which is
-     * fail-closed: a write error is logged, never thrown, so one unwritable file cannot take
-     * the rest of the exit steps down with it.
-     *
-     * A no-op when nothing is pending: a debounce that already fired has persisted the
-     * list, and rewriting recent-files.json regardless would churn the file on every quit
-     * for no reason.
-     */
-    suspend fun flushPendingSaves() {
-        val pending =
-            synchronized(saveJobLock) {
-                val active = saveJob?.isActive == true
-                saveJob?.cancel()
-                saveJob = null
-                active
-            }
-        if (pending) saveImmediately()
-    }
 
     /**
      * Record a file open event.
