@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin.browser
 
 import ai.rever.boss.plugin.pathutils.BossDirectories
+import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +33,7 @@ data class BrowserSettingsData(
 
 object BrowserSettingsManager {
     private val logger = BossLogger.forComponent("BrowserSettingsManager")
+    private val saveLock = Any()
 
     /**
      * `internal var` so a test can point it at a temp file, matching
@@ -124,7 +126,9 @@ object BrowserSettingsManager {
                     )
 
                 val content = json.encodeToString(settings)
-                settingsFile.writeText(content)
+                synchronized(saveLock) {
+                    settingsFile.atomicWriteText(content)
+                }
             } catch (e: Exception) {
                 logger.warn(LogCategory.BROWSER, "Failed to save browser settings", error = e)
             }

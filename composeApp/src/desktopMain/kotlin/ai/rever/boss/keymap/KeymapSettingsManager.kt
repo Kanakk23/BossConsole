@@ -8,6 +8,7 @@ import ai.rever.boss.keymap.presets.KeymapPresets
 import ai.rever.boss.keymap.presets.KeymapPresets.claimsChord
 import ai.rever.boss.keymap.presets.KeymapPresets.withoutChordsTakenBy
 import ai.rever.boss.plugin.pathutils.BossDirectories
+import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.ComponentLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -30,7 +31,8 @@ import java.io.File
  */
 actual object KeymapSettingsManager {
     private val logger = BossLogger.forComponent("KeymapSettingsManager")
-    private val settingsFile = BossDirectories.resolve("keymap-settings.json")
+    internal var settingsFile = BossDirectories.resolve("keymap-settings.json")
+    private val saveLock = Any()
     private val json =
         Json {
             prettyPrint = true
@@ -45,6 +47,14 @@ actual object KeymapSettingsManager {
         settingsFile.parentFile?.mkdirs()
 
         // Load settings on initialization
+        loadSettingsSync()
+    }
+
+    /**
+     * Test seam: re-run the synchronous load so changes on disk or pointing settingsFile
+     * to a test file are visible.
+     */
+    internal fun reloadForTest() {
         loadSettingsSync()
     }
 
@@ -67,7 +77,9 @@ actual object KeymapSettingsManager {
                 if (migrated != loaded) {
                     try {
                         val migratedContent = json.encodeToString(KeymapSettings.serializer(), migrated)
-                        settingsFile.writeText(migratedContent)
+                        synchronized(saveLock) {
+                            settingsFile.atomicWriteText(migratedContent)
+                        }
                         logger.debug(LogCategory.SYSTEM, "Migrated keymap settings saved")
                     } catch (e: Exception) {
                         logger.warn(LogCategory.SYSTEM, "Could not save migrated keymap settings", error = e)
@@ -84,7 +96,9 @@ actual object KeymapSettingsManager {
                 // Save default settings to file
                 try {
                     val content = json.encodeToString(KeymapSettings.serializer(), defaultSettings)
-                    settingsFile.writeText(content)
+                    synchronized(saveLock) {
+                        settingsFile.atomicWriteText(content)
+                    }
                     logger.debug(LogCategory.SYSTEM, "Created default keymap settings file", mapOf("path" to settingsFile.absolutePath))
                 } catch (e: Exception) {
                     logger.warn(LogCategory.SYSTEM, "Could not write default keymap settings file", error = e)
@@ -187,7 +201,9 @@ actual object KeymapSettingsManager {
         withContext(Dispatchers.IO) {
             try {
                 val content = json.encodeToString(KeymapSettings.serializer(), _currentSettings.value)
-                settingsFile.writeText(content)
+                synchronized(saveLock) {
+                    settingsFile.atomicWriteText(content)
+                }
                 logger.debug(LogCategory.SYSTEM, "Keymap settings saved")
             } catch (e: Exception) {
                 logger.error(LogCategory.SYSTEM, "Failed to save keymap settings", error = e)
@@ -279,7 +295,7 @@ actual object KeymapSettingsManager {
     suspend fun exportToFile(file: File) =
         withContext(Dispatchers.IO) {
             try {
-                file.writeText(exportToJson())
+                file.atomicWriteText(exportToJson())
                 logger.debug(LogCategory.SYSTEM, "Exported keymap settings", mapOf("path" to file.absolutePath))
             } catch (e: Exception) {
                 logger.error(LogCategory.SYSTEM, "Failed to export keymap to file", error = e)
