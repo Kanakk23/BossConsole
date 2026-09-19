@@ -162,7 +162,10 @@ object CLISecurityValidator {
      * stripping duplicate separators, and resolving `.` and `..` segments purely
      * in memory without filesystem dependencies.
      */
-    private fun resolveSegments(segments: List<String>, isAbsolute: Boolean): List<String> {
+    private fun resolveSegments(
+        segments: List<String>,
+        isAbsolute: Boolean,
+    ): List<String> {
         val resolved = mutableListOf<String>()
         for (segment in segments) {
             if (segment.isEmpty() || segment == ".") continue
@@ -214,17 +217,19 @@ object CLISecurityValidator {
 
         val isRoot = normalized == "/" || (normalized.length == 3 && normalized.endsWith(":/"))
         val lower = normalized.lowercase()
-        val isPosixRestricted = RESTRICTED_POSIX_ROOTS.any { root ->
-            lower == root || lower.startsWith("$root/")
-        }
-        val isWindowsRestricted = if (lower.length >= 3 && lower[1] == ':' && lower[2] == '/') {
-            val afterDrive = lower.substring(3)
-            RESTRICTED_WINDOWS_DIRECTORIES.any { winDir ->
-                afterDrive == winDir || afterDrive.startsWith("$winDir/")
+        val isPosixRestricted =
+            RESTRICTED_POSIX_ROOTS.any { root ->
+                lower == root || lower.startsWith("$root/")
             }
-        } else {
-            false
-        }
+        val isWindowsRestricted =
+            if (lower.length >= 3 && lower[1] == ':' && lower[2] == '/') {
+                val afterDrive = lower.substring(3)
+                RESTRICTED_WINDOWS_DIRECTORIES.any { winDir ->
+                    afterDrive == winDir || afterDrive.startsWith("$winDir/")
+                }
+            } else {
+                false
+            }
 
         return isRoot || isPosixRestricted || isWindowsRestricted
     }
