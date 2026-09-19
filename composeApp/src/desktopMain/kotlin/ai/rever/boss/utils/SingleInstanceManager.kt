@@ -208,7 +208,12 @@ internal data class InstanceDescriptor(
             }
         }
 
-    override fun toString(): String = "InstanceDescriptor(transport=$transport, endpoint=$endpoint, token=<redacted>, pid=$pid)"
+    override fun toString(): String =
+        "InstanceDescriptor(" +
+            "transport=$transport, " +
+            "endpoint=$endpoint, " +
+            "token=<redacted>, " +
+            "pid=$pid)"
 }
 
 /**
@@ -451,7 +456,7 @@ internal fun isForwardableUrl(url: String?): Boolean =
  * Linux — the descriptor holds the channel token, and the endpoint it names is
  * where a forward (including the auth callback) gets delivered.
  */
-private object SingleInstanceFiles {
+internal object SingleInstanceFiles {
     private const val RUNTIME_DIR_NAME = "run"
     private const val DESCRIPTOR_FILE_NAME = "single-instance"
     private const val SOCKET_FILE_NAME = "single-instance.sock"
@@ -1178,11 +1183,9 @@ object SingleInstanceManager {
      * Does not take ownership - use [acquireLock] for that.
      */
     fun isAnotherInstanceRunning(): Boolean {
-        val descriptor = SingleInstanceFiles.read() ?: return false
-        if (descriptor.pid != null && !isProcessAlive(descriptor.pid)) {
-            return false
-        }
-        return SingleInstanceWire.respondsToPing(descriptor)
+        val descriptor = SingleInstanceFiles.read()
+        val isAlive = descriptor != null && (descriptor.pid == null || isProcessAlive(descriptor.pid))
+        return isAlive && SingleInstanceWire.respondsToPing(descriptor)
     }
 
     /**
