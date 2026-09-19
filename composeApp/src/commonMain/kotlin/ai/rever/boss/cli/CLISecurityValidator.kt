@@ -162,45 +162,41 @@ object CLISecurityValidator {
      * stripping duplicate separators, and resolving `.` and `..` segments purely
      * in memory without filesystem dependencies.
      */
+    private fun resolveSegments(segments: List<String>, isAbsolute: Boolean): List<String> {
+        val resolved = mutableListOf<String>()
+        for (segment in segments) {
+            if (segment.isEmpty() || segment == ".") continue
+            if (segment == "..") {
+                if (resolved.isNotEmpty() && resolved.last() != "..") {
+                    resolved.removeAt(resolved.size - 1)
+                } else if (!isAbsolute) {
+                    resolved.add("..")
+                }
+            } else {
+                resolved.add(segment)
+            }
+        }
+        return resolved
+    }
+
+    /**
+     * Normalizes a path string by converting backslashes to forward slashes,
+     * stripping duplicate separators, and resolving `.` and `..` segments purely
+     * in memory without filesystem dependencies.
+     */
     fun normalizePath(path: String): String {
         val trimmed = path.trim()
         if (trimmed.isEmpty()) return ""
 
         val isWindowsDrive = trimmed.length >= 2 && trimmed[1] == ':' && trimmed[0].isLetter()
-        val prefix =
-            if (isWindowsDrive) {
-                trimmed.substring(0, 2).uppercase()
-            } else {
-                ""
-            }
-
+        val prefix = if (isWindowsDrive) trimmed.substring(0, 2).uppercase() else ""
         val remainder = if (isWindowsDrive) trimmed.substring(2) else trimmed
         val isAbsolute = remainder.startsWith('/') || remainder.startsWith('\\')
 
         val segments = remainder.split('/', '\\')
-        val resolved = mutableListOf<String>()
-
-        for (segment in segments) {
-            when {
-                segment.isEmpty() || segment == "." -> {
-                    continue
-                }
-
-                segment == ".." -> {
-                    if (resolved.isNotEmpty() && resolved.last() != "..") {
-                        resolved.removeAt(resolved.size - 1)
-                    } else if (!isAbsolute) {
-                        resolved.add("..")
-                    }
-                }
-
-                else -> {
-                    resolved.add(segment)
-                }
-            }
-        }
-
+        val resolved = resolveSegments(segments, isAbsolute)
         val joined = resolved.joinToString("/")
+
         return when {
             prefix.isNotEmpty() -> if (isAbsolute) "$prefix/$joined" else "$prefix$joined"
             isAbsolute -> "/$joined"
@@ -216,31 +212,21 @@ object CLISecurityValidator {
         val normalized = normalizePath(path)
         if (normalized.isEmpty()) return false
 
-        // Refuse filesystem root paths
-        if (normalized == "/" || (normalized.length == 3 && normalized.endsWith(":/"))) {
-            return true
-        }
-
+        val isRoot = normalized == "/" || (normalized.length == 3 && normalized.endsWith(":/"))
         val lower = normalized.lowercase()
-
-        // Check POSIX roots
-        for (root in RESTRICTED_POSIX_ROOTS) {
-            if (lower == root || lower.startsWith("$root/")) {
-                return true
-            }
+        val isPosixRestricted = RESTRICTED_POSIX_ROOTS.any { root ->
+            lower == root || lower.startsWith("$root/")
         }
-
-        // Check Windows roots
-        if (lower.length >= 3 && lower[1] == ':' && lower[2] == '/') {
+        val isWindowsRestricted = if (lower.length >= 3 && lower[1] == ':' && lower[2] == '/') {
             val afterDrive = lower.substring(3)
-            for (winDir in RESTRICTED_WINDOWS_DIRECTORIES) {
-                if (afterDrive == winDir || afterDrive.startsWith("$winDir/")) {
-                    return true
-                }
+            RESTRICTED_WINDOWS_DIRECTORIES.any { winDir ->
+                afterDrive == winDir || afterDrive.startsWith("$winDir/")
             }
+        } else {
+            false
         }
 
-        return false
+        return isRoot || isPosixRestricted || isWindowsRestricted
     }
 
     /**
