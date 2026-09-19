@@ -877,7 +877,10 @@ class BossMcpCallCommand : CliktCommand(name = "call") {
             }
         } catch (e: ProgramResult) {
             throw e
-        } catch (e: Exception) {
+        } catch (e: kotlinx.serialization.SerializationException) {
+            echo("Error: Malformed JSON arguments: ${e.message ?: "Invalid JSON syntax"}", err = true)
+            throw ProgramResult(1)
+        } catch (e: IllegalArgumentException) {
             echo("Error: Malformed JSON arguments: ${e.message ?: "Invalid JSON syntax"}", err = true)
             throw ProgramResult(1)
         }

@@ -46,6 +46,27 @@ class CLICommandHandler private constructor() {
 
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
+    private fun dispatchCommand(command: CLICommand) {
+        if (initializationQueue.enqueueOrClaimForCaller(command)) {
+            scope.launch {
+                executeCommand(command)
+            }
+        } else {
+            logger.debug(LogCategory.SYSTEM, "Queued command", mapOf("command" to command.toString()))
+        }
+    }
+
+    /**
+     * Command processor hook, primarily for testing.
+     * Defaults to the real async dispatch. Swap around a test to observe
+     * commands without requiring real services or coroutines.
+     */
+    var commandProcessor: (CLICommand) -> Unit = ::dispatchCommand
+
+    fun processCommand(command: CLICommand) {
+        commandProcessor(command)
+    }
+
     companion object {
         @Volatile
         private var instance: CLICommandHandler? = null
@@ -80,13 +101,7 @@ class CLICommandHandler private constructor() {
      * Otherwise, queues for later execution.
      */
     fun queueCommand(command: CLICommand) {
-        if (initializationQueue.enqueueOrClaimForCaller(command)) {
-            scope.launch {
-                executeCommand(command)
-            }
-        } else {
-            logger.debug(LogCategory.SYSTEM, "Queued command", mapOf("command" to command.toString()))
-        }
+        commandProcessor(command)
     }
 
     /**

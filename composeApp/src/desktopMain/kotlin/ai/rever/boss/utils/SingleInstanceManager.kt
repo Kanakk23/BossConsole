@@ -1300,6 +1300,29 @@ object SingleInstanceManager {
             expected != null && tokensMatch(expected, request.token)
         }
 
+    private fun handleWorkspaceSwitch(request: SingleInstanceRequest): String {
+        val name = request.workspaceName ?: return RESPONSE_ERROR_PREFIX + "Missing workspace name"
+        val handler = workspaceSwitchHandlerOverride
+        val success = if (handler != null) {
+            handler(name)
+        } else {
+            val exists =
+                workspaceValidatorOverride?.invoke(name) ?: run {
+                    val activeWorkspaces =
+                        ai.rever.boss.components.workspaces.workspaceManager.workspaces.value
+                    activeWorkspaces.any {
+                        it.name.equals(name, ignoreCase = true) || it.id.equals(name, ignoreCase = true)
+                    }
+                }
+            if (!exists) return RESPONSE_ERR_NOT_FOUND
+            ai.rever.boss.cli.CLICommandHandler
+                .getInstance()
+                .queueCommand(ai.rever.boss.cli.CLICommand.SwitchWorkspace(name))
+            true
+        }
+        return if (success) RESPONSE_OK else RESPONSE_ERR_NOT_FOUND
+    }
+
     /**
      * Checks the token, then acts on the request, returning the response to send
      * back. A request that does not present the live token is refused here,
@@ -1340,28 +1363,7 @@ object SingleInstanceManager {
                 buildLlmTokenResponse(llmTokenProviderOverride)
             }
 
-            request.verb == VERB_WORKSPACE_SWITCH -> {
-                val name = request.workspaceName.orEmpty()
-                val exists =
-                    workspaceValidatorOverride?.invoke(name) ?: run {
-                        val activeWorkspaces =
-                            ai.rever.boss.components.workspaces.workspaceManager.workspaces.value
-                        activeWorkspaces.any {
-                            it.name.equals(name, ignoreCase = true) || it.id.equals(name, ignoreCase = true)
-                        }
-                    }
-                if (!exists) {
-                    RESPONSE_ERR_NOT_FOUND
-                } else {
-                    val handled =
-                        workspaceSwitchHandlerOverride?.invoke(name) ?: run {
-                            ai.rever.boss.cli.CLICommandHandler.getInstance()
-                                .queueCommand(ai.rever.boss.cli.CLICommand.SwitchWorkspace(name))
-                            true
-                        }
-                    if (handled) RESPONSE_OK else RESPONSE_REJECTED
-                }
-            }
+            request.verb == VERB_WORKSPACE_SWITCH -> handleWorkspaceSwitch(request)
 
             request.verb == VERB_STATUS -> {
                 buildStatusResponse(statusProviderOverride, toolsJson = toolsProviderOverride)

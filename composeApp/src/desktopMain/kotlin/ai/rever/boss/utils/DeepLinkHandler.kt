@@ -763,7 +763,9 @@ actual object DeepLinkHandler {
             }
             ai.rever.boss.cli.CLICommandHandler
                 .getInstance()
-                .queueCommand(ai.rever.boss.cli.CLICommand.SwitchWorkspace(name))
+                .queueCommand(
+                    ai.rever.boss.cli.CLICommand.SwitchWorkspace(name),
+                )
             logger.info(
                 LogCategory.WORKSPACE,
                 "Workspace switch queued via deep link",

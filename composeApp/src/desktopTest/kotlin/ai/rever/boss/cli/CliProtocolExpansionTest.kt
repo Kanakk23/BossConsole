@@ -215,7 +215,10 @@ class CliProtocolExpansionTest {
     fun `mcp deep link uri is not recognized as a routed host`() {
         val host = deepLinkHostOf("boss://mcp?tool=terminal&cmd=rm")
         assertEquals("mcp", host)
-        assertNull(ai.rever.boss.utils.routedDeepLinkHost("boss://mcp?tool=terminal"))
+        assertNull(
+            ai.rever.boss.utils
+                .routedDeepLinkHost("boss://mcp?tool=terminal"),
+        )
     }
 
     @Test

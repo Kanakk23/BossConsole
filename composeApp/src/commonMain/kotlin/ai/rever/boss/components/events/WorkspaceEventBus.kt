@@ -87,4 +87,3 @@ object WorkspaceEventBus {
         ipcBridge?.forward("WorkspaceSwitchEvent", event, sourceWindowId)
     }
 }
-

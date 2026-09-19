@@ -64,6 +64,7 @@ class McpOperationLedger(
     val totalErrors: StateFlow<Long> = _totalErrors.asStateFlow()
 
     private val listenersLock = Any()
+
     @Volatile
     private var activeListeners: List<(McpOperationRecord) -> Unit> = emptyList()
 

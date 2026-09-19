@@ -11,7 +11,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
-import kotlin.math.ceil
 import kotlin.math.round
 
 /**
@@ -131,11 +130,8 @@ internal fun computePercentile(
     percentile: Double,
 ): Long {
     if (sorted.isEmpty()) return 0L
-    if (sorted.size == 1) return sorted[0]
-    val maxIndex = sorted.size - 1
-    if (maxIndex < 0) return 0L
-    val rank = ceil((percentile / 100.0) * sorted.size).toInt()
-    val index = (rank - 1).coerceIn(0, maxIndex)
+    val rank = kotlin.math.ceil((percentile / 100.0) * sorted.size).toInt()
+    val index = (rank - 1).coerceIn(0, sorted.lastIndex)
     return sorted[index]
 }
 
