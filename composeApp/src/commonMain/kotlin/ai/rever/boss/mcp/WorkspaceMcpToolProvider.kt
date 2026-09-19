@@ -1071,9 +1071,8 @@ private suspend fun checkProjectPath(rawPath: String): ProjectPathCheck {
     // an acceptable project path, failing closed.
     val rejection =
         when {
-            !File(expandedPath).isAbsolute -> {
-                "Path must be absolute (got '$rawPath'): a relative path would resolve against the " +
-                    "BOSS process's working directory, not the caller's."
+            CLISecurityValidator.isRestrictedSystemPath(expandedPath) -> {
+                "Refusing to open '$rawPath': target path is a restricted system directory."
             }
 
             !CLISecurityValidator.isValidPath(expandedPath) -> {
@@ -1082,8 +1081,9 @@ private suspend fun checkProjectPath(rawPath: String): ProjectPathCheck {
                     "`|`, `$` and a backtick). Pass a plain absolute path to the project directory instead."
             }
 
-            CLISecurityValidator.isRestrictedSystemPath(expandedPath) -> {
-                "Refusing to open '$rawPath': target path is a restricted system directory."
+            !File(expandedPath).isAbsolute -> {
+                "Path must be absolute (got '$rawPath'): a relative path would resolve against the " +
+                    "BOSS process's working directory, not the caller's."
             }
 
             else -> {
@@ -1094,13 +1094,15 @@ private suspend fun checkProjectPath(rawPath: String): ProjectPathCheck {
         return ProjectPathCheck(null, rejection)
     }
     val canonical = withContext(Dispatchers.IO) { canonicalizeOrNull(expandedPath) }
-    if (canonical != null && CLISecurityValidator.isRestrictedSystemPath(canonical)) {
-        return ProjectPathCheck(
+    val isRestrictedCanonical = canonical != null && CLISecurityValidator.isRestrictedSystemPath(canonical)
+    return if (isRestrictedCanonical) {
+        ProjectPathCheck(
             null,
             "Refusing to open '$rawPath': canonical path '$canonical' is a restricted system directory.",
         )
+    } else {
+        ProjectPathCheck(canonical, "Path is not an existing directory: $rawPath".takeIf { canonical == null })
     }
-    return ProjectPathCheck(canonical, "Path is not an existing directory: $rawPath".takeIf { canonical == null })
 }
 
 /**

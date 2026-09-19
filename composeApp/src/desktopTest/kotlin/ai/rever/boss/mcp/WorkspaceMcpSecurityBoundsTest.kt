@@ -40,7 +40,8 @@ class WorkspaceMcpSecurityBoundsTest {
     fun `normalizePath resolves redundant slashes dots and traversals`() {
         assertEquals("/etc/passwd", CLISecurityValidator.normalizePath("/etc/./passwd"))
         assertEquals("/etc/shadow", CLISecurityValidator.normalizePath("/var/log/../../etc/shadow"))
-        assertEquals("C:/Windows/System32", CLISecurityValidator.normalizePath("c:\\windows\\system32"))
+        assertEquals("C:/Windows/System32", CLISecurityValidator.normalizePath("c:\\Windows\\System32"))
+        assertEquals("C:/windows/system32", CLISecurityValidator.normalizePath("c:\\windows\\system32"))
         assertEquals("C:/Windows", CLISecurityValidator.normalizePath("C:/Windows/System32/.."))
         assertEquals("/", CLISecurityValidator.normalizePath("/"))
         assertEquals("C:/", CLISecurityValidator.normalizePath("c:\\"))
