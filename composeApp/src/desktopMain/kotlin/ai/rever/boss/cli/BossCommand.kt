@@ -125,6 +125,36 @@ class BossTerminalCommand : CliktCommand(name = "terminal") {
 }
 
 /**
+ * Invokes or inspects an MCP tool over deep link protocol.
+ * Usage:
+ *   boss mcp --tool codebase_read --args '{"path":"README.md"}'
+ */
+class BossMcpCommand : CliktCommand(name = "mcp") {
+    override fun help(context: Context) = "Invokes an MCP tool in BOSS"
+
+    val tool by option("-t", "--tool", help = "MCP tool name to invoke")
+    val args by option("-a", "--args", help = "JSON arguments for the MCP tool")
+
+    override fun run() {
+        val toolName = tool
+        val argsValue = args
+        val deepLink =
+            if (toolName != null) {
+                val encodedTool = URLEncoder.encode(toolName, "UTF-8")
+                val encodedArgs = argsValue?.let { URLEncoder.encode(it, "UTF-8") }
+                if (encodedArgs != null) {
+                    "boss://mcp?tool=$encodedTool&args=$encodedArgs"
+                } else {
+                    "boss://mcp?tool=$encodedTool"
+                }
+            } else {
+                "boss://mcp"
+            }
+        DeepLinkHandler.processDeepLink(deepLink, DeepLinkOrigin.OPERATOR_CLI)
+    }
+}
+
+/**
  * Configures Clikt command structure.
  */
 fun createBossCLI(): BossCommand =
@@ -134,4 +164,5 @@ fun createBossCLI(): BossCommand =
         BossFileCommand(),
         BossFolderCommand(),
         BossTerminalCommand(),
+        BossMcpCommand(),
     )

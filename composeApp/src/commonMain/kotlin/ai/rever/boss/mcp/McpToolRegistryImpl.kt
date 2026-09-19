@@ -636,9 +636,25 @@ internal class McpToolRegistryCore(
             _tools.value.firstOrNull { it.definition.name == toolName }
                 ?: return McpToolResult("Unknown or disabled MCP tool: $toolName", isError = true)
         val args = parseArgs(arguments)
+        val startTime = System.currentTimeMillis()
         return try {
-            withTimeout(invokeTimeoutMs) { tool.definition.handler.call(args) }
+            val result = withTimeout(invokeTimeoutMs) { tool.definition.handler.call(args) }
+            val duration = System.currentTimeMillis() - startTime
+            McpTelemetryService.recordInvocation(
+                toolName = toolName,
+                durationMs = duration,
+                isError = result.isError,
+                isTimeout = false,
+            )
+            result
         } catch (t: TimeoutCancellationException) {
+            val duration = System.currentTimeMillis() - startTime
+            McpTelemetryService.recordInvocation(
+                toolName = toolName,
+                durationMs = duration,
+                isError = true,
+                isTimeout = true,
+            )
             logger.warn(
                 LogCategory.SYSTEM,
                 "MCP tool handler timed out",
@@ -651,6 +667,13 @@ internal class McpToolRegistryCore(
             // would break structured concurrency during request cancel/shutdown.
             throw t
         } catch (t: Throwable) {
+            val duration = System.currentTimeMillis() - startTime
+            McpTelemetryService.recordInvocation(
+                toolName = toolName,
+                durationMs = duration,
+                isError = true,
+                isTimeout = false,
+            )
             logger.warn(
                 LogCategory.SYSTEM,
                 "MCP tool handler failed",
