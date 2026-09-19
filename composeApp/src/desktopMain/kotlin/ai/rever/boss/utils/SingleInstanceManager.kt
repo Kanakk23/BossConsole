@@ -1130,11 +1130,11 @@ object SingleInstanceManager {
      * Check whether another instance of BOSS is already running, by asking it.
      * Does not take ownership - use [acquireLock] for that.
      */
-    fun isAnotherInstanceRunning(): Boolean {
-        val descriptor = SingleInstanceFiles.read()
-        val isAlive = descriptor != null && (descriptor.pid == null || isProcessAlive(descriptor.pid))
-        return isAlive && SingleInstanceWire.respondsToPing(descriptor)
-    }
+    fun isAnotherInstanceRunning(): Boolean =
+        SingleInstanceFiles.read()?.let { existing ->
+            (existing.pid == null || isProcessAlive(existing.pid)) &&
+                SingleInstanceWire.respondsToPing(existing)
+        } ?: false
 
     /**
      * Try to become the single instance.
