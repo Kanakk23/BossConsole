@@ -1148,6 +1148,9 @@ object SingleInstanceManager {
 
         val existing = SingleInstanceFiles.read()
         if (existing != null) {
+            // A dead PID proves the descriptor is stale, so skip the potentially slow ping.
+            // A live PID does not prove this is the BossConsole instance because PIDs can be
+            // reused; the channel-token ping remains the authoritative ownership check.
             val isDeadPid = existing.pid != null && !isProcessAlive(existing.pid)
             if (!isDeadPid && SingleInstanceWire.respondsToPing(existing)) {
                 logger.info(LogCategory.SYSTEM, "Another instance is answering on the single-instance channel")

@@ -6,9 +6,13 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.io.IOException
+import java.net.InetAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.nio.file.Path
+import kotlin.concurrent.thread
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -37,21 +41,25 @@ class SingleInstanceStalePidTest {
     }
 
     /**
-     * Spawns a short-lived process that exits immediately, returning a PID that is
-     * guaranteed to be terminated and no longer running.
+     * Spawns a short-lived process that exits immediately and waits until the child
+     * process is observed as no longer alive.
      */
     private fun getTerminatedPid(): Long {
         val isWindows = System.getProperty("os.name").lowercase().contains("win")
         val command = if (isWindows) listOf("cmd", "/c", "exit 0") else listOf("true")
         val process = ProcessBuilder(command).start()
+
         process.waitFor()
         val pid = process.pid()
-        var attempts = 0
-        while (isProcessAlive(pid) && attempts < 50) {
+
+        repeat(50) {
+            if (!isProcessAlive(pid)) {
+                return pid
+            }
             Thread.sleep(10)
-            attempts++
         }
-        return pid
+
+        error("Process $pid did not become dead within the test timeout")
     }
 
     @Test
@@ -148,6 +156,74 @@ class SingleInstanceStalePidTest {
             val published = SingleInstanceFiles.read()
             assertNotNull(published)
             assertEquals(ProcessHandle.current().pid(), published.pid)
+        }
+    }
+
+    @Test
+    fun `legacy descriptor with null pid falls back to ping and prevents lock reclamation when endpoint responds`() {
+        val token = "e".repeat(TOKEN_HEX_LENGTH)
+        ServerSocket(0, 10, InetAddress.getLoopbackAddress()).use { serverSocket ->
+            val legacyDescriptor =
+                InstanceDescriptor(
+                    transport = SingleInstanceTransport.TCP,
+                    endpoint = serverSocket.localPort.toString(),
+                    token = token,
+                    pid = null,
+                )
+
+            SingleInstanceFiles.prepare()
+            SingleInstanceFiles.write(legacyDescriptor)
+
+            val serverThread = startFakePingServer(serverSocket)
+
+            try {
+                // 1. pid == null
+                assertNull(legacyDescriptor.pid, "Legacy descriptor must have null pid")
+
+                // 2. Legacy descriptor without PID must fall back to ping and detect the running instance
+                val running = SingleInstanceManager.isAnotherInstanceRunning()
+                assertTrue(running, "isAnotherInstanceRunning must return true for responding legacy instance")
+
+                // 3. acquireLock must not reclaim a legacy descriptor whose endpoint is responding
+                val acquired = SingleInstanceManager.acquireLock()
+                assertFalse(acquired, "acquireLock must return false and not reclaim responding legacy instance")
+
+                // 4. Verify the descriptor was not overwritten or reclaimed
+                val currentDescriptor = SingleInstanceFiles.read()
+                assertNotNull(currentDescriptor)
+                assertNull(currentDescriptor.pid, "Descriptor pid must remain null")
+                assertEquals(legacyDescriptor.endpoint, currentDescriptor.endpoint)
+                assertEquals(legacyDescriptor.token, currentDescriptor.token)
+            } finally {
+                serverSocket.close()
+                serverThread.join(1000)
+            }
+        }
+    }
+
+    private fun startFakePingServer(serverSocket: ServerSocket): Thread =
+        thread(isDaemon = true) {
+            try {
+                while (!serverSocket.isClosed) {
+                    val client = serverSocket.accept()
+                    handlePingClient(client)
+                }
+            } catch (_: IOException) {
+                // Socket closed during test cleanup
+            }
+        }
+
+    private fun handlePingClient(client: Socket) {
+        thread(isDaemon = true) {
+            client.use { socket ->
+                val reader = socket.getInputStream().bufferedReader()
+                val line = reader.readLine()
+                if (line != null && line.endsWith(VERB_PING)) {
+                    val writer = socket.getOutputStream().bufferedWriter()
+                    writer.write("$RESPONSE_PONG\n")
+                    writer.flush()
+                }
+            }
         }
     }
 }
