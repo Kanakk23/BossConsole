@@ -78,7 +78,7 @@ class BossUrlCommand : CliktCommand(name = "url") {
  *   boss workspace <config.json>
  *   boss workspace switch <name>
  */
-class BossWorkspaceCommand : CliktCommand(name = "workspace") {
+class BossWorkspaceCommand : CliktCommand(name = "workspace", invokeWithoutSubcommand = true) {
     override fun help(context: Context) = "Loads or manages workspaces"
 
     val configPath by argument(help = "Path to workspace config file").optional()
@@ -381,7 +381,7 @@ class BossStatusCommand : CliktCommand(name = "status") {
  *   boss mcp ledger <verify|tail|search> [--json]
  */
 @Suppress("TooManyFunctions")
-class BossMcpCommand : CliktCommand(name = "mcp") {
+class BossMcpCommand : CliktCommand(name = "mcp", invokeWithoutSubcommand = true) {
     override fun help(context: Context) = "Discovers and invokes MCP tools in the running BOSS Console"
 
     val action by argument(
