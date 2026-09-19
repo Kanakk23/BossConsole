@@ -52,6 +52,22 @@ class StatusHealthWiringTest {
         assertTrue("running" in status)
     }
 
+    @Test
+    fun `attachTelemetryProvider sets and auto-detaches when closed`() {
+        val tools = buildJsonObject { put("attached", true) }
+        SingleInstanceManager.attachTelemetryProvider { tools }.use {
+            val response =
+                buildStatusResponse(
+                    statusProviderOverride = null,
+                    toolsJson = SingleInstanceManager.toolsProviderOverride,
+                    healthJson = { buildJsonObject { put("degraded", false) } },
+                )
+            val status = decode(response)
+            assertEquals(tools, status["tools"])
+        }
+        kotlin.test.assertNull(SingleInstanceManager.toolsProviderOverride)
+    }
+
     private fun decode(response: String): JsonObject {
         val base64 = response.removePrefix(RESPONSE_STATUS_PREFIX).trim()
         return Json.parseToJsonElement(String(Base64.getDecoder().decode(base64), StandardCharsets.UTF_8)).jsonObject

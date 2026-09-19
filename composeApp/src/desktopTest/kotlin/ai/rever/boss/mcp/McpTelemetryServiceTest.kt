@@ -248,4 +248,81 @@ class McpTelemetryServiceTest {
             assertEquals(0L, inactiveJson["totalInvocations"]?.jsonPrimitive?.content?.toLong())
             assertEquals(0.0, inactiveJson["errorPercentage"]?.jsonPrimitive?.content?.toDouble())
         }
+
+    @Test
+    fun `computePercentile safely handles empty array and does not throw coerceIn exception`() {
+        val emptyArray = LongArray(0)
+        assertEquals(0L, computePercentile(emptyArray, 50.0))
+        assertEquals(0L, computePercentile(emptyArray, 99.0))
+        assertEquals(0L, computePercentile(emptyArray, 0.0))
+        assertEquals(0L, computePercentile(emptyArray, 100.0))
+
+        val singleElement = longArrayOf(42L)
+        assertEquals(42L, computePercentile(singleElement, 50.0))
+        assertEquals(42L, computePercentile(singleElement, 99.0))
+        assertEquals(42L, computePercentile(singleElement, 0.0))
+    }
+
+    @Test
+    fun `enforces MAX_TRACKED_TOOLS cap to prevent unbounded memory allocation`() {
+        val service = McpTelemetryService(defaultWindowCapacity = 10)
+
+        // Record up to the limit of 256 unique tools
+        for (i in 1..McpTelemetryService.MAX_TRACKED_TOOLS) {
+            service.recordInvocation("tool_$i", durationMs = 10L, isError = false)
+        }
+
+        val allStatsBefore = service.getAllStats()
+        assertEquals(McpTelemetryService.MAX_TRACKED_TOOLS, allStatsBefore.size)
+
+        // Attempt to record for 257th distinct rogue/unbounded tool name
+        service.recordInvocation("rogue_tool_overflow", durationMs = 50L, isError = false)
+
+        val allStatsAfter = service.getAllStats()
+        // Must still be capped at 256 tools
+        assertEquals(McpTelemetryService.MAX_TRACKED_TOOLS, allStatsAfter.size)
+
+        // The overflow tool should return safe zero-state stats without allocating a buffer
+        val overflowStats = service.getStats("rogue_tool_overflow")
+        assertEquals(0L, overflowStats.totalInvocations)
+        assertEquals(0, overflowStats.windowSize)
+    }
+
+    @Test
+    fun `ledger listener dispatch with volatile copy-on-write operates correctly`() {
+        val file = createTempLedgerFile()
+        val ledger = McpOperationLedger(ledgerFile = file)
+        val capturedRecords = mutableListOf<McpOperationRecord>()
+        val listener: (McpOperationRecord) -> Unit = { capturedRecords.add(it) }
+
+        ledger.addListener(listener)
+
+        ledger.record(
+            toolName = "test_hotpath_tool",
+            providerId = "test",
+            policyApplied = McpPolicyAction.ALLOW,
+            approvalDisposition = McpApprovalDisposition.AUTO_ALLOWED,
+            durationMs = 25L,
+            isError = false,
+            rawArgs = emptyMap(),
+        )
+
+        assertEquals(1, capturedRecords.size)
+        assertEquals("test_hotpath_tool", capturedRecords[0].toolName)
+
+        ledger.removeListener(listener)
+
+        ledger.record(
+            toolName = "test_hotpath_tool_2",
+            providerId = "test",
+            policyApplied = McpPolicyAction.ALLOW,
+            approvalDisposition = McpApprovalDisposition.AUTO_ALLOWED,
+            durationMs = 30L,
+            isError = false,
+            rawArgs = emptyMap(),
+        )
+
+        // No new records should be captured after removal
+        assertEquals(1, capturedRecords.size)
+    }
 }

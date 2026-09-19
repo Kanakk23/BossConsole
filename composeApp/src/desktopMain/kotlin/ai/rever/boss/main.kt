@@ -373,7 +373,7 @@ fun main(args: Array<String>) {
             true
         }
     }
-    SingleInstanceManager.toolsProviderOverride = {
+    SingleInstanceManager.attachTelemetryProvider {
         ai.rever.boss.mcp.McpToolRegistryImpl.telemetryService
             .toJsonElement()
     }

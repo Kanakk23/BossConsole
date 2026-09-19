@@ -88,11 +88,11 @@ internal class RollingWindowBuffer(
 
     fun snapshot(toolName: String): ToolTelemetryStats {
         synchronized(bufferLock) {
-            if (count == 0) {
+            if (count <= 0) {
                 return ToolTelemetryStats(
                     tool = toolName,
-                    totalInvocations = 0L,
-                    totalErrors = 0L,
+                    totalInvocations = totalInvocations,
+                    totalErrors = totalErrors,
                     errorPercentage = 0.0,
                     p50Ms = 0L,
                     p99Ms = 0L,
@@ -131,8 +131,11 @@ internal fun computePercentile(
     percentile: Double,
 ): Long {
     if (sorted.isEmpty()) return 0L
+    if (sorted.size == 1) return sorted[0]
+    val maxIndex = sorted.size - 1
+    if (maxIndex < 0) return 0L
     val rank = ceil((percentile / 100.0) * sorted.size).toInt()
-    val index = (rank - 1).coerceIn(0, sorted.size - 1)
+    val index = (rank - 1).coerceIn(0, maxIndex)
     return sorted[index]
 }
 
@@ -153,7 +156,8 @@ class McpTelemetryService(
     val defaultWindowCapacity: Int = DEFAULT_WINDOW_CAPACITY,
 ) : McpToolProvider {
     companion object {
-        const val DEFAULT_WINDOW_CAPACITY = 100
+        const val DEFAULT_WINDOW_CAPACITY = 500
+        const val MAX_TRACKED_TOOLS = 256
         const val PROVIDER_ID = "boss-telemetry"
         const val TOOL_NAME = "tool_stats"
     }
@@ -182,13 +186,21 @@ class McpTelemetryService(
         durationMs: Long,
         isError: Boolean,
     ) {
-        val buffer = getOrCreateBuffer(toolName)
+        val buffer = getOrCreateBuffer(toolName) ?: return
         buffer.record(durationMs, isError)
     }
 
-    private fun getOrCreateBuffer(toolName: String): RollingWindowBuffer =
+    private fun getOrCreateBuffer(toolName: String): RollingWindowBuffer? =
         synchronized(windowsLock) {
-            windows.getOrPut(toolName) { RollingWindowBuffer(defaultWindowCapacity) }
+            windows[toolName] ?: run {
+                if (windows.size >= MAX_TRACKED_TOOLS) {
+                    null
+                } else {
+                    val newBuffer = RollingWindowBuffer(defaultWindowCapacity)
+                    windows[toolName] = newBuffer
+                    newBuffer
+                }
+            }
         }
 
     /**

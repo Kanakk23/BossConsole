@@ -753,6 +753,25 @@ actual object DeepLinkHandler {
     ) {
         logger.debug(LogCategory.WORKSPACE, "Handling workspace link", mapOf("origin" to origin.name))
 
+        val params = parseQueryParams(uri)
+        val action = params["action"]?.urlDecode()?.lowercase()
+        if (action == "switch") {
+            val name = params["name"]?.urlDecode()
+            if (name.isNullOrBlank()) {
+                logger.warn(LogCategory.WORKSPACE, "Missing 'name' parameter in workspace switch deep link")
+                return
+            }
+            ai.rever.boss.cli.CLICommandHandler
+                .getInstance()
+                .queueCommand(ai.rever.boss.cli.CLICommand.SwitchWorkspace(name))
+            logger.info(
+                LogCategory.WORKSPACE,
+                "Workspace switch queued via deep link",
+                mapOf("name" to name, "origin" to origin.name),
+            )
+            return
+        }
+
         val cliCommand = workspaceLinkCommand(uri, origin)
         if (cliCommand == null) {
             logger.warn(LogCategory.WORKSPACE, "Missing 'path' parameter in workspace deep link")

@@ -78,6 +78,9 @@ internal const val VERB_MCP_INVOKE = "MCP_INVOKE"
 /** Asks the running instance to reload a plugin in development mode. */
 internal const val VERB_PLUGIN_DEV_RELOAD = "PLUGIN_DEV_RELOAD"
 
+/** Asks the running instance to switch the active workspace tab. */
+internal const val VERB_WORKSPACE_SWITCH = "WORKSPACE_SWITCH"
+
 sealed interface ReloadResult {
     data object Success : ReloadResult
 
@@ -101,6 +104,7 @@ sealed interface ReloadResult {
 internal const val RESPONSE_OK = "OK"
 internal const val RESPONSE_PONG = "PONG"
 internal const val RESPONSE_REJECTED = "REJECTED"
+internal const val RESPONSE_ERR_NOT_FOUND = "ERR_NOT_FOUND"
 private const val RESPONSE_LLM_TOKEN_PREFIX = "LLM_TOKEN "
 internal const val RESPONSE_STATUS_PREFIX = "STATUS "
 internal const val RESPONSE_MCP_LIST_PREFIX = "MCP_LIST "
@@ -234,6 +238,7 @@ internal fun parseInstanceDescriptor(text: String): InstanceDescriptor? {
  * @property url for [VERB_OPEN], the URL to process; null for other verbs.
  * @property toolName for [VERB_MCP_INVOKE], the tool name to invoke.
  * @property argsJson for [VERB_MCP_INVOKE], the decoded JSON arguments string.
+ * @property workspaceName for [VERB_WORKSPACE_SWITCH], the target workspace name or ID.
  */
 internal data class SingleInstanceRequest(
     val token: String,
@@ -242,6 +247,7 @@ internal data class SingleInstanceRequest(
     val url: String?,
     val toolName: String? = null,
     val argsJson: String? = null,
+    val workspaceName: String? = null,
 )
 
 /**
@@ -273,6 +279,20 @@ internal fun parseRequestLine(line: String): SingleInstanceRequest? {
             } else {
                 null
             }
+        }
+
+        VERB_WORKSPACE_SWITCH -> {
+            val prefix = "$PROTOCOL_VERSION $token $VERB_WORKSPACE_SWITCH"
+            if (!trimmed.startsWith(prefix)) return null
+            val workspaceName = trimmed.removePrefix(prefix).trim()
+            if (workspaceName.isEmpty()) return null
+            SingleInstanceRequest(
+                token = token,
+                verb = VERB_WORKSPACE_SWITCH,
+                origin = DeepLinkOrigin.OPERATOR_CLI,
+                url = null,
+                workspaceName = workspaceName,
+            )
         }
 
         VERB_MCP_INVOKE -> {
@@ -336,6 +356,12 @@ internal fun formatOpenRequest(
     origin: DeepLinkOrigin,
     url: String,
 ): String = "$PROTOCOL_VERSION $token $VERB_OPEN ${origin.name} $url"
+
+/** Builds a workspace switch request line. Never log the result: it carries the token. */
+internal fun formatWorkspaceSwitchRequest(
+    token: String,
+    workspaceName: String,
+): String = "$PROTOCOL_VERSION $token $VERB_WORKSPACE_SWITCH $workspaceName"
 
 /** Builds a liveness probe line. Never log the result: it carries the token. */
 internal fun formatPingRequest(token: String): String = "$PROTOCOL_VERSION $token $VERB_PING"
@@ -1077,6 +1103,27 @@ object SingleInstanceManager {
     /** Test seam / host hook for MCP tool telemetry response in status. */
     internal var toolsProviderOverride: (() -> JsonElement)? = null
 
+    /**
+     * Attach a provider for MCP tool telemetry to include in status responses.
+     * Returns an [AutoCloseable] handle that detaches the provider when closed,
+     * ensuring safe lifecycle cleanup without leaking global state across tests.
+     */
+    fun attachTelemetryProvider(provider: () -> JsonElement): AutoCloseable {
+        toolsProviderOverride = provider
+        return AutoCloseable {
+            if (toolsProviderOverride === provider) {
+                toolsProviderOverride = null
+            }
+        }
+    }
+
+    /**
+     * Detach the current telemetry provider.
+     */
+    fun detachTelemetryProvider() {
+        toolsProviderOverride = null
+    }
+
     /** Test seam / host hook for MCP tool list response. */
     internal var mcpListProviderOverride: (() -> String)? = null
 
@@ -1085,6 +1132,12 @@ object SingleInstanceManager {
 
     /** Test seam / host hook for dev plugin reload response. */
     internal var pluginReloadHandlerOverride: ((String) -> Boolean)? = null
+
+    /** Test seam / host hook for workspace existence validation. */
+    internal var workspaceValidatorOverride: ((String) -> Boolean)? = null
+
+    /** Test seam / host hook for workspace switch handler. */
+    internal var workspaceSwitchHandlerOverride: ((String) -> Boolean)? = null
 
     @Volatile
     private var isListening: Boolean = false
@@ -1287,6 +1340,29 @@ object SingleInstanceManager {
                 buildLlmTokenResponse(llmTokenProviderOverride)
             }
 
+            request.verb == VERB_WORKSPACE_SWITCH -> {
+                val name = request.workspaceName.orEmpty()
+                val exists =
+                    workspaceValidatorOverride?.invoke(name) ?: run {
+                        val activeWorkspaces =
+                            ai.rever.boss.components.workspaces.workspaceManager.workspaces.value
+                        activeWorkspaces.any {
+                            it.name.equals(name, ignoreCase = true) || it.id.equals(name, ignoreCase = true)
+                        }
+                    }
+                if (!exists) {
+                    RESPONSE_ERR_NOT_FOUND
+                } else {
+                    val handled =
+                        workspaceSwitchHandlerOverride?.invoke(name) ?: run {
+                            ai.rever.boss.cli.CLICommandHandler.getInstance()
+                                .queueCommand(ai.rever.boss.cli.CLICommand.SwitchWorkspace(name))
+                            true
+                        }
+                    if (handled) RESPONSE_OK else RESPONSE_REJECTED
+                }
+            }
+
             request.verb == VERB_STATUS -> {
                 buildStatusResponse(statusProviderOverride, toolsJson = toolsProviderOverride)
             }
@@ -1347,6 +1423,42 @@ object SingleInstanceManager {
                         Result.failure(IllegalStateException("BOSS rejected the RISA LLM credential request."))
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * Sends an IPC command to the running BOSS instance to switch active workspace tab.
+     */
+    @Suppress("ReturnCount")
+    fun switchWorkspace(name: String): Result<String> {
+        val trimmedName = name.trim()
+        if (trimmedName.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Workspace name must not be blank."))
+        }
+        val target =
+            SingleInstanceFiles.read()
+                ?: return Result.failure(IllegalStateException("BOSS is not running. Launch BOSS to switch workspace."))
+        val response =
+            SingleInstanceWire.exchange(
+                target,
+                formatWorkspaceSwitchRequest(target.token, trimmedName),
+                timeoutMs = CONNECTION_TIMEOUT_MS,
+            ) ?: return Result.failure(
+                IllegalStateException("BOSS is not running or not responding on the single-instance channel."),
+            )
+
+        return when (response) {
+            RESPONSE_OK -> {
+                Result.success("Switched to workspace '$trimmedName'.")
+            }
+
+            RESPONSE_ERR_NOT_FOUND -> {
+                Result.failure(NoSuchElementException("Workspace '$trimmedName' not found."))
+            }
+
+            else -> {
+                Result.failure(IllegalStateException("BOSS rejected the workspace switch request ($response)."))
             }
         }
     }
@@ -1632,6 +1744,8 @@ object SingleInstanceManager {
         mcpListProviderOverride = null
         mcpInvokeHandlerOverride = null
         pluginReloadHandlerOverride = null
+        workspaceValidatorOverride = null
+        workspaceSwitchHandlerOverride = null
 
         try {
             serverChannel?.close()

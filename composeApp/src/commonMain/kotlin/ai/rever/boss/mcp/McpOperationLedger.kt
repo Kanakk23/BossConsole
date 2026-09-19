@@ -64,15 +64,16 @@ class McpOperationLedger(
     val totalErrors: StateFlow<Long> = _totalErrors.asStateFlow()
 
     private val listenersLock = Any()
-    private val listeners = mutableListOf<(McpOperationRecord) -> Unit>()
+    @Volatile
+    private var activeListeners: List<(McpOperationRecord) -> Unit> = emptyList()
 
     /**
      * Subscribe to ledger operations as they are recorded.
-     * Listeners are dispatched synchronously under safe exception handling.
+     * Listeners are dispatched safely without locking on the hot path.
      */
     fun addListener(listener: (McpOperationRecord) -> Unit) {
         synchronized(listenersLock) {
-            listeners.add(listener)
+            activeListeners = activeListeners + listener
         }
     }
 
@@ -81,7 +82,7 @@ class McpOperationLedger(
      */
     fun removeListener(listener: (McpOperationRecord) -> Unit) {
         synchronized(listenersLock) {
-            listeners.remove(listener)
+            activeListeners = activeListeners - listener
         }
     }
 
@@ -131,17 +132,19 @@ class McpOperationLedger(
                 _totalErrors.update { it + 1 }
             }
 
-            // 3. Dispatch to listeners (e.g. McpTelemetryService)
-            val activeListeners = synchronized(listenersLock) { listeners.toList() }
-            for (listener in activeListeners) {
-                try {
-                    listener(record)
-                } catch (t: Throwable) {
-                    logger.warn(
-                        LogCategory.SYSTEM,
-                        "McpOperationLedger listener threw exception",
-                        mapOf("error" to (t.message ?: t::class.simpleName.orEmpty())),
-                    )
+            // 3. Dispatch to listeners (e.g. McpTelemetryService) without holding listener lock or allocating list
+            val currentListeners = activeListeners
+            if (currentListeners.isNotEmpty()) {
+                for (listener in currentListeners) {
+                    try {
+                        listener(record)
+                    } catch (t: Throwable) {
+                        logger.warn(
+                            LogCategory.SYSTEM,
+                            "McpOperationLedger listener threw exception",
+                            mapOf("error" to (t.message ?: t::class.simpleName.orEmpty())),
+                        )
+                    }
                 }
             }
 
