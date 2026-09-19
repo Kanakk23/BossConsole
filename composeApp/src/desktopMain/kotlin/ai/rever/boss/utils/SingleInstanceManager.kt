@@ -1301,7 +1301,10 @@ object SingleInstanceManager {
         }
 
     private fun handleWorkspaceSwitch(request: SingleInstanceRequest): String {
-        val name = request.workspaceName ?: return RESPONSE_ERROR_PREFIX + "Missing workspace name"
+        val name = request.workspaceName
+        if (name == null) {
+            return RESPONSE_ERROR_PREFIX + "Missing workspace name"
+        }
         val handler = workspaceSwitchHandlerOverride
         val success = if (handler != null) {
             handler(name)
@@ -1314,11 +1317,14 @@ object SingleInstanceManager {
                         it.name.equals(name, ignoreCase = true) || it.id.equals(name, ignoreCase = true)
                     }
                 }
-            if (!exists) return RESPONSE_ERR_NOT_FOUND
-            ai.rever.boss.cli.CLICommandHandler
-                .getInstance()
-                .queueCommand(ai.rever.boss.cli.CLICommand.SwitchWorkspace(name))
-            true
+            if (exists) {
+                ai.rever.boss.cli.CLICommandHandler
+                    .getInstance()
+                    .queueCommand(ai.rever.boss.cli.CLICommand.SwitchWorkspace(name))
+                true
+            } else {
+                false
+            }
         }
         return if (success) RESPONSE_OK else RESPONSE_ERR_NOT_FOUND
     }

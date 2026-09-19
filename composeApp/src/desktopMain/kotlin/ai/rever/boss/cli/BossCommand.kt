@@ -22,10 +22,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -820,12 +820,13 @@ class BossMcpCallCommand : CliktCommand(name = "call") {
     val json by option("--json", help = "Output response in raw JSON format").flag(default = false)
 
     override fun run() {
-        val argumentsJson = when {
-            stdin -> readStdinArgs()
-            positionalArgs != null -> positionalArgs!!
-            args != null -> args!!
-            else -> "{}"
-        }
+        val argumentsJson =
+            when {
+                stdin -> readStdinArgs()
+                positionalArgs != null -> positionalArgs!!
+                args != null -> args!!
+                else -> "{}"
+            }
         validateArgumentsJson(argumentsJson)
 
         val timeoutSeconds = timeout.toLongOrNull()
@@ -869,19 +870,23 @@ class BossMcpCallCommand : CliktCommand(name = "call") {
     }
 
     private fun validateArgumentsJson(argumentsJson: String) {
-        try {
-            val parsed = Json.parseToJsonElement(argumentsJson)
-            if (parsed !is JsonObject) {
-                echo("Error: Tool arguments must be a JSON object (e.g. '{\"key\":\"value\"}').", err = true)
-                throw ProgramResult(1)
+        val errorMessage =
+            try {
+                val parsed = Json.parseToJsonElement(argumentsJson)
+
+                if (parsed !is JsonObject) {
+                    "Error: Tool arguments must be a JSON object (e.g. '{\"key\":\"value\"}')."
+                } else {
+                    null
+                }
+            } catch (e: kotlinx.serialization.SerializationException) {
+                "Error: Malformed JSON arguments: ${e.message ?: "Invalid JSON syntax"}"
+            } catch (e: IllegalArgumentException) {
+                "Error: Malformed JSON arguments: ${e.message ?: "Invalid JSON syntax"}"
             }
-        } catch (e: ProgramResult) {
-            throw e
-        } catch (e: kotlinx.serialization.SerializationException) {
-            echo("Error: Malformed JSON arguments: ${e.message ?: "Invalid JSON syntax"}", err = true)
-            throw ProgramResult(1)
-        } catch (e: IllegalArgumentException) {
-            echo("Error: Malformed JSON arguments: ${e.message ?: "Invalid JSON syntax"}", err = true)
+
+        if (errorMessage != null) {
+            echo(errorMessage, err = true)
             throw ProgramResult(1)
         }
     }
