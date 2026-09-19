@@ -19,6 +19,7 @@ class DeepLinkRoutingTest {
         assertEquals(DeepLinkHost.FOLDER, routedDeepLinkHost("boss://folder?path=/tmp/project"))
         assertEquals(DeepLinkHost.PLUGIN, routedDeepLinkHost("boss://plugin?id=bookmarks"))
         assertEquals(DeepLinkHost.SPLIT, routedDeepLinkHost("boss://split?orientation=horizontal"))
+        assertEquals(DeepLinkHost.MCP, routedDeepLinkHost("boss://mcp?tool=codebase_read"))
     }
 
     @Test
@@ -64,7 +65,7 @@ class DeepLinkRoutingTest {
         // usable window. All three now take the id this single resolution
         // produces — and must keep taking it when it resolves to null, which is
         // the branch that logs instead of acting.
-        listOf(DeepLinkHost.FOLDER, DeepLinkHost.PLUGIN, DeepLinkHost.SPLIT).forEach { host ->
+        listOf(DeepLinkHost.FOLDER, DeepLinkHost.PLUGIN, DeepLinkHost.SPLIT, DeepLinkHost.MCP).forEach { host ->
             var calls = 0
             assertEquals(
                 "window-a",

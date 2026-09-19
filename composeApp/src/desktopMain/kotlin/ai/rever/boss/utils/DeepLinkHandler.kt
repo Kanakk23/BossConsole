@@ -58,6 +58,7 @@ internal enum class DeepLinkHost(
     FOLDER("folder", resolvesWindowAtDispatch = true),
     PLUGIN("plugin", resolvesWindowAtDispatch = true),
     SPLIT("split", resolvesWindowAtDispatch = true),
+    MCP("mcp", resolvesWindowAtDispatch = true),
 }
 
 /**
@@ -389,6 +390,7 @@ actual object DeepLinkHandler {
             DeepLinkHost.FOLDER -> handleFolderLink(uri, targetWindowId)
             DeepLinkHost.PLUGIN -> handlePluginLink(uri, targetWindowId)
             DeepLinkHost.SPLIT -> handleSplitLink(uri, targetWindowId)
+            DeepLinkHost.MCP -> handleMcpLink(uri, targetWindowId, origin)
         }
     }
 
@@ -652,6 +654,64 @@ actual object DeepLinkHandler {
                 mapOf("windowId" to targetWindowId, "horizontal" to horizontal.toString()),
             )
         }
+    }
+
+    /**
+     * Handle boss://mcp deep links
+     * Examples:
+     *   boss://mcp
+     *   boss://mcp?tool=codebase_read&args=%7B%22path%22%3A%22README.md%22%7D
+     */
+    private fun handleMcpLink(
+        uri: String,
+        targetWindowId: String?,
+        origin: DeepLinkOrigin,
+    ) {
+        logger.debug(LogCategory.SYSTEM, "Handling MCP deep link", mapOf("origin" to origin.name))
+
+        val params = parseQueryParams(uri)
+        val tool = params["tool"]?.urlDecode()
+        val argsJson = params["args"]?.urlDecode()
+
+        if (tool == null) {
+            // Open MCP Toolbox / Manager panel
+            if (targetWindowId != null) {
+                scope.launch(Dispatchers.Main) {
+                    PanelEventBus.openPanel(
+                        PanelId("plugin-manager", defaultOrder = 0, pluginId = "ai.rever.boss"),
+                        sourceWindowId = targetWindowId,
+                    )
+                }
+            } else {
+                logger.warn(LogCategory.SYSTEM, "No target window available to open MCP panel")
+            }
+            return
+        }
+
+        // External origins must be validated or routed to confirmation before executing mutating operations
+        if (!origin.isOperatorInitiated) {
+            logger.info(
+                LogCategory.SYSTEM,
+                "External origin requested MCP tool execution - requiring operator confirmation",
+                mapOf("tool" to tool),
+            )
+            // Open MCP Panel with prompt
+            if (targetWindowId != null) {
+                scope.launch(Dispatchers.Main) {
+                    PanelEventBus.openPanel(
+                        PanelId("plugin-manager", defaultOrder = 0, pluginId = "ai.rever.boss"),
+                        sourceWindowId = targetWindowId,
+                    )
+                }
+            }
+            return
+        }
+
+        logger.info(
+            LogCategory.SYSTEM,
+            "Operator-initiated MCP tool execution",
+            mapOf("tool" to tool, "hasArgs" to (argsJson != null)),
+        )
     }
 
     /**

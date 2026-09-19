@@ -45,6 +45,15 @@ object PredefinedWorkspaces {
     /** Id of the terminal + browser workspace, the platform default everywhere else. */
     const val CLAUDE_CODE_ID = "workspace-claude-code"
 
+    /** Id of the Student / Data Science Studio workspace. */
+    const val STUDENT_STUDIO_ID = "workspace-student-studio"
+
+    /** Id of the Scientific Researcher workspace. */
+    const val RESEARCHER_STUDIO_ID = "workspace-researcher-studio"
+
+    /** Id of the DevOps Operator workspace. */
+    const val DEVOPS_OPERATOR_ID = "workspace-devops-operator"
+
     /**
      * Home page the browser-only workspace opens with.
      *
@@ -90,6 +99,154 @@ object PredefinedWorkspaces {
                                                 type = "browser",
                                                 title = "GitHub",
                                                 url = "{gitRemoteUrl}",
+                                            ),
+                                        ),
+                                ),
+                            ),
+                    ),
+            ),
+            // Student Studio: Data Science & AI Course Demo
+            LayoutWorkspace(
+                id = STUDENT_STUDIO_ID,
+                name = "Student Studio (Data Science)",
+                description = "Editor/Notebook + Documentation Browser + Terminal",
+                layout =
+                    HorizontalSplit(
+                        top =
+                            VerticalSplit(
+                                left =
+                                    SinglePanel(
+                                        PanelConfig(
+                                            id = generatePanelId(),
+                                            tabs =
+                                                listOf(
+                                                    TabConfig(
+                                                        type = "editor",
+                                                        title = "Notebook / Assignment",
+                                                        filePath = "{projectPath}/main.py",
+                                                    ),
+                                                ),
+                                        ),
+                                    ),
+                                right =
+                                    SinglePanel(
+                                        PanelConfig(
+                                            id = generatePanelId(),
+                                            tabs =
+                                                listOf(
+                                                    TabConfig(
+                                                        type = "browser",
+                                                        title = "Documentation / Python Docs",
+                                                        url = "https://docs.python.org/3/",
+                                                    ),
+                                                ),
+                                        ),
+                                    ),
+                            ),
+                        bottom =
+                            SinglePanel(
+                                PanelConfig(
+                                    id = generatePanelId(),
+                                    tabs =
+                                        listOf(
+                                            TabConfig(
+                                                type = "terminal",
+                                                title = "Python Shell",
+                                                initialCommand = "cd {projectPath} && python3",
+                                                workingDirectory = "{projectPath}",
+                                            ),
+                                        ),
+                                ),
+                            ),
+                    ),
+            ),
+            // Scientific Researcher: Paper Reference + Code + Simulation Terminal
+            LayoutWorkspace(
+                id = RESEARCHER_STUDIO_ID,
+                name = "Scientific Researcher",
+                description = "Research Papers + Code Base + Simulation Shell",
+                layout =
+                    HorizontalSplit(
+                        top =
+                            VerticalSplit(
+                                left =
+                                    SinglePanel(
+                                        PanelConfig(
+                                            id = generatePanelId(),
+                                            tabs =
+                                                listOf(
+                                                    TabConfig(
+                                                        type = "browser",
+                                                        title = "arXiv / Literature",
+                                                        url = "https://arxiv.org",
+                                                    ),
+                                                ),
+                                        ),
+                                    ),
+                                right =
+                                    SinglePanel(
+                                        PanelConfig(
+                                            id = generatePanelId(),
+                                            tabs =
+                                                listOf(
+                                                    TabConfig(
+                                                        type = "editor",
+                                                        title = "Research Notes / Code",
+                                                        filePath = "{projectPath}/README.md",
+                                                    ),
+                                                ),
+                                        ),
+                                    ),
+                            ),
+                        bottom =
+                            SinglePanel(
+                                PanelConfig(
+                                    id = generatePanelId(),
+                                    tabs =
+                                        listOf(
+                                            TabConfig(
+                                                type = "terminal",
+                                                title = "Analysis / Simulation",
+                                                initialCommand = "cd {projectPath}",
+                                                workingDirectory = "{projectPath}",
+                                            ),
+                                        ),
+                                ),
+                            ),
+                    ),
+            ),
+            // DevOps Operator: Infrastructure & Terminal Control
+            LayoutWorkspace(
+                id = DEVOPS_OPERATOR_ID,
+                name = "DevOps Operator",
+                description = "Infrastructure Terminal + Monitoring Browser",
+                layout =
+                    VerticalSplit(
+                        left =
+                            SinglePanel(
+                                PanelConfig(
+                                    id = generatePanelId(),
+                                    tabs =
+                                        listOf(
+                                            TabConfig(
+                                                type = "terminal",
+                                                title = "Cluster Control / kubectl",
+                                                initialCommand = "cd {projectPath}",
+                                                workingDirectory = "{projectPath}",
+                                            ),
+                                        ),
+                                ),
+                            ),
+                        right =
+                            SinglePanel(
+                                PanelConfig(
+                                    id = generatePanelId(),
+                                    tabs =
+                                        listOf(
+                                            TabConfig(
+                                                type = "browser",
+                                                title = "Service Metrics / Dashboard",
+                                                url = "https://github.com",
                                             ),
                                         ),
                                 ),
