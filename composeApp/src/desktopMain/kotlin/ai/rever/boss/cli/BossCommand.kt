@@ -21,10 +21,13 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -143,21 +146,31 @@ class BossTerminalCommand : CliktCommand(name = "terminal") {
 }
 
 /**
- * Queries running BOSS Console status (memory, active project, version).
+ * Queries running BOSS Console status (memory, active project, version, tool telemetry).
  * Usage:
  *   boss status
  *   boss status --json
+ *   boss status --tools
+ *   boss status --tools --json
  */
 class BossStatusCommand : CliktCommand(name = "status") {
     override fun help(context: Context) = "Queries status and health of the running BOSS Console instance"
 
     val json by option("--json", help = "Output status as JSON").flag(default = false)
+    val tools by option("--tools", help = "Output MCP tool execution telemetry and performance statistics")
+        .flag(default = false)
 
     override fun run() {
         val result = SingleInstanceManager.queryStatus()
         result.fold(
             onSuccess = { rawJson ->
-                if (json) {
+                if (tools) {
+                    if (json) {
+                        echo(formatToolsJson(rawJson))
+                    } else {
+                        echo(formatToolsTable(rawJson))
+                    }
+                } else if (json) {
                     echo(rawJson)
                 } else {
                     echo(formatHumanStatus(rawJson))
@@ -169,6 +182,120 @@ class BossStatusCommand : CliktCommand(name = "status") {
             },
         )
     }
+
+    private fun formatToolsJson(rawJson: String): String =
+        try {
+            val element = Json.parseToJsonElement(rawJson).jsonObject
+            val toolsElement = element["tools"] ?: buildJsonObject { put("tools", buildJsonArray {}) }
+            toolsElement.toString()
+        } catch (_: Exception) {
+            rawJson
+        }
+
+    private fun formatToolsTable(rawJson: String): String =
+        buildString {
+            appendLine("MCP Tool Execution Statistics")
+            appendLine("-----------------------------")
+            val rows =
+                try {
+                    parseToolStatusRows(rawJson)
+                } catch (_: Exception) {
+                    appendLine("Error parsing MCP tool telemetry from status response.")
+                    return@buildString
+                }
+
+            if (rows.isEmpty()) {
+                appendLine("No MCP tool invocations recorded yet.")
+                return@buildString
+            }
+
+            renderToolRows(this, rows)
+        }
+
+    private fun parseToolStatusRows(rawJson: String): List<ToolStatusRow> {
+        val element = Json.parseToJsonElement(rawJson).jsonObject
+        val toolsArray = extractToolsArray(element)
+        return toolsArray.mapNotNull { item ->
+            (item as? JsonObject)?.let { extractToolRow(it) }
+        }
+    }
+
+    private fun extractToolsArray(element: JsonObject): JsonArray =
+        when (val t = element["tools"]) {
+            is JsonArray -> t
+            is JsonObject -> t["tools"]?.jsonArray ?: JsonArray(emptyList())
+            else -> JsonArray(emptyList())
+        }
+
+    private fun extractToolRow(obj: JsonObject): ToolStatusRow? {
+        val name =
+            obj["tool"]?.jsonPrimitive?.contentOrNull
+                ?: obj["toolName"]?.jsonPrimitive?.contentOrNull
+                ?: return null
+        val calls =
+            obj["totalInvocations"]?.jsonPrimitive?.contentOrNull
+                ?: obj["invocations"]?.jsonPrimitive?.contentOrNull ?: "0"
+        val errors =
+            obj["totalErrors"]?.jsonPrimitive?.contentOrNull
+                ?: obj["errors"]?.jsonPrimitive?.contentOrNull ?: "0"
+        val errPct = obj["errorPercentage"]?.jsonPrimitive?.contentOrNull ?: "0.0"
+        val p50 =
+            obj["p50Ms"]?.jsonPrimitive?.contentOrNull
+                ?: obj["p50"]?.jsonPrimitive?.contentOrNull ?: "0"
+        val p99 =
+            obj["p99Ms"]?.jsonPrimitive?.contentOrNull
+                ?: obj["p99"]?.jsonPrimitive?.contentOrNull ?: "0"
+        return ToolStatusRow(
+            tool = name,
+            calls = calls,
+            errors = errors,
+            errorPct = "$errPct%",
+            p50 = p50,
+            p99 = p99,
+        )
+    }
+
+    private fun renderToolRows(
+        builder: StringBuilder,
+        rows: List<ToolStatusRow>,
+    ) {
+        val toolColWidth = rows.maxOf { it.tool.length }.coerceAtLeast(4).coerceAtMost(50)
+        val callsColWidth = rows.maxOf { it.calls.length }.coerceAtLeast(5)
+        val errorsColWidth = rows.maxOf { it.errors.length }.coerceAtLeast(6)
+        val pctColWidth = rows.maxOf { it.errorPct.length }.coerceAtLeast(7)
+        val p50ColWidth = rows.maxOf { it.p50.length }.coerceAtLeast(8)
+        val p99ColWidth = rows.maxOf { it.p99.length }.coerceAtLeast(8)
+
+        val header =
+            "TOOL".padEnd(toolColWidth) + "  " +
+                "CALLS".padStart(callsColWidth) + "  " +
+                "ERRORS".padStart(errorsColWidth) + "  " +
+                "ERROR %".padStart(pctColWidth) + "  " +
+                "P50 (ms)".padStart(p50ColWidth) + "  " +
+                "P99 (ms)".padStart(p99ColWidth)
+        builder.appendLine(header)
+        builder.appendLine("-".repeat(header.length))
+
+        for (row in rows) {
+            builder.appendLine(
+                row.tool.padEnd(toolColWidth) + "  " +
+                    row.calls.padStart(callsColWidth) + "  " +
+                    row.errors.padStart(errorsColWidth) + "  " +
+                    row.errorPct.padStart(pctColWidth) + "  " +
+                    row.p50.padStart(p50ColWidth) + "  " +
+                    row.p99.padStart(p99ColWidth),
+            )
+        }
+    }
+
+    private data class ToolStatusRow(
+        val tool: String,
+        val calls: String,
+        val errors: String,
+        val errorPct: String,
+        val p50: String,
+        val p99: String,
+    )
 
     private fun formatHumanStatus(rawJson: String): String =
         buildString {

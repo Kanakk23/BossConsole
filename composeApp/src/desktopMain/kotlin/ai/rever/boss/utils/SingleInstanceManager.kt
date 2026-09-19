@@ -10,6 +10,7 @@ import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -756,6 +757,7 @@ private fun buildLlmTokenResponse(providerOverride: (() -> Result<String>)?): St
 @Suppress("TooGenericExceptionCaught")
 internal fun buildStatusResponse(
     statusProviderOverride: (() -> String)?,
+    toolsJson: (() -> JsonElement)? = null,
     healthJson: () -> JsonObject = { WorkspaceHealthCollector().collect().toJson() },
 ): String {
     val rawJson =
@@ -794,6 +796,7 @@ internal fun buildStatusResponse(
                     )
                     // Never throws: a health source that cannot be read is reported as unchecked.
                     put("health", healthJson())
+                    toolsJson?.invoke()?.let { put("tools", it) }
                 }.toString()
             } catch (e: Exception) {
                 return RESPONSE_ERROR_PREFIX + (e.message ?: "Failed to query status")
@@ -1071,6 +1074,9 @@ object SingleInstanceManager {
     /** Test seam / host hook for status response. */
     internal var statusProviderOverride: (() -> String)? = null
 
+    /** Test seam / host hook for MCP tool telemetry response in status. */
+    internal var toolsProviderOverride: (() -> JsonElement)? = null
+
     /** Test seam / host hook for MCP tool list response. */
     internal var mcpListProviderOverride: (() -> String)? = null
 
@@ -1282,7 +1288,7 @@ object SingleInstanceManager {
             }
 
             request.verb == VERB_STATUS -> {
-                buildStatusResponse(statusProviderOverride)
+                buildStatusResponse(statusProviderOverride, toolsJson = toolsProviderOverride)
             }
 
             request.verb == VERB_MCP_LIST -> {
@@ -1622,6 +1628,7 @@ object SingleInstanceManager {
         published = null
         llmTokenProviderOverride = null
         statusProviderOverride = null
+        toolsProviderOverride = null
         mcpListProviderOverride = null
         mcpInvokeHandlerOverride = null
         pluginReloadHandlerOverride = null

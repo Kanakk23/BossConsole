@@ -34,6 +34,24 @@ class StatusHealthWiringTest {
         assertEquals("""{"running":true}""", decode(response).toString())
     }
 
+    @Test
+    fun `toolsJson parameter adds tools field beside health and other fields`() {
+        val health = buildJsonObject { put("degraded", false) }
+        val tools = buildJsonObject { put("tool_count", 3) }
+
+        val response =
+            buildStatusResponse(
+                statusProviderOverride = null,
+                healthJson = { health },
+                toolsJson = { tools },
+            )
+
+        val status = decode(response)
+        assertEquals(health, status["health"])
+        assertEquals(tools, status["tools"])
+        assertTrue("running" in status)
+    }
+
     private fun decode(response: String): JsonObject {
         val base64 = response.removePrefix(RESPONSE_STATUS_PREFIX).trim()
         return Json.parseToJsonElement(String(Base64.getDecoder().decode(base64), StandardCharsets.UTF_8)).jsonObject

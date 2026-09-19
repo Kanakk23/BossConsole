@@ -373,6 +373,10 @@ fun main(args: Array<String>) {
             true
         }
     }
+    SingleInstanceManager.toolsProviderOverride = {
+        ai.rever.boss.mcp.McpToolRegistryImpl.telemetryService
+            .toJsonElement()
+    }
     GlobalLogCapture.start()
     ResourceModeConfig.publishToPlugins()
 
