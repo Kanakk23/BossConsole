@@ -138,17 +138,18 @@ class BossMcpCommand : CliktCommand(name = "mcp") {
     override fun run() {
         val toolName = tool
         val argsValue = args
-        val deepLink = if (toolName != null) {
-            val encodedTool = URLEncoder.encode(toolName, "UTF-8")
-            val encodedArgs = argsValue?.let { URLEncoder.encode(it, "UTF-8") }
-            if (encodedArgs != null) {
-                "boss://mcp?tool=$encodedTool&args=$encodedArgs"
+        val deepLink =
+            if (toolName != null) {
+                val encodedTool = URLEncoder.encode(toolName, "UTF-8")
+                val encodedArgs = argsValue?.let { URLEncoder.encode(it, "UTF-8") }
+                if (encodedArgs != null) {
+                    "boss://mcp?tool=$encodedTool&args=$encodedArgs"
+                } else {
+                    "boss://mcp?tool=$encodedTool"
+                }
             } else {
-                "boss://mcp?tool=$encodedTool"
+                "boss://mcp"
             }
-        } else {
-            "boss://mcp"
-        }
         DeepLinkHandler.processDeepLink(deepLink, DeepLinkOrigin.OPERATOR_CLI)
     }
 }
