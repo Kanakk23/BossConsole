@@ -3406,6 +3406,10 @@ object FluckEngine {
         download.on(DownloadFinished::class.java) { event ->
             scope.launch {
                 downloadManager.updateStatus(downloadId, DownloadStatus.COMPLETED)
+                // Record in the persistent, cross-session history (in-memory downloadManager
+                // forgets on restart).
+                ai.rever.boss.downloads.DownloadHistoryManager
+                    .record(url, destinationPath)
                 // Remove from tracking maps
                 activeDownloadUrls.remove(url)
                 activeDownloads.remove(downloadId)

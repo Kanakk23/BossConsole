@@ -1,0 +1,92 @@
+package ai.rever.boss.mcp
+
+import ai.rever.boss.downloads.DownloadHistoryManager
+import ai.rever.boss.plugin.api.McpToolArgs
+import ai.rever.boss.plugin.api.McpToolResult
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
+import java.nio.file.Files
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+/**
+ * Contract tests for [DownloadHistoryMcpToolProvider], exercising each tool through its registered
+ * handler. The provider reads/writes the [DownloadHistoryManager] singleton, redirected to a
+ * hermetic temp file per test.
+ */
+class DownloadHistoryMcpToolProviderTest {
+    private lateinit var tempDir: File
+    private lateinit var tempFile: File
+
+    @BeforeTest
+    fun setUp() {
+        tempDir = Files.createTempDirectory("dl-mcp-test-").toFile()
+        tempFile = File(tempDir, "download-history.json")
+        DownloadHistoryManager.resetForTesting(tempFile)
+    }
+
+    @AfterTest
+    fun tearDown() {
+        DownloadHistoryManager.resetForTesting()
+        tempDir.deleteRecursively()
+    }
+
+    private suspend fun call(name: String): McpToolResult {
+        val tool = DownloadHistoryMcpToolProvider.tools().firstOrNull { it.name == name }
+        requireNotNull(tool) { "tool $name not found" }
+        return tool.handler.call(McpToolArgs(emptyMap(), "{}"))
+    }
+
+    private fun json(result: McpToolResult) = Json.parseToJsonElement(result.text).jsonObject
+
+    @Test
+    fun `only the list tool is read-only`() {
+        val readOnly = DownloadHistoryMcpToolProvider.tools().associate { it.name to it.readOnly }
+        assertEquals(true, readOnly["downloads_history_list"])
+        assertEquals(false, readOnly["downloads_history_clear"])
+    }
+
+    @Test
+    fun `list returns recorded downloads newest first`() =
+        runBlocking {
+            DownloadHistoryManager.record("https://ex.com/a.zip", "/d/a.zip")
+            DownloadHistoryManager.record("https://ex.com/b.pdf", "/d/b.pdf")
+
+            val entries = json(call("downloads_history_list"))["downloads"]!!.jsonArray
+            assertEquals(2, entries.size)
+            assertEquals(
+                "b.pdf",
+                entries
+                    .first()
+                    .jsonObject["fileName"]!!
+                    .jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun `clear empties the history`() =
+        runBlocking {
+            DownloadHistoryManager.record("u", "/d/a.txt")
+            val result = json(call("downloads_history_clear"))
+            assertEquals(1, result["removed"]!!.jsonPrimitive.content.toInt())
+            assertTrue(DownloadHistoryManager.downloads.value.isEmpty())
+        }
+
+    @Test
+    fun `a record with no size omits the sizeBytes field`() =
+        runBlocking {
+            DownloadHistoryManager.record("u", "/d/a.txt")
+            val entry = json(call("downloads_history_list"))["downloads"]!!.jsonArray.first().jsonObject
+            assertNull(entry["sizeBytes"])
+            assertFalse(entry["fileName"]!!.jsonPrimitive.content.isEmpty())
+        }
+}

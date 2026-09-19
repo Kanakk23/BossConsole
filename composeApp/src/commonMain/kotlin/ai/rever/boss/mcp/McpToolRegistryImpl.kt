@@ -126,6 +126,7 @@ object McpToolRegistryImpl : McpToolRegistry {
     init {
         registerProvider(WorkspaceMcpToolProvider)
         registerProvider(WorkspacePortabilityMcpToolProvider)
+        registerProvider(DownloadHistoryMcpToolProvider)
     }
 
     override val allTools: StateFlow<List<RegisteredMcpTool>> get() = core.allTools
