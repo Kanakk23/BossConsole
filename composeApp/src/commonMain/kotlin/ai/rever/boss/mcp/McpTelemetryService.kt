@@ -9,12 +9,24 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 /**
  * Performance & Telemetry statistics for a single MCP tool.
  */
+@Serializable
+data class McpToolMetricsDto(
+    val toolName: String,
+    val callCount: Long,
+    val successCount: Long,
+    val failureCount: Long,
+    val timeoutCount: Long,
+    val avgDurationMs: Double,
+    val successRate: Double,
+)
+
 data class McpToolMetrics(
     val toolName: String,
     val callCount: Long = 0L,
@@ -31,6 +43,16 @@ data class McpToolMetrics(
 
     val successRate: Double
         get() = if (callCount > 0) (successCount.toDouble() / callCount) * 100.0 else 100.0
+
+    fun toDto(): McpToolMetricsDto = McpToolMetricsDto(
+        toolName = toolName,
+        callCount = callCount,
+        successCount = successCount,
+        failureCount = failureCount,
+        timeoutCount = timeoutCount,
+        avgDurationMs = avgDurationMs,
+        successRate = successRate,
+    )
 }
 
 /**
@@ -105,18 +127,8 @@ object McpTelemetryService {
                 name = "tool_stats",
                 description = "Retrieves execution statistics (latency, call count, success rate) for all MCP tools.",
                 handler = McpToolHandler {
-                    val allMetrics = getAllMetrics().map { m ->
-                        mapOf(
-                            "toolName" to m.toolName,
-                            "callCount" to m.callCount,
-                            "successCount" to m.successCount,
-                            "failureCount" to m.failureCount,
-                            "timeoutCount" to m.timeoutCount,
-                            "avgDurationMs" to m.avgDurationMs,
-                            "successRate" to m.successRate,
-                        )
-                    }
-                    val jsonStr = Json.encodeToString(allMetrics)
+                    val dtos = getAllMetrics().map { it.toDto() }
+                    val jsonStr = Json.encodeToString(dtos)
                     McpToolResult(jsonStr)
                 },
             )
