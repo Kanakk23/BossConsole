@@ -9,6 +9,7 @@
 
 /** `victim@example.com` -> `v***@example.com` */
 export function maskEmail(email: string): string {
+  if (typeof email !== 'string' || email.length === 0) return '***'
   const at = email.indexOf('@')
   if (at === -1) return '***'
   return `${email.slice(0, 1)}***@${email.slice(at + 1)}`
@@ -16,5 +17,6 @@ export function maskEmail(email: string): string {
 
 /** `de305d54-75b4-431b-adb2-eb6b9e546014` -> `de30…` */
 export function maskUserId(userId: string): string {
+  if (typeof userId !== 'string' || userId.length === 0) return '***'
   return userId.length <= 4 ? '***' : `${userId.slice(0, 4)}…`
 }
