@@ -29,8 +29,23 @@ import java.util.concurrent.atomic.AtomicInteger
 actual object URLHandlerService {
     private val logger = BossLogger.forComponent("URLHandlerService")
 
-    // Queue for URLs received before the app is ready
-    private val urlQueue = mutableListOf<String>()
+    // Queue for URLs received before the app is ready. The confirmation
+    // requirement is carried with the URL: a `boss://url` link arriving at cold
+    // start would otherwise lose it in the queue and open unattended once the
+    // queue drains.
+    private val urlQueue = mutableListOf<QueuedUrlOpen>()
+
+    private data class QueuedUrlOpen(
+        val url: String,
+        val requiresConfirmation: Boolean,
+    )
+
+    /**
+     * Bound on tab opens per [UrlOpenRateLimiter.WINDOW_MS]. `boss://` and
+     * http/https are both registered with the OS, so any program or web page
+     * can hand BOSS a stream of these; without a bound each one is a new tab.
+     */
+    private val openRateLimiter = UrlOpenRateLimiter()
 
     // Flag to track if the app is ready to handle URLs
     @Volatile
@@ -81,8 +96,8 @@ actual object URLHandlerService {
         val urls = urlQueue.toList()
         urlQueue.clear()
 
-        urls.forEach { url ->
-            handleURLInternal(url)
+        urls.forEach { queued ->
+            handleURLInternal(queued.url, queued.requiresConfirmation)
         }
     }
 
@@ -95,15 +110,31 @@ actual object URLHandlerService {
      * If the app is not ready yet, queues the URL for later processing.
      *
      * @param url The http/https URL to open
+     * @param requiresConfirmation See the expect declaration.
      */
-    actual fun handleURL(url: String) {
-        if (!isAppReady) {
-            logger.debug(LogCategory.BROWSER, "App not ready, queueing URL", mapOf("url" to url))
-            urlQueue.add(url)
+    actual fun handleURL(
+        url: String,
+        requiresConfirmation: Boolean,
+    ) {
+        // Bounded at intake, before the queue: a burst arriving at cold start
+        // must not grow it unboundedly, and one arriving when ready must not
+        // open (or prompt) without limit either.
+        if (!openRateLimiter.tryAcquire()) {
+            logger.warn(
+                LogCategory.BROWSER,
+                "URL open rate-limited",
+                mapOf("url" to LogSanitizer.maskUriParams(url)),
+            )
             return
         }
 
-        handleURLInternal(url)
+        if (!isAppReady) {
+            logger.debug(LogCategory.BROWSER, "App not ready, queueing URL", mapOf("url" to url))
+            urlQueue.add(QueuedUrlOpen(url, requiresConfirmation))
+            return
+        }
+
+        handleURLInternal(url, requiresConfirmation)
     }
 
     /**
@@ -115,7 +146,10 @@ actual object URLHandlerService {
      * Tracks processing state to prevent race conditions when checking if tabs
      * are being created.
      */
-    private fun handleURLInternal(url: String) {
+    private fun handleURLInternal(
+        url: String,
+        requiresConfirmation: Boolean,
+    ) {
         // Track whether THIS specific invocation incremented the counter
         // Used for thread-safe error handling to avoid decrementing other threads' counts
         var incremented = false
@@ -162,7 +196,7 @@ actual object URLHandlerService {
             // Emit URL open event - focused window will handle it
             CoroutineScope(Dispatchers.Main).launch {
                 try {
-                    URLEventBus.openURL(url, title, sourceWindowId = focusedWindowId)
+                    URLEventBus.openURL(url, title, sourceWindowId = focusedWindowId, requiresConfirmation = requiresConfirmation)
                     logger.debug(LogCategory.BROWSER, "Emitted URL open event", mapOf("url" to url, "windowId" to focusedWindowId))
 
                     // CRITICAL: Wait for tab to actually be created before decrementing
@@ -285,7 +319,7 @@ actual object URLHandlerService {
      */
     actual fun handleURLs(urls: List<String>) {
         urls.forEach { url ->
-            handleURL(url)
+            handleURL(url, requiresConfirmation = false)
         }
     }
 }
