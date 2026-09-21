@@ -225,16 +225,7 @@ actual object URLHandlerService {
                     delay(500)
                 } finally {
                     // Decrement counter after tab has time to be created
-                    val count = processingCount.decrementAndGet()
-                    _isProcessing.value = (count > 0)
-                    logger.debug(
-                        LogCategory.BROWSER,
-                        "Processing count decremented",
-                        mapOf(
-                            "count" to count,
-                            "isProcessing" to _isProcessing.value,
-                        ),
-                    )
+                    decrementProcessingCount("Processing count decremented")
                 }
             }
         } catch (e: Exception) {
@@ -242,18 +233,22 @@ actual object URLHandlerService {
             // Only decrement if THIS specific invocation actually incremented
             // This prevents decrementing other threads' counts in multi-threaded scenarios
             if (incremented) {
-                val count = processingCount.decrementAndGet()
-                _isProcessing.value = (count > 0)
-                logger.debug(
-                    LogCategory.BROWSER,
-                    "Processing count decremented due to error",
-                    mapOf(
-                        "count" to count,
-                        "isProcessing" to _isProcessing.value,
-                    ),
-                )
+                decrementProcessingCount("Processing count decremented due to error")
             }
         }
+    }
+
+    private fun decrementProcessingCount(logMessage: String) {
+        val count = processingCount.decrementAndGet()
+        _isProcessing.value = (count > 0)
+        logger.debug(
+            LogCategory.BROWSER,
+            logMessage,
+            mapOf(
+                "count" to count,
+                "isProcessing" to _isProcessing.value,
+            ),
+        )
     }
 
     /**
