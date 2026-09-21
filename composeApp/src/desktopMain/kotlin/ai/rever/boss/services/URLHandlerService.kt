@@ -196,7 +196,12 @@ actual object URLHandlerService {
             // Emit URL open event - focused window will handle it
             CoroutineScope(Dispatchers.Main).launch {
                 try {
-                    URLEventBus.openURL(url, title, sourceWindowId = focusedWindowId, requiresConfirmation = requiresConfirmation)
+                    URLEventBus.openURL(
+                        url,
+                        title,
+                        sourceWindowId = focusedWindowId,
+                        requiresConfirmation = requiresConfirmation,
+                    )
                     logger.debug(LogCategory.BROWSER, "Emitted URL open event", mapOf("url" to url, "windowId" to focusedWindowId))
 
                     // CRITICAL: Wait for tab to actually be created before decrementing

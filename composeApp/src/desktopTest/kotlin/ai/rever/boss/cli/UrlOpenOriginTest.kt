@@ -56,9 +56,11 @@ class UrlOpenOriginTest {
             UrlOpenDisposition.OPEN,
             urlOpenDisposition(longUrl, DeepLinkOrigin.OPERATOR_CLI),
         )
+        // Exactly at the display bound the URL still fits, so it confirms.
+        val boundaryUrl = "https://e.co/" + "a".repeat(URL_CONFIRM_MAX_URL_LENGTH - 13)
         assertEquals(
             UrlOpenDisposition.CONFIRM,
-            urlOpenDisposition("https://e.co/" + "a".repeat(URL_CONFIRM_MAX_URL_LENGTH - 13), DeepLinkOrigin.EXTERNAL),
+            urlOpenDisposition(boundaryUrl, DeepLinkOrigin.EXTERNAL),
         )
     }
 
