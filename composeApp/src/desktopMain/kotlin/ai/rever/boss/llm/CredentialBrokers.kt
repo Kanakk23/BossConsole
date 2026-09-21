@@ -14,13 +14,13 @@ import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
-import java.net.URI
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import java.net.URI
 import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 
@@ -94,25 +94,30 @@ internal object CredentialBrokers {
      * bearer at a host of its choosing.
      */
     internal fun resolveRisaTokenUrl(override: String?): String {
-        if (override.isNullOrBlank()) return RISA_TOKEN_URL
+        val trimmed = override?.trim().orEmpty()
         val host =
             try {
-                URI(override.trim())
+                URI(trimmed)
                     .takeIf { it.scheme?.equals("https", ignoreCase = true) == true }
                     ?.host
             } catch (_: Exception) {
                 null
             }
         val normalized = host?.lowercase()?.removeSuffix(".")
-        if (normalized != null && (normalized == RISA_HOST || normalized.endsWith(".$RISA_HOST"))) {
-            return override.trim()
+        return if (normalized != null && (normalized == RISA_HOST || normalized.endsWith(".$RISA_HOST"))) {
+            trimmed
+        } else {
+            // A blank override is the normal case and stays quiet; a non-blank value that
+            // failed validation is worth a masked warning.
+            if (trimmed.isNotEmpty()) {
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "$RISA_TOKEN_URL_ENV override rejected - using the built-in endpoint",
+                    mapOf("override" to LogSanitizer.describeUri(override)),
+                )
+            }
+            RISA_TOKEN_URL
         }
-        logger.warn(
-            LogCategory.SYSTEM,
-            "$RISA_TOKEN_URL_ENV override rejected - using the built-in endpoint",
-            mapOf("override" to LogSanitizer.describeUri(override)),
-        )
-        return RISA_TOKEN_URL
     }
 }
 
