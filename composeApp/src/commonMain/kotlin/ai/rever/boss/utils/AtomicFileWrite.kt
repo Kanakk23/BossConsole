@@ -116,28 +116,36 @@ fun File.atomicWriteText(text: String) {
  */
 private fun File.verifiedWriteParent(): Path {
     val declared =
-        (parentFile ?: absoluteFile.parentFile)?.also { it.mkdirs() }
+        (parentFile ?: absoluteFile.parentFile)
             ?: throw IOException("Cannot resolve a parent directory for $path")
+    declared.mkdirs()
     val declaredPath = declared.toPath()
-    if (Files.isSymbolicLink(declaredPath)) {
-        throw IOException("Refusing to write through a symlinked directory: ${declared.path}")
-    }
+    declaredPath.throwIfSymlinked()
     val real = declaredPath.toRealPath()
-    if (!Files.isDirectory(real)) {
-        throw IOException("Refusing to write into a non-directory: ${declared.path}")
-    }
-    if (Files.isSymbolicLink(declaredPath)) {
-        // Swapped for a link while resolving: real now points wherever the link does.
-        throw IOException("Refusing to write through a symlinked directory: ${declared.path}")
-    }
-    Files.getFileAttributeView(real, PosixFileAttributeView::class.java)?.let { posix ->
-        val owner = posix.readAttributes().owner().name
-        val currentUser = System.getProperty("user.name")
-        if (owner != currentUser) {
-            throw IOException(
-                "Refusing to write into $real: owned by $owner, this process runs as $currentUser",
-            )
-        }
-    }
+    real.throwIfNotDirectory()
+    // Swapped for a link while resolving: real now points wherever the link does.
+    declaredPath.throwIfSymlinked()
+    real.throwIfNotOwnedByCurrentUser()
     return real
+}
+
+private fun Path.throwIfSymlinked() {
+    if (Files.isSymbolicLink(this)) {
+        throw IOException("Refusing to write through a symlinked directory: $this")
+    }
+}
+
+private fun Path.throwIfNotDirectory() {
+    if (!Files.isDirectory(this)) {
+        throw IOException("Refusing to write into a non-directory: $this")
+    }
+}
+
+private fun Path.throwIfNotOwnedByCurrentUser() {
+    val posix = Files.getFileAttributeView(this, PosixFileAttributeView::class.java) ?: return
+    val owner = posix.readAttributes().owner().name
+    val currentUser = System.getProperty("user.name")
+    if (owner != currentUser) {
+        throw IOException("Refusing to write into $this: owned by $owner, this process runs as $currentUser")
+    }
 }
