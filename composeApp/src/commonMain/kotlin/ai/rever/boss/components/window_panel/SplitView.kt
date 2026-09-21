@@ -47,6 +47,7 @@ import ai.rever.boss.plugin.tab.jupyter.JupyterTabInfo
 import ai.rever.boss.plugin.tab.terminal.TerminalTabInfo
 import ai.rever.boss.plugin.tab.terminal.TerminalTabType
 import ai.rever.boss.plugin.ui.BossTheme
+import ai.rever.boss.plugin.workspace.uniqueId
 import ai.rever.boss.project.DefaultWorkingDirectory
 import ai.rever.boss.topofmind.ActiveTab
 import ai.rever.boss.utils.extractFileName
@@ -902,6 +903,20 @@ class SplitViewState(
             ?: DefaultWorkingDirectory.resolve(projectPath)
     }
 
+    /**
+     * Mint a tab id that no tab this window is running already holds. [uniqueId]'s random
+     * suffix is what makes a same-millisecond collision vanishingly rare; the lookup is
+     * the deterministic backstop, since a tab id is addressed across every workspace
+     * this window has live.
+     */
+    private fun mintTabId(prefix: String): String {
+        var id = uniqueId(prefix)
+        while (findTabLocation(id) != null) {
+            id = uniqueId(prefix)
+        }
+        return id
+    }
+
     @Suppress("ReturnCount")
     internal fun openTerminalInActivePanelNow(
         command: String?,
@@ -925,7 +940,7 @@ class SplitViewState(
             // Create terminal tab in first available panel
             val terminalTab =
                 TerminalTabInfo(
-                    id = "terminal-${System.currentTimeMillis()}",
+                    id = mintTabId("terminal"),
                     typeId = TabTypeId("terminal"),
                     title = if (command != null) "Terminal: $command" else "Terminal",
                     initialCommand = command,
@@ -957,7 +972,7 @@ class SplitViewState(
         // Create new terminal tab in active panel
         val terminalTab =
             TerminalTabInfo(
-                id = "terminal-${System.currentTimeMillis()}",
+                id = mintTabId("terminal"),
                 typeId = TabTypeId("terminal"),
                 title = if (command != null) "Terminal: $command" else "Terminal",
                 initialCommand = command,

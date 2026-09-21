@@ -49,6 +49,7 @@ import ai.rever.boss.plugin.api.PanelInfo
 import ai.rever.boss.plugin.api.TabTypeInfo
 import ai.rever.boss.plugin.tab.terminal.TerminalTabInfo
 import ai.rever.boss.plugin.tab.terminal.TerminalTabType
+import ai.rever.boss.plugin.workspace.uniqueId
 import ai.rever.boss.project.DefaultWorkingDirectory
 import ai.rever.boss.run.RunConfigurationManager
 import ai.rever.boss.run.RunExecutionService
@@ -933,11 +934,15 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
         DashboardEventBus.newTerminalEvents
             .filter { event -> event.sourceWindowId == windowId }
             .onEach {
-                val timestamp = System.currentTimeMillis()
                 val projectPath = windowProjectState.selectedProject.value.path
+                // The id addresses the tab across every workspace this window runs:
+                // entropy first, then the findTabLocation scan as the backstop.
+                val terminalTabId =
+                    generateSequence { uniqueId("terminal") }
+                        .first { splitViewState.findTabLocation(it) == null }
                 val terminalTab =
                     TerminalTabInfo(
-                        id = "terminal-$timestamp",
+                        id = terminalTabId,
                         typeId = TerminalTabType.typeId,
                         title = "Terminal",
                         icon = TerminalTabType.icon,

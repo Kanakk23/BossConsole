@@ -100,6 +100,7 @@ import ai.rever.boss.plugin.sandbox.notification.PluginSandboxNotificationListen
 import ai.rever.boss.plugin.sandbox.notification.PluginToastState
 import ai.rever.boss.plugin.ui.BossThemes
 import ai.rever.boss.plugin.ui.ContextMenuItemData
+import ai.rever.boss.plugin.workspace.uniqueId
 import ai.rever.boss.search.ContentSearchService
 import ai.rever.boss.search.SearchRegistryImpl
 import ai.rever.boss.services.auth.AuthDataProviderImpl
@@ -2004,7 +2005,12 @@ private class ApiActiveTabsProviderAdapter(
         url: String,
         title: String,
     ): String? {
-        val tabId = "plugin-tab-${kotlin.time.Clock.System.now().toEpochMilliseconds()}"
+        // The id is how MCP and search address the tab across every workspace this window
+        // is running, so it must not collide with a live one: entropy first, then the
+        // findTabLocation scan as the deterministic backstop.
+        val tabId =
+            generateSequence { uniqueId("plugin-tab") }
+                .first { splitViewState.findTabLocation(it) == null }
         val fluckTab =
             ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo(
                 id = tabId,
@@ -2191,7 +2197,12 @@ private class DefaultBackgroundTaskProvider(
         task: suspend () -> Unit,
     ): BackgroundTaskHandle? =
         try {
-            val taskId = "$name-${System.currentTimeMillis()}"
+            // taskId keys activeTasks and is captured by the task's own finally: two
+            // same-named tasks launched in one millisecond used to share a key, the
+            // second put clobbering the first's handle.
+            val taskId =
+                generateSequence { uniqueId(name) }
+                    .first { !activeTasks.containsKey(it) }
             val job =
                 scope.launch {
                     try {

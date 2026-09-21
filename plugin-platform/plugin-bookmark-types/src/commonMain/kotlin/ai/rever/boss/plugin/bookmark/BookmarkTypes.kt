@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin.bookmark
 
 import ai.rever.boss.plugin.workspace.TabConfig
+import ai.rever.boss.plugin.workspace.uniqueId
 import androidx.compose.runtime.Immutable
 import kotlinx.serialization.Serializable
 import kotlin.time.Clock
@@ -54,9 +55,10 @@ data class Bookmark(
 ) {
     companion object {
         /**
-         * Generate a unique bookmark ID based on current timestamp.
+         * Generate a unique bookmark ID based on current timestamp plus entropy - two
+         * mints inside one clock millisecond must not hand out the same id.
          */
-        fun generateId(): String = "bookmark-${Clock.System.now().toEpochMilliseconds()}"
+        fun generateId(): String = uniqueId("bookmark")
     }
 
     /**
@@ -94,9 +96,10 @@ data class BookmarkCollection(
 ) {
     companion object {
         /**
-         * Generate a unique collection ID based on current timestamp.
+         * Generate a unique collection ID based on current timestamp plus entropy - two
+         * mints inside one clock millisecond must not hand out the same id.
          */
-        fun generateId(): String = "collection-${Clock.System.now().toEpochMilliseconds()}"
+        fun generateId(): String = uniqueId("collection")
 
         /**
          * Special collection name for favorites.
@@ -106,8 +109,20 @@ data class BookmarkCollection(
 
     /**
      * Add a bookmark to this collection.
+     *
+     * A bookmark's id is its identity everywhere below - findBookmark, updateBookmark and
+     * removeBookmark all key on it - so an id already held must not enter the list twice:
+     * re-mint rather than leave both entries answering to one id.
      */
-    fun addBookmark(bookmark: Bookmark): BookmarkCollection = copy(bookmarks = bookmarks + bookmark)
+    fun addBookmark(bookmark: Bookmark): BookmarkCollection {
+        val resolved =
+            if (bookmarks.any { it.id == bookmark.id }) {
+                bookmark.copy(id = generateSequence { Bookmark.generateId() }.first { id -> bookmarks.none { it.id == id } })
+            } else {
+                bookmark
+            }
+        return copy(bookmarks = bookmarks + resolved)
+    }
 
     /**
      * Remove a bookmark from this collection.
