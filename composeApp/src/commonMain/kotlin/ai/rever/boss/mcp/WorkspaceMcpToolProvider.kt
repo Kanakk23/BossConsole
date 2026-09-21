@@ -936,20 +936,11 @@ object WorkspaceMcpToolProvider : McpToolProvider {
                 }
             } else {
                 // Read-only targeting, the same rule list_workspaces uses: closing a workspace
-                // must never mint a window. With exactly one registered window it is the only
-                // possible target; with none there is nothing to close in, though a
-                // disposable file below can still be deleted.
+                // must never mint a window. Exactly one registered window is the only possible
+                // target; with none there is nothing to close in, though the disposable-file
+                // delete below can still run.
                 val openWindowIds = SplitViewStateRegistry.getAllStates().keys
-                if (openWindowIds.size > 1) {
-                    // Ambiguity used to collapse to null here and surface only as a generic
-                    // "nothing was closed" - an agent cannot act on that. Name the
-                    // candidates so the caller can retry with one, and change nothing.
-                    return McpToolResult(
-                        "Multiple windows are open (${openWindowIds.joinToString(", ")}); " +
-                            "pass 'windowId' to choose which window to close '$workspaceId' in.",
-                        isError = true,
-                    )
-                }
+                ambiguousWindowError(workspaceId, openWindowIds)?.let { return it }
                 openWindowIds.singleOrNull()
             }
 
@@ -963,30 +954,14 @@ object WorkspaceMcpToolProvider : McpToolProvider {
             }
         }
 
-        // Only delete the file of a disposable workspace this tool minted (prefix, not
-        // substring): a user's saved Space whose name merely mentions "disposable" is not ours.
-        var fileDeleted = false
-        if (workspaceId.startsWith(DISPOSABLE_ID_PREFIX)) {
-            val fileName =
-                if (workspaceId.endsWith(".json")) {
-                    workspaceId
-                } else {
-                    WorkspaceFileManagerCommon.fileNameForId(workspaceId)
-                }
-            fileDeleted = getFileManager().deleteWorkspace(fileName)
-        }
+        val fileDeleted = deleteDisposableWorkspaceFile(workspaceId)
 
         // Saying "success" when neither happened leaves the agent unable to tell "closed"
-        // from "that id does not exist anywhere".
+        // from "that id does not exist anywhere". Zero registered windows is said plainly so
+        // the agent knows there is no windowId it could pass - "(none)" alone read like a
+        // missing target.
         if (!releasedHere && !fileDeleted) {
-            val where =
-                if (targetWindowId != null) {
-                    "in window '$targetWindowId'"
-                } else {
-                    // Only reachable with zero registered windows - ambiguity above already
-                    // returned for the multi-window case.
-                    "in any window (none are open)"
-                }
+            val where = targetWindowId?.let { "in window '$it'" } ?: "in any window (none are open)"
             return McpToolResult(
                 "Workspace '$workspaceId' is not running $where " +
                     "and has no disposable file to delete; nothing was closed.",
@@ -1006,6 +981,41 @@ object WorkspaceMcpToolProvider : McpToolProvider {
             }
 
         return McpToolResult(response.toString())
+    }
+
+    /**
+     * The actionable refusal for a `close_workspace` call that named no `windowId` while
+     * several windows are open. Ambiguity used to collapse to a null target and surface only
+     * as a generic "nothing was closed", which an agent cannot act on - the error names the
+     * candidates so the caller can retry with one, and nothing has been changed when it fires.
+     * Returns null when zero or one window is open, where targeting is unambiguous.
+     */
+    private fun ambiguousWindowError(
+        workspaceId: String,
+        openWindowIds: Set<String>,
+    ): McpToolResult? {
+        if (openWindowIds.size <= 1) return null
+        return McpToolResult(
+            "Multiple windows are open (${openWindowIds.joinToString(", ")}); " +
+                "pass 'windowId' to choose which window to close '$workspaceId' in.",
+            isError = true,
+        )
+    }
+
+    /**
+     * Deletes the file of a disposable workspace this tool minted - prefix, not substring:
+     * a user's saved Space whose name merely mentions "disposable" is not ours. Independent
+     * of window targeting - the file lives on disk, not in a window.
+     */
+    private fun deleteDisposableWorkspaceFile(workspaceId: String): Boolean {
+        if (!workspaceId.startsWith(DISPOSABLE_ID_PREFIX)) return false
+        val fileName =
+            if (workspaceId.endsWith(".json")) {
+                workspaceId
+            } else {
+                WorkspaceFileManagerCommon.fileNameForId(workspaceId)
+            }
+        return getFileManager().deleteWorkspace(fileName)
     }
 
     private fun createDefaultWorkspace(
