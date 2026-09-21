@@ -117,7 +117,11 @@ data class BookmarkCollection(
     fun addBookmark(bookmark: Bookmark): BookmarkCollection {
         val resolved =
             if (bookmarks.any { it.id == bookmark.id }) {
-                bookmark.copy(id = generateSequence { Bookmark.generateId() }.first { id -> bookmarks.none { it.id == id } })
+                bookmark.copy(
+                    id =
+                        generateSequence { Bookmark.generateId() }
+                            .first { id -> bookmarks.none { it.id == id } },
+                )
             } else {
                 bookmark
             }
