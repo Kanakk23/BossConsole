@@ -937,8 +937,20 @@ object WorkspaceMcpToolProvider : McpToolProvider {
             } else {
                 // Read-only targeting, the same rule list_workspaces uses: closing a workspace
                 // must never mint a window. With exactly one registered window it is the only
-                // possible target; with none or several there is nothing safe to close in.
-                SplitViewStateRegistry.getAllStates().keys.singleOrNull()
+                // possible target; with none there is nothing to close in, though a
+                // disposable file below can still be deleted.
+                val openWindowIds = SplitViewStateRegistry.getAllStates().keys
+                if (openWindowIds.size > 1) {
+                    // Ambiguity used to collapse to null here and surface only as a generic
+                    // "nothing was closed" - an agent cannot act on that. Name the
+                    // candidates so the caller can retry with one, and change nothing.
+                    return McpToolResult(
+                        "Multiple windows are open (${openWindowIds.joinToString(", ")}); " +
+                            "pass 'windowId' to choose which window to close '$workspaceId' in.",
+                        isError = true,
+                    )
+                }
+                openWindowIds.singleOrNull()
             }
 
         // Stop the Space where it is running: clears its tabs and drops any preserved copy,
@@ -967,8 +979,16 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         // Saying "success" when neither happened leaves the agent unable to tell "closed"
         // from "that id does not exist anywhere".
         if (!releasedHere && !fileDeleted) {
+            val where =
+                if (targetWindowId != null) {
+                    "in window '$targetWindowId'"
+                } else {
+                    // Only reachable with zero registered windows - ambiguity above already
+                    // returned for the multi-window case.
+                    "in any window (none are open)"
+                }
             return McpToolResult(
-                "Workspace '$workspaceId' is not running in window '${targetWindowId ?: "(none)"}' " +
+                "Workspace '$workspaceId' is not running $where " +
                     "and has no disposable file to delete; nothing was closed.",
                 isError = true,
             )
