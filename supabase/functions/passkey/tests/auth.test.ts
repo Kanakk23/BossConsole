@@ -320,3 +320,49 @@ Deno.test("checkAuthStatus - should return expired for non-existent session", as
     assertEquals(result.message, 'Session not found or expired')
   }
 })
+
+Deno.test("generateAuthChallenge - logs carry no raw email or user id", async () => {
+  const mockClient = createMockSupabaseClient()
+
+  mockClient.mockResponse('rpc.find_user_by_email', {
+    data: [{ id: 'user-456', email: 'victim@example.com' }],
+    error: null
+  }, 'call')
+  mockClient.mockResponse('user_passkeys', {
+    data: [mockPasskey],
+    error: null
+  }, 'select')
+  mockClient.mockResponse('passkey_challenges', {
+    data: [{ id: 'challenge-789' }],
+    error: null
+  }, 'insert')
+
+  const logged: string[] = []
+  const originals = {
+    log: console.log,
+    error: console.error,
+    warn: console.warn,
+    info: console.info
+  }
+  const capture = (...args: unknown[]) => {
+    logged.push(args.map(arg => typeof arg === 'string' ? arg : JSON.stringify(arg)).join(' '))
+  }
+  console.log = capture
+  console.error = capture
+  console.warn = capture
+  console.info = capture
+  try {
+    await generateAuthChallenge(mockClient as unknown as SupabaseClient, 'victim@example.com', 'session-xyz')
+  } finally {
+    console.log = originals.log
+    console.error = originals.error
+    console.warn = originals.warn
+    console.info = originals.info
+  }
+
+  assertExists(logged.find(line => line.includes('v***@example.com')))
+  for (const line of logged) {
+    assertEquals(line.includes('victim@example.com'), false, `log leaked raw email: ${line}`)
+    assertEquals(line.includes('user-456'), false, `log leaked raw user id: ${line}`)
+  }
+})

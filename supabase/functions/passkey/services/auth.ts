@@ -17,6 +17,7 @@ import { withErrorHandler, withStatusErrorHandler } from "../utils/error-handler
 import { generateSupabaseAccessToken } from "../utils/jwt.ts"
 import { ALLOWED_ORIGINS, getAllowedOrigins, getAllowedRpIds, getRpId, rpIdMatchesOrigin } from "../utils/config.ts"
 import { normalizeBase64Url } from "../utils/base64.ts"
+import { maskEmail, maskUserId } from "../utils/logging.ts"
 import {
   challengeMatches,
   COSE_ALG_ES256,
@@ -78,7 +79,7 @@ function inertChallenge(sessionId?: string) {
  */
 export const generateAuthChallenge = withErrorHandler(
   async (supabase: SupabaseClient, email: string, sessionId?: string) => {
-    console.log('🔑 Generating authentication challenge for email:', email)
+    console.log('🔑 Generating authentication challenge for email:', maskEmail(email))
 
     // Use utility function for scalable user lookup
     const userResult = await findUserByEmail(supabase, email)
@@ -89,7 +90,7 @@ export const generateAuthChallenge = withErrorHandler(
     }
 
     const userId = userResult.user.id
-    console.log('Resolved email to user ID:', userId)
+    console.log('Resolved email to user ID:', maskUserId(userId))
 
     // Get user's passkeys
     const passkeyResult = await getUserPasskeys(supabase, userId)
@@ -334,7 +335,7 @@ export const completeAuthentication = withErrorHandler(
       }
     }
 
-    console.log('✅ Authentication successful for user:', passkey.user_id)
+    console.log('✅ Authentication successful for user:', maskUserId(passkey.user_id))
 
     // Mint the session *before* writing the completion row, so the row is only
     // ever published complete.
@@ -374,7 +375,7 @@ export const completeAuthentication = withErrorHandler(
     console.log('🔍 Challenge data:', {
       has_session_id: !!challengeData.session_id,
       session_id: challengeData.session_id,
-      user_id: passkey.user_id
+      user_id: maskUserId(passkey.user_id)
     })
 
     if (challengeData.session_id) {
@@ -515,7 +516,7 @@ export const checkAuthStatus = withStatusErrorHandler(
         }
       }
 
-      console.log('✅ Found completed authentication:', completedAuth.user_id)
+      console.log('✅ Found completed authentication:', maskUserId(completedAuth.user_id))
 
       // Replay the session recorded when the ceremony completed, once. Minting a
       // new session on every poll churns auth.sessions rows (and invalidates the
@@ -570,7 +571,7 @@ export const checkAuthStatus = withStatusErrorHandler(
       }
 
       // Generate Supabase session for passkey authentication
-      console.log('🎫 Generating Supabase session for passkey auth:', userResult.user.email)
+      console.log('🎫 Generating Supabase session for passkey auth:', maskEmail(userResult.user.email))
 
       const tokens = await generateSupabaseAccessToken(supabase, userResult.user.email)
 

@@ -528,3 +528,55 @@ Deno.test("GET /register/mobile - a request-supplied rpName cannot spoof the rel
   assertEquals(body.includes("Microsoft Security"), false)
   assertStringIncludes(body, "const rpName = 'BOSS'")
 })
+
+Deno.test("generateMobileRegistrationPage - logs carry no raw email or user id", async () => {
+  const mockClient = createMockSupabaseClient()
+
+  mockClient.mockResponse('passkey_challenges', {
+    data: {
+      ...mockChallenge,
+      type: 'registration',
+      expires_at: new Date(Date.now() + 60000).toISOString()
+    },
+    error: null
+  }, 'select')
+  mockClient.mockResponse('passkey_challenges', {
+    data: [{ id: 'challenge-789' }],
+    error: null
+  }, 'update')
+
+  const logged: string[] = []
+  const originals = {
+    log: console.log,
+    error: console.error,
+    warn: console.warn,
+    info: console.info
+  }
+  const capture = (...args: unknown[]) => {
+    logged.push(args.map(arg => typeof arg === 'string' ? arg : JSON.stringify(arg)).join(' '))
+  }
+  console.log = capture
+  console.error = capture
+  console.warn = capture
+  console.info = capture
+  try {
+    await generateMobileRegistrationPage(
+      mockClient as unknown as SupabaseClient,
+      'mock-challenge-base64',
+      'victim@example.com',
+      'session-123',
+      'api.risaboss.com'
+    )
+  } finally {
+    console.log = originals.log
+    console.error = originals.error
+    console.warn = originals.warn
+    console.info = originals.info
+  }
+
+  assertExists(logged.find(line => line.includes('v***@example.com')))
+  for (const line of logged) {
+    assertEquals(line.includes('victim@example.com'), false, `log leaked raw email: ${line}`)
+    assertEquals(line.includes('user-456'), false, `log leaked raw user id: ${line}`)
+  }
+})
