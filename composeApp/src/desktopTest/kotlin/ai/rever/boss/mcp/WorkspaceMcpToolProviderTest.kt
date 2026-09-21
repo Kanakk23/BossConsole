@@ -419,10 +419,11 @@ class WorkspaceMcpToolProviderTest {
     @Test
     fun `resolveTargetWindow refuses targeting when multiple windows are open and windowId omitted`() =
         runBlocking {
-            val tabReg1 = TabRegistry()
-            val tabReg2 = TabRegistry()
-            val state1 = SplitViewState(tabReg1, "window-multi-1")
-            val state2 = SplitViewState(tabReg2, "window-multi-2")
+            // Both windows share the stub registry: what is being measured is which window the
+            // workspace lands in, and Dual Terminal only builds at all when "terminal" has a
+            // factory - an empty registry now gets the apply refused rather than applied empty.
+            val state1 = SplitViewState(stubTabRegistry, "window-multi-1")
+            val state2 = SplitViewState(stubTabRegistry, "window-multi-2")
             createdSplitViewStates.add(state1)
             createdSplitViewStates.add(state2)
 

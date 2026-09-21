@@ -547,11 +547,18 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         // WorkspaceEventBus collector re-applies every load event aimed at it, so the
         // provider - which is itself the actor here - must not emit one; doing both would
         // apply the layout twice and tear down what the first apply just built.
-        if (splitViewState != null) {
-            switchWindowToSpace(
+        if (splitViewState != null &&
+            !switchWindowToSpace(
                 splitViewState,
                 WindowProjectStateRegistry.getOrCreate(targetWindowId),
                 workspace,
+            )
+        ) {
+            return McpToolResult(
+                "Workspace '${workspace.name}' could not be applied - none of its tabs can be " +
+                    "built. The plugin that provides its tab types may have been removed; the " +
+                    "window was left on whatever it was already showing.",
+                isError = true,
             )
         }
 
@@ -624,7 +631,16 @@ object WorkspaceMcpToolProvider : McpToolProvider {
 
         // applyWorkspace awaits the tab types this layout needs (terminal among them), so the
         // check below is a verification of that wait, not a race against plugin registration.
-        switchWindowToSpace(splitViewState, WindowProjectStateRegistry.getOrCreate(targetWindowId), space)
+        if (
+            !switchWindowToSpace(splitViewState, WindowProjectStateRegistry.getOrCreate(targetWindowId), space)
+        ) {
+            return McpToolResult(
+                "The Space for '$projectPath' could not be applied - none of its tabs can be " +
+                    "built. The plugin that provides its tab types may have been removed; the " +
+                    "window was left on whatever it was already showing.",
+                isError = true,
+            )
+        }
 
         if (!splitViewState.tabRegistry.isRegistered(TerminalTabType.typeId)) {
             return McpToolResult(
@@ -671,23 +687,35 @@ object WorkspaceMcpToolProvider : McpToolProvider {
     }
 
     /**
-     * Preserve, load, apply: the same three steps the Space switcher takes, so re-entering a
+     * Preserve, apply, load: the same three steps the Space switcher takes, so re-entering a
      * previously running Space restores its preserved tree when the window holds one.
+     *
+     * @return false when the apply was refused - the window is left showing whatever it showed
+     *   before, and the manager is left pointing at it too, rather than at a Space that was
+     *   never applied.
      */
     private suspend fun switchWindowToSpace(
         splitViewState: SplitViewState,
         windowProjectState: WindowProjectState,
         space: LayoutWorkspace,
-    ) {
+    ): Boolean =
         withContext(Dispatchers.Main) {
             val currentWorkspace = workspaceManager.currentWorkspace.value
-            if (currentWorkspace != null && currentWorkspace.id.isNotEmpty()) {
-                splitViewState.preserveCurrentState(currentWorkspace.id, currentWorkspace.name)
+            val leavingId = currentWorkspace?.id?.takeIf { it.isNotEmpty() }
+            if (leavingId != null) {
+                splitViewState.preserveCurrentState(leavingId, currentWorkspace?.name.orEmpty())
             }
-            workspaceManager.loadWorkspace(space)
-            applyWorkspace(space, splitViewState, windowProjectState, restoreProject = true)
+            if (applyWorkspace(space, splitViewState, windowProjectState, restoreProject = true)) {
+                workspaceManager.loadWorkspace(space)
+                true
+            } else {
+                if (leavingId != null) {
+                    splitViewState.restorePreservedState(leavingId)
+                    splitViewState.discardPreservedState(leavingId)
+                }
+                false
+            }
         }
-    }
 
     /**
      * Drop the remembered bootstrap Spaces of windows that no longer exist. A window is alive

@@ -61,6 +61,12 @@ internal suspend fun applyDefaultWorkspaceOnFreshStart(
 
     // restoreProject = false: the workspace carries no project and there is none to
     // restore, so nothing should touch the window's project selection here.
-    applyWorkspace(workspace, splitViewState, windowProjectState, restoreProject = false)
+    //
+    // A refusal is a failed apply, not an applied one: the load above stands either way -
+    // the manager must still claim SOMETHING so the fallback timeout stays stood down -
+    // but the caller is told nothing was applied.
+    if (!applyWorkspace(workspace, splitViewState, windowProjectState, restoreProject = false)) {
+        return null
+    }
     return workspace
 }

@@ -1815,6 +1815,27 @@ class SplitViewState(
         return true
     }
 
+    /**
+     * Whether a preserved tree is held for [workspaceId] - a peek that claims nothing.
+     *
+     * `restorePreservedState` cannot answer this: its miss branch still repoints
+     * [_currentWorkspaceId], and `applyWorkspace` must defer that claim until the incoming
+     * layout is proven to build, or a refused apply would file the live tree under an id that
+     * was never applied.
+     */
+    fun hasPreservedState(workspaceId: String): Boolean = preservedWorkspaceStates.containsKey(workspaceId)
+
+    /**
+     * Drop a preserved snapshot WITHOUT touching the tree it points at.
+     *
+     * For the refused-switch path in `WorkspaceSwitch`: the snapshot was just restored to the
+     * screen, so `closeWorkspace` would clear the very tree the user is looking at - the map
+     * entry is the only thing to drop.
+     */
+    fun discardPreservedState(workspaceId: String) {
+        preservedWorkspaceStates.remove(workspaceId)
+    }
+
     fun restorePreservedState(workspaceId: String): Boolean {
         // Check if we have a preserved state for this workspace
         val preservedState = preservedWorkspaceStates[workspaceId]

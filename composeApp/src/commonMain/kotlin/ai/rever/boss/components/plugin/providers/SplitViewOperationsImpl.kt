@@ -114,7 +114,8 @@ class SplitViewOperationsImpl(
                     picked = workspace,
                     projectPath = projectPath,
                 )
-            ai.rever.boss.components.workspaces
+            val applied =
+                ai.rever.boss.components.workspaces
                 .applyWorkspace(
                     workspace = opened,
                     splitViewState = splitViewState,
@@ -132,6 +133,23 @@ class SplitViewOperationsImpl(
                     // and creating one here would be inventing state from a workspace switch.
                     windowProjectState = WindowProjectStateRegistry.get(windowId),
                 )
+            if (!applied) {
+                // Refused: the live tree was kept, but the manager was already moved - the
+                // plugin loaded the workspace it picked before calling, and spaceToOpen enters
+                // a materialised template. Point it back at the workspace whose tree is on
+                // screen, looked up by the id the split state still claims.
+                val onScreenId = splitViewState.currentWorkspaceId
+                val onScreen =
+                    ai.rever.boss.components.workspaces.workspaceManager
+                        .workspaces.value.firstOrNull { it.id == onScreenId }
+                if (
+                    onScreen != null &&
+                    ai.rever.boss.components.workspaces.workspaceManager
+                        .currentWorkspace.value?.id != onScreen.id
+                ) {
+                    ai.rever.boss.components.workspaces.workspaceManager.loadWorkspace(onScreen)
+                }
+            }
         }
     }
 

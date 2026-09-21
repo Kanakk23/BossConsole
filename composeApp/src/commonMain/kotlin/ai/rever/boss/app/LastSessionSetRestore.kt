@@ -69,7 +69,8 @@ internal suspend fun restoreLastSessionSet(
         // apply that threw halfway - which leaves the split state holding the id it had reached -
         // would otherwise have its partial tree filed under the previous Space's name. Null on the
         // first pass, a fresh window having no current workspace, so nothing is preserved.
-        splitViewState.currentWorkspaceId?.let { leavingId ->
+        val leavingId = splitViewState.currentWorkspaceId
+        if (leavingId != null) {
             splitViewState.preserveCurrentState(
                 workspaceId = leavingId,
                 workspaceName = order.firstOrNull { it.id == leavingId }?.name.orEmpty(),
@@ -78,13 +79,25 @@ internal suspend fun restoreLastSessionSet(
 
         onLoad(space)
         try {
-            applyWorkspace(
-                workspace = space,
-                splitViewState = splitViewState,
-                windowProjectState = windowProjectState,
-                restoreProject = index == 0,
-            )
-            applied += space
+            if (
+                applyWorkspace(
+                    workspace = space,
+                    splitViewState = splitViewState,
+                    windowProjectState = windowProjectState,
+                    restoreProject = index == 0,
+                )
+            ) {
+                applied += space
+            } else {
+                // Refused: the screen still shows the leaving tree, which the preserve above
+                // also filed a snapshot of - the workspace currently shown kept as preserved
+                // too would be written into the next session record as a second running Space.
+                // And the manager, which onLoad just moved onto the refused Space, is pointed
+                // back at the one that is actually on screen - the workspace claiming leavingId,
+                // or the last thing applied when that id names nothing in this set.
+                leavingId?.let(splitViewState::discardPreservedState)
+                (order.firstOrNull { it.id == leavingId } ?: applied.lastOrNull())?.let(onLoad)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (

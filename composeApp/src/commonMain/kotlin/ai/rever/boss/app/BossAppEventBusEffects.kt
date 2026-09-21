@@ -1004,14 +1004,31 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
                 // than in a copy of the rule here.
                 val opened = spaceToOpen(workspace, windowProjectState.selectedProject.value.path)
 
-                // Preserve, load, apply: the same three steps the top bar's switch takes,
-                // so switching away and back keeps the tabs that were open.
+                // Preserve, apply, load: the same steps the top bar's switch takes, in the
+                // order that leaves nothing destroyed when the apply is refused - the leaving
+                // tree is simply restored out of the snapshot just taken of it.
                 val currentWorkspace = workspaceManager.currentWorkspace.value
-                if (currentWorkspace != null && currentWorkspace.id.isNotEmpty()) {
-                    splitViewState.preserveCurrentState(currentWorkspace.id, currentWorkspace.name)
+                val leavingId = currentWorkspace?.id?.takeIf { it.isNotEmpty() }
+                if (leavingId != null) {
+                    splitViewState.preserveCurrentState(leavingId, currentWorkspace?.name.orEmpty())
                 }
-                workspaceManager.loadWorkspace(opened)
-                applyWorkspace(opened, splitViewState, windowProjectState)
+                if (applyWorkspace(opened, splitViewState, windowProjectState)) {
+                    workspaceManager.loadWorkspace(opened)
+                } else {
+                    if (leavingId != null) {
+                        splitViewState.restorePreservedState(leavingId)
+                        splitViewState.discardPreservedState(leavingId)
+                    }
+                    // `spaceToOpen` enters a materialised template itself, so a refusal can
+                    // leave the manager claiming a Space that was never applied - point it
+                    // back at what is on screen.
+                    if (
+                        currentWorkspace != null &&
+                        workspaceManager.currentWorkspace.value?.id != currentWorkspace.id
+                    ) {
+                        workspaceManager.loadWorkspace(currentWorkspace)
+                    }
+                }
             }.launchIn(this)
 
         // Handle settings window events from the home screen.
@@ -1211,9 +1228,11 @@ private suspend fun loadRequestedSpace(
     val commands = workspace.terminalCommands()
     when (spaceLoadDisposition(commands, event.requiresConfirmation)) {
         SpaceLoadDisposition.LOAD -> {
-            // Use the same loading pattern as the UI
-            workspaceManager.loadWorkspace(workspace)
-            applyWorkspace(workspace, state.splitViewState, state.windowProjectState)
+            // Apply first: a refused layout leaves both the live tree and the manager on the
+            // current Space, instead of recording a Space that was never put on screen.
+            if (applyWorkspace(workspace, state.splitViewState, state.windowProjectState)) {
+                workspaceManager.loadWorkspace(workspace)
+            }
         }
 
         SpaceLoadDisposition.CONFIRM -> {

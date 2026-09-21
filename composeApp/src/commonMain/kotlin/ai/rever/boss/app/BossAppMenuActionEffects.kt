@@ -330,11 +330,12 @@ internal fun BossAppMenuActionEffects(
         MenuActionsHandler.applyWorkspaceEvents
             .onEach { (eventWindowId, workspace) ->
                 if (eventWindowId == windowId) {
-                    // Load workspace into manager
-                    workspaceManager.loadWorkspace(workspace)
-
-                    // Apply workspace to UI
-                    applyWorkspace(workspace, splitViewState, windowProjectState)
+                    // Apply first: a refused apply keeps what is on screen, and the manager
+                    // entering a Space that was never applied would leave the two disagreeing
+                    // about what this window shows.
+                    if (applyWorkspace(workspace, splitViewState, windowProjectState)) {
+                        workspaceManager.loadWorkspace(workspace)
+                    }
                 }
             }.launchIn(this)
     }

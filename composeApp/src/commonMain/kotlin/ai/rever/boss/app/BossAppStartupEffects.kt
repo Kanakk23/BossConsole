@@ -395,8 +395,12 @@ internal fun BossAppStartupEffects(state: BossAppState) {
                     !choice.workspace.requiresProject() &&
                         workspaceManager.currentWorkspace.value?.id == choice.workspace.id
                 if (!alreadyApplied) {
-                    applyWorkspace(choice.workspace, splitViewState, windowProjectState)
-                    workspaceManager.loadWorkspace(choice.workspace)
+                    // Apply first: a refused apply keeps what is on screen, and entering the
+                    // Space in the manager anyway would have it claiming a workspace that was
+                    // never applied.
+                    if (applyWorkspace(choice.workspace, splitViewState, windowProjectState)) {
+                        workspaceManager.loadWorkspace(choice.workspace)
+                    }
                 }
             }
         }
@@ -679,6 +683,7 @@ internal fun BossAppStartupEffects(state: BossAppState) {
                                     lastSessionConfig
                                 }
                             // Apply the last session workspace FIRST
+                            val workspaceBeforeRestore = workspaceManager.currentWorkspace.value
                             workspaceManager.loadWorkspace(configWithId)
                             // Before applyWorkspace, which is what selects the recorded
                             // project: the effect watching selectedProject.path has to be
@@ -689,7 +694,16 @@ internal fun BossAppStartupEffects(state: BossAppState) {
                             // loadWorkspace has set currentWorkspace — the fresh-install
                             // fallback timeout deliberately stands down at that point.
                             try {
-                                applyWorkspace(configWithId, splitViewState, windowProjectState)
+                                if (!applyWorkspace(configWithId, splitViewState, windowProjectState)) {
+                                    // Refused: the live tree was kept, so put the manager back
+                                    // on whatever it claimed before the record was loaded.
+                                    if (
+                                        workspaceBeforeRestore != null &&
+                                        workspaceBeforeRestore.id != configWithId.id
+                                    ) {
+                                        workspaceManager.loadWorkspace(workspaceBeforeRestore)
+                                    }
+                                }
                             } catch (e: kotlinx.coroutines.CancellationException) {
                                 throw e
                             } catch (e: Exception) {
