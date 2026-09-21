@@ -2,10 +2,13 @@ package ai.rever.boss.plugin
 
 import ai.rever.boss.components.plugin.MicrokernelRuntime
 import ai.rever.boss.plugin.api.PluginManifest
+import ai.rever.boss.plugin.loader.FileHashing
 import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginClassLoader
 import ai.rever.boss.plugin.loader.PluginManifestReader
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
+import ai.rever.boss.plugin.loader.PluginSignatureVerifier
+import ai.rever.boss.plugin.loader.PluginStoreTrust
 import ai.rever.boss.utils.Version
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -55,10 +58,26 @@ object PluginJarReconciler {
         val deferred: List<String> = emptyList(),
     )
 
+    /**
+     * Load-time-equivalent signature check, so a dropped-in unsigned JAR can
+     * never outrank one the store actually signed. Injectable for tests - the
+     * pinned key's private half is, by design, unavailable to test code.
+     */
+    internal var signatureVerifier: PluginSignatureVerifier =
+        PluginSignatureVerifier(PluginStoreTrust.TRUSTED_KEYS)
+
     private data class Candidate(
         val file: File,
         val manifest: PluginManifest,
-    )
+    ) {
+        /**
+         * Whether this candidate carries proof the host can stand behind: a
+         * store signature that verifies for these exact bytes and identity, or
+         * a bundled-trust marker matching them. Lazy so groups of one (and
+         * unordered groups, which never reach [pickWinner]) never pay the hash.
+         */
+        val trusted: Boolean by lazy { candidateTrusted(file, manifest) }
+    }
 
     /**
      * Scan [pluginDir] and remove stale duplicate plugin JARs. Does NOT load
@@ -97,11 +116,21 @@ object PluginJarReconciler {
             // or repointing its record back to a known older release.
             if (unordered) return@forEach
 
+            var trustedLoserQuarantined = false
             for (loser in group.filterNot { it.file == winner.file }) {
-                reconcileLoser(pluginId, loser, winner, deleted, deferred)
+                trustedLoserQuarantined =
+                    reconcileLoser(pluginId, loser, winner, deleted, deferred) || trustedLoserQuarantined
             }
 
-            repointInstalledEntry(pluginId, installedByPluginId[pluginId], winner)
+            // When the deletion-site guard had to quarantine a trusted loser the
+            // winner is untrusted, so the reconciler must not record it as the
+            // installed artifact: repointing would also stamp its version into
+            // installedVersion, blessing bytes no trust decision endorsed. The
+            // entry stays aimed at the quarantined name - whether a stale path is
+            // re-resolved at load is findRelocatedPluginJar's call, not ours.
+            if (!trustedLoserQuarantined) {
+                repointInstalledEntry(pluginId, installedByPluginId[pluginId], winner)
+            }
         }
 
         if (deleted.isNotEmpty() || deferred.isNotEmpty()) {
@@ -128,8 +157,37 @@ object PluginJarReconciler {
      * class doc and [PluginClassLoader.isPathOpenByLiveLoader] for why that check exists
      * (BossConsole#72). Extracted so the caller's loop has a single jump statement (`continue`
      * lives inside `filterNot`, not here) rather than two, which is its own detekt rule.
+     *
+     * Returns true only when a trusted loser was quarantined to protect it from an
+     * untrusted winner - the caller uses that to withhold the installed.json repoint.
      */
     private fun reconcileLoser(
+        pluginId: String,
+        loser: Candidate,
+        winner: Candidate,
+        deleted: MutableList<String>,
+        deferred: MutableList<String>,
+    ): Boolean {
+        // A trusted JAR must never be destroyed to crown an untrusted one. Trust
+        // ranks first in pickWinner, so this is unreachable through the normal
+        // grouping - the guard lives at the deletion site so no future caller or
+        // comparator change can turn a drop-in into a delete-the-signed-jar
+        // primitive. Move the loser aside rather than deleting it: the bytes stay
+        // available for inspection/recovery but are no longer scannable as a JAR.
+        if (loser.trusted && !winner.trusted) {
+            quarantineTrustedLoser(pluginId, loser, winner, deferred)
+            return true
+        }
+
+        deleteOrDeferLoser(pluginId, loser, winner, deleted, deferred)
+        return false
+    }
+
+    /**
+     * The ordinary superseded-jar path once the trust guard has passed: defer while
+     * a live classloader holds the loser open, otherwise delete it with its markers.
+     */
+    private fun deleteOrDeferLoser(
         pluginId: String,
         loser: Candidate,
         winner: Candidate,
@@ -165,6 +223,94 @@ object PluginJarReconciler {
                 "deleted" to removed,
             ),
         )
+    }
+
+    /**
+     * Move a trusted loser aside when the winner carries no trust of its own.
+     * The `.sig` and `.bundled-trust` markers move WITH the bytes: either left
+     * behind at the old name would orphan - a sidecar outliving its JAR is a
+     * hard load failure waiting for a same-named file to land on the path.
+     */
+    private fun quarantineTrustedLoser(
+        pluginId: String,
+        loser: Candidate,
+        winner: Candidate,
+        deferred: MutableList<String>,
+    ) {
+        val quarantined = File(loser.file.parentFile, "${loser.file.name}.quarantined")
+        val moved = runCatching { loser.file.renameTo(quarantined) }.getOrDefault(false)
+        if (moved) {
+            runCatching {
+                File(PluginSignatureSidecar.pathFor(loser.file.absolutePath))
+                    .renameTo(File(PluginSignatureSidecar.pathFor(quarantined.absolutePath)))
+            }
+            runCatching {
+                File(PluginSignatureSidecar.unsignablePathFor(loser.file.absolutePath))
+                    .renameTo(File(PluginSignatureSidecar.unsignablePathFor(quarantined.absolutePath)))
+            }
+            runCatching {
+                File(PluginBundledTrust.pathFor(loser.file.absolutePath))
+                    .renameTo(File(PluginBundledTrust.pathFor(quarantined.absolutePath)))
+            }
+        }
+        deferred.add(if (moved) quarantined.name else loser.file.name)
+        logger.warn(
+            LogCategory.SYSTEM,
+            "Refused to delete a trusted plugin JAR for an untrusted winner - quarantined instead",
+            mapOf(
+                "pluginId" to pluginId,
+                "file" to loser.file.name,
+                "untrustedWinner" to winner.file.name,
+                "quarantined" to moved,
+            ),
+        )
+    }
+
+    /**
+     * Whether [file] is trusted to win a reconciliation: a store sidecar
+     * signature that verifies for `pluginId|version|sha256` of these exact
+     * bytes (the same anchor the load path verifies), or a bundled-trust
+     * marker bound to them. A present-but-invalid signature is NOT trust -
+     * it is exactly the artifact this check exists to demote. Mirrors the
+     * loader: bundled trust only exempts a MISSING sidecar, never an invalid
+     * one. Any read failure fails closed (untrusted).
+     */
+    private fun candidateTrusted(
+        file: File,
+        manifest: PluginManifest,
+    ): Boolean {
+        // A sidecar that exists but cannot be read is not "missing" - the load
+        // path propagates that failure, so it must not fall through to the
+        // bundled-trust exemption here either. Fails closed: untrusted.
+        val signature =
+            runCatching { PluginSignatureSidecar.read(file.absolutePath) }
+                .onFailure { e ->
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "Could not read plugin signature sidecar - treating candidate as untrusted",
+                        mapOf("file" to file.name, "error" to (e.message ?: "unknown")),
+                    )
+                }
+        val sidecar = signature.getOrNull()
+        return when {
+            signature.isFailure -> false
+            sidecar == null -> PluginBundledTrust.isTrusted(file.absolutePath)
+            else -> verifiesAnchor(file, manifest, sidecar)
+        }
+    }
+
+    /**
+     * Whether the sidecar [signature] verifies for `pluginId|version|sha256` of
+     * [file]'s current bytes - the same anchor the load path verifies.
+     */
+    private fun verifiesAnchor(
+        file: File,
+        manifest: PluginManifest,
+        signature: String,
+    ): Boolean {
+        val sha256 = runCatching { FileHashing.sha256(file) }.getOrNull() ?: return false
+        val anchor = PluginStoreTrust.versionAnchor(manifest.pluginId, manifest.version, sha256)
+        return signatureVerifier.verifySignedMessage(anchor, signature).isVerified
     }
 
     private fun readCandidates(
@@ -215,9 +361,12 @@ object PluginJarReconciler {
     }
 
     /**
-     * Highest manifest version wins; ties (or unparseable versions, treated as
-     * lowest) fall back to the installed.json path, then newest mtime, then
-     * filename — always deterministic.
+     * Trust wins over version: a candidate whose store signature verifies for
+     * these bytes (or whose bundled-trust marker matches them) outranks ANY
+     * unsigned drop-in, no matter the version it claims. Among equals, highest
+     * manifest version wins; ties (or unparseable versions, treated as lowest)
+     * fall back to the installed.json path, then newest mtime, then filename —
+     * always deterministic.
      */
     private fun pickWinner(
         group: List<Candidate>,
@@ -225,6 +374,7 @@ object PluginJarReconciler {
     ): Candidate =
         group.maxWithOrNull(
             compareBy<Candidate>(
+                { it.trusted },
                 { Version.parse(it.manifest.version) ?: Version(0, 0, 0) },
                 { it.file.absolutePath == installedPath },
                 { it.file.lastModified() },
