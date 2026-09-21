@@ -458,9 +458,13 @@ object WorkspaceMcpToolProvider : McpToolProvider {
 
         val (targetWindowId, targetIsColdStart) =
             when (val resolution = resolveTargetWindow(requestedWindowId)) {
-                is TargetWindowResolution.Success -> resolution.windowId to resolution.isColdStart
-                is TargetWindowResolution.Failure ->
+                is TargetWindowResolution.Success -> {
+                    resolution.windowId to resolution.isColdStart
+                }
+
+                is TargetWindowResolution.Failure -> {
                     return McpToolResult(resolution.errorMessage, isError = true)
+                }
             }
 
         val splitViewState = awaitSplitViewState(targetWindowId, splitViewWaitTimeoutFor(targetIsColdStart))
@@ -609,8 +613,13 @@ object WorkspaceMcpToolProvider : McpToolProvider {
 
         val (targetWindowId, targetIsColdStart) =
             when (val resolution = resolveTargetWindow(requestedWindowId)) {
-                is TargetWindowResolution.Success -> resolution.windowId to resolution.isColdStart
-                is TargetWindowResolution.Failure -> return McpToolResult(resolution.errorMessage, isError = true)
+                is TargetWindowResolution.Success -> {
+                    resolution.windowId to resolution.isColdStart
+                }
+
+                is TargetWindowResolution.Failure -> {
+                    return McpToolResult(resolution.errorMessage, isError = true)
+                }
             }
         val splitViewState =
             awaitSplitViewState(targetWindowId, splitViewWaitTimeoutFor(targetIsColdStart))
@@ -877,18 +886,24 @@ object WorkspaceMcpToolProvider : McpToolProvider {
      */
     private fun TerminalOpenOutcome.toResult(): McpToolResult =
         when (this) {
-            is TerminalOpenOutcome.Opened -> McpToolResult(info.toString())
-            is TerminalOpenOutcome.WindowNotReady ->
+            is TerminalOpenOutcome.Opened -> {
+                McpToolResult(info.toString())
+            }
+
+            is TerminalOpenOutcome.WindowNotReady -> {
                 McpToolResult(
                     "Timed out after ${waitedMs}ms waiting for window '$windowId' " +
                         "to become ready; the window may still be starting - retry the request.",
                     isError = true,
                 )
-            is TerminalOpenOutcome.TabOpenFailed ->
+            }
+
+            is TerminalOpenOutcome.TabOpenFailed -> {
                 McpToolResult(
                     "Failed to open terminal in window $windowId",
                     isError = true,
                 )
+            }
         }
 
     /** Result of mounting a terminal tab, so a caller can say WHY an open did not happen. */
