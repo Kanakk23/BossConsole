@@ -5,8 +5,6 @@ import ai.rever.boss.utils.logging.LogCategory
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
 import java.util.concurrent.TimeUnit
 
 /**
@@ -46,9 +44,15 @@ object PowerShellExecutor {
     fun executePowerShellScript(
         scriptName: String,
         vararg args: String,
-    ): String =
-        try {
-            val scriptPath = Paths.get(powerShellScriptsDir, scriptName)
+    ): String {
+        // Reject traversal before any filesystem or process work: Paths.get(dir,
+        // "../x.ps1") resolves outside the script directory and would then be
+        // executed with -ExecutionPolicy Bypass. Must precede the lazy
+        // powerShellScriptsDir access, which can create directories.
+        ScriptFileGuard.requireSimpleName(scriptName)
+
+        return try {
+            val scriptPath = ScriptFileGuard.resolveInside(File(powerShellScriptsDir), scriptName).toPath()
 
             if (!Files.exists(scriptPath)) {
                 throw IOException("PowerShell script not found: $scriptPath")
@@ -76,6 +80,7 @@ object PowerShellExecutor {
             logger.warn(LogCategory.PASSKEY, "Error executing PowerShell script", error = e)
             throw e
         }
+    }
 
     /**
      * Find the PowerShell scripts directory in the project
