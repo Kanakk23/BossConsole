@@ -4,6 +4,7 @@ import ai.rever.boss.services.auth.CoreAuthService
 import ai.rever.boss.services.supabase.SupabaseConfig
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
+import ai.rever.boss.utils.logging.LogSanitizer
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.user.UserSession
 import io.ktor.client.HttpClient
@@ -13,6 +14,7 @@ import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
+import java.net.URI
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
@@ -55,9 +57,12 @@ internal object CredentialBrokers {
 
     private const val RISA_TOKEN_URL = "https://llm.risa.inc/auth/token"
     private const val RISA_API_BASE = "https://llm.risa.inc/v1"
+    private const val RISA_HOST = "risa.inc"
 
     /** Overrides RISA's token endpoint, for pointing a dev build at a staging gateway. */
     private const val RISA_TOKEN_URL_ENV = "RISA_LLM_TOKEN_URL"
+
+    private val logger = BossLogger.forComponent("CredentialBroker")
 
     fun all(): List<CredentialBroker> =
         listOf(
@@ -70,16 +75,45 @@ internal object CredentialBrokers {
             CredentialBroker(
                 id = RISA_GLM,
                 displayName = "RISA Codex GLM",
-                tokenUrl =
-                    System
-                        .getenv(RISA_TOKEN_URL_ENV)
-                        ?.takeIf { it.isNotBlank() }
-                        ?: RISA_TOKEN_URL,
+                tokenUrl = resolveRisaTokenUrl(System.getenv(RISA_TOKEN_URL_ENV)),
                 scopedTo = RISA_API_BASE,
             ),
         )
 
     fun find(id: String): CredentialBroker? = all().firstOrNull { it.id == id }
+
+    /**
+     * The one place the override is honored: `all()` calls it, and any future caller should
+     * too rather than reading the env directly.
+     *
+     * Whatever this returns receives `Authorization: Bearer <live Supabase access token>`,
+     * so the override is accepted only when it still names the RISA gateway over TLS -
+     * https scheme and a `risa.inc` host. Anything else (http, another host, localhost, an
+     * unparseable value) falls back to the built-in endpoint: the env is how a dev build
+     * reaches staging, not a channel for a launcher or a stale export to aim the session
+     * bearer at a host of its choosing.
+     */
+    internal fun resolveRisaTokenUrl(override: String?): String {
+        if (override.isNullOrBlank()) return RISA_TOKEN_URL
+        val host =
+            try {
+                URI(override.trim())
+                    .takeIf { it.scheme?.equals("https", ignoreCase = true) == true }
+                    ?.host
+            } catch (_: Exception) {
+                null
+            }
+        val normalized = host?.lowercase()?.removeSuffix(".")
+        if (normalized != null && (normalized == RISA_HOST || normalized.endsWith(".$RISA_HOST"))) {
+            return override.trim()
+        }
+        logger.warn(
+            LogCategory.SYSTEM,
+            "$RISA_TOKEN_URL_ENV override rejected - using the built-in endpoint",
+            mapOf("override" to LogSanitizer.describeUri(override)),
+        )
+        return RISA_TOKEN_URL
+    }
 }
 
 /** What a broker returned. Mirrors the api's `BrokeredCredential` without depending on it. */
