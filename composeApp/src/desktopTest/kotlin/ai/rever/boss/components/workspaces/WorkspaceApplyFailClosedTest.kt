@@ -69,10 +69,18 @@ class WorkspaceApplyFailClosedTest {
     private fun workspace(
         layout: SplitConfig,
         projectPath: String? = null,
-    ) = LayoutWorkspace(id = "incoming", name = "Incoming", description = "d", layout = layout, projectPath = projectPath)
+    ) = LayoutWorkspace(
+        id = "incoming",
+        name = "Incoming",
+        description = "d",
+        layout = layout,
+        projectPath = projectPath,
+    )
 
-    private fun tabsOnScreen(state: SplitViewState) =
-        state.getAllPanels().flatMap { it.tabsComponent.tabsState.value.tabs }
+    private fun tabsOnScreen(state: SplitViewState): List<TabInfo> {
+        val panels = state.getAllPanels()
+        return panels.flatMap { it.tabsComponent.tabsState.value.tabs }
+    }
 
     /**
      * The failing-before test for the card: a Space whose tabs are all types nothing can

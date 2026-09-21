@@ -65,8 +65,9 @@ internal suspend fun applyDefaultWorkspaceOnFreshStart(
     // A refusal is a failed apply, not an applied one: the load above stands either way -
     // the manager must still claim SOMETHING so the fallback timeout stays stood down -
     // but the caller is told nothing was applied.
-    if (!applyWorkspace(workspace, splitViewState, windowProjectState, restoreProject = false)) {
-        return null
+    return if (applyWorkspace(workspace, splitViewState, windowProjectState, restoreProject = false)) {
+        workspace
+    } else {
+        null
     }
-    return workspace
 }

@@ -1,3 +1,5 @@
+@file:Suppress("TooManyFunctions") // The proof-before-clear helpers split per split-shape by design.
+
 package ai.rever.boss.components.workspaces
 
 import ai.rever.boss.cache.loadFaviconFromCache

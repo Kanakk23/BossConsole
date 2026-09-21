@@ -116,23 +116,23 @@ class SplitViewOperationsImpl(
                 )
             val applied =
                 ai.rever.boss.components.workspaces
-                .applyWorkspace(
-                    workspace = opened,
-                    splitViewState = splitViewState,
-                    // A workspace REMEMBERS its project (LayoutWorkspace.projectPath), and
-                    // applyWorkspace restores it - but only when handed a windowProjectState, and
-                    // this call passed none. So the host's own switch carried the project across
-                    // and a plugin's did not: switching workspace from a panel left the previous
-                    // workspace's project selected, which is what everything project-scoped then
-                    // kept answering from.
-                    //
-                    // Resolved from the registry rather than taken as a constructor parameter:
-                    // BossAppState builds this provider BEFORE it builds its own
-                    // windowProjectState, so a parameter would mean reordering that. `get`, not
-                    // `getOrCreate` - a window with no project state has no project to restore,
-                    // and creating one here would be inventing state from a workspace switch.
-                    windowProjectState = WindowProjectStateRegistry.get(windowId),
-                )
+                    .applyWorkspace(
+                        workspace = opened,
+                        splitViewState = splitViewState,
+                        // A workspace REMEMBERS its project (LayoutWorkspace.projectPath), and
+                        // applyWorkspace restores it - but only when handed a windowProjectState, and
+                        // this call passed none. So the host's own switch carried the project across
+                        // and a plugin's did not: switching workspace from a panel left the previous
+                        // workspace's project selected, which is what everything project-scoped then
+                        // kept answering from.
+                        //
+                        // Resolved from the registry rather than taken as a constructor parameter:
+                        // BossAppState builds this provider BEFORE it builds its own
+                        // windowProjectState, so a parameter would mean reordering that. `get`, not
+                        // `getOrCreate` - a window with no project state has no project to restore,
+                        // and creating one here would be inventing state from a workspace switch.
+                        windowProjectState = WindowProjectStateRegistry.get(windowId),
+                    )
             if (!applied) {
                 // Refused: the live tree was kept, but the manager was already moved - the
                 // plugin loaded the workspace it picked before calling, and spaceToOpen enters
@@ -141,13 +141,16 @@ class SplitViewOperationsImpl(
                 val onScreenId = splitViewState.currentWorkspaceId
                 val onScreen =
                     ai.rever.boss.components.workspaces.workspaceManager
-                        .workspaces.value.firstOrNull { it.id == onScreenId }
+                        .workspaces.value
+                        .firstOrNull { it.id == onScreenId }
                 if (
                     onScreen != null &&
                     ai.rever.boss.components.workspaces.workspaceManager
-                        .currentWorkspace.value?.id != onScreen.id
+                        .currentWorkspace.value
+                        ?.id != onScreen.id
                 ) {
-                    ai.rever.boss.components.workspaces.workspaceManager.loadWorkspace(onScreen)
+                    ai.rever.boss.components.workspaces.workspaceManager
+                        .loadWorkspace(onScreen)
                 }
             }
         }
