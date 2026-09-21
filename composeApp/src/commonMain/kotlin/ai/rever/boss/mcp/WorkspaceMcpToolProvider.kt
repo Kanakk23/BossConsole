@@ -1007,7 +1007,7 @@ object WorkspaceMcpToolProvider : McpToolProvider {
      * a user's saved Space whose name merely mentions "disposable" is not ours. Independent
      * of window targeting - the file lives on disk, not in a window.
      */
-    private fun deleteDisposableWorkspaceFile(workspaceId: String): Boolean {
+    private suspend fun deleteDisposableWorkspaceFile(workspaceId: String): Boolean {
         if (!workspaceId.startsWith(DISPOSABLE_ID_PREFIX)) return false
         val fileName =
             if (workspaceId.endsWith(".json")) {
