@@ -26,6 +26,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -353,6 +354,115 @@ private fun truncationMarker(
         "limit, so the last $dropped characters were cut. Whatever the tool put at the end is " +
         "gone, including any note it appended about content it had already left out. Re-run " +
         "with a narrower query, a filter, or a smaller range to get the rest.]"
+
+/**
+ * Validate [argumentsJson] against a tool's declared `inputSchema` — the JSON-Schema
+ * subset the plugin API's contracts actually use: `required` keys and each
+ * `properties` entry's primitive `type`. Returns a caller-facing error naming the
+ * offending fields, or `null` when the arguments satisfy the schema.
+ *
+ * [McpToolRegistryCore.invoke] turns a non-null return into an `isError` result before
+ * any approval prompt or handler call, which is what makes the schema a gate rather
+ * than documentation. Two edges are deliberate:
+ * - A schema that does not parse to a JSON object fails closed: the host cannot enforce
+ *   a contract it cannot read, so the call is refused instead of waved through.
+ * - Arguments that are not a JSON object validate as `{}` — exactly the empty map
+ *   [McpToolRegistryCore.parseArgs] would have handed the handler — so a schema with
+ *   required keys rejects them while a schema without keeps its previous behavior.
+ *
+ * Error text names fields and expected types only, never argument values: the same
+ * string reaches the caller and the operation ledger, and values can be sensitive.
+ * A free function next to [capMcpResultText] and [mcpToolPermitted] for the same
+ * reason — the rule is testable without constructing the registry.
+ */
+internal fun validateMcpToolArguments(
+    inputSchema: String,
+    argumentsJson: String,
+): String? {
+    val schema = parseJsonObject(inputSchema) ?: return "MCP tool inputSchema is not a JSON object"
+    val args = parseJsonObject(argumentsJson) ?: JsonObject(emptyMap())
+    val problems = missingRequiredArguments(schema, args) + mistypedArguments(schema, args)
+    return if (problems.isEmpty()) {
+        null
+    } else {
+        "MCP arguments failed inputSchema validation: ${problems.joinToString("; ")}"
+    }
+}
+
+/** Parse [raw] as a JSON object, or `null` when it is malformed or any other shape. */
+private fun parseJsonObject(raw: String): JsonObject? =
+    try {
+        Json.parseToJsonElement(raw) as? JsonObject
+    } catch (_: Throwable) {
+        null
+    }
+
+/** One message per `required` name the arguments object does not carry. */
+private fun missingRequiredArguments(
+    schema: JsonObject,
+    args: JsonObject,
+): List<String> =
+    (schema["required"] as? JsonArray)
+        ?.mapNotNull { element -> (element as? JsonPrimitive)?.takeIf { it.isString }?.content }
+        .orEmpty()
+        .filter { name -> name !in args }
+        .map { name -> "missing required argument '$name'" }
+
+/** One message per argument present in the call whose declared `type` it fails. */
+private fun mistypedArguments(
+    schema: JsonObject,
+    args: JsonObject,
+): List<String> {
+    val properties = schema["properties"] as? JsonObject ?: return emptyList()
+    return properties.mapNotNull { (name, propertySchema) ->
+        val value = args[name] ?: return@mapNotNull null
+        val types = declaredSchemaTypes(propertySchema)
+        if (types.isEmpty() || types.any { matchesMcpSchemaType(it, value) }) {
+            null
+        } else {
+            "argument '$name' must be of type ${types.joinToString(" or ")}"
+        }
+    }
+}
+
+/** The `type` keyword of a `properties` entry - a single name or, per JSON Schema, a list. */
+private fun declaredSchemaTypes(propertySchema: JsonElement): List<String> =
+    when (val declared = (propertySchema as? JsonObject)?.get("type")) {
+        is JsonPrimitive -> listOf(declared.content)
+        is JsonArray -> declared.mapNotNull { (it as? JsonPrimitive)?.content }
+        else -> emptyList()
+    }
+
+/**
+ * Whether [value] satisfies one JSON-Schema primitive `type` keyword. A keyword outside
+ * the known set declares nothing this host can check, so it imposes no constraint.
+ */
+private fun matchesMcpSchemaType(
+    type: String,
+    value: JsonElement,
+): Boolean =
+    when (type) {
+        "string" -> value is JsonPrimitive && value.isString
+        "object" -> value is JsonObject
+        "array" -> value is JsonArray
+        "null" -> value is JsonNull
+        "boolean", "integer", "number" -> value.isUnquotedScalarOf(type)
+        else -> true
+    }
+
+/**
+ * The scalar-type check behind [matchesMcpSchemaType]. `booleanOrNull`/`longOrNull`/
+ * `doubleOrNull` read a primitive's content even when it is a quoted string, so a
+ * JSON `"true"` or `"123"` must be excluded here rather than satisfy a non-string type.
+ */
+private fun JsonElement.isUnquotedScalarOf(type: String): Boolean {
+    if (this !is JsonPrimitive || isString) return false
+    return when (type) {
+        "boolean" -> booleanOrNull != null
+        "integer" -> longOrNull != null
+        else -> doubleOrNull != null
+    }
+}
 
 /**
  * Testable core behind [McpToolRegistryImpl]. Extracted so unit tests can
@@ -759,7 +869,16 @@ internal class McpToolRegistryCore(
         var result: McpToolResult? = null
         var executionStarted = false
         try {
-            val authorization = authorizeInvocation(tool, args, policy, revocation)
+            // The declared inputSchema is a gate, not documentation: arguments that fail it
+            // are refused here, before any approval prompt can be raised for a call that was
+            // never going to run and before the handler can see malformed input.
+            val schemaError = validateMcpToolArguments(tool.definition.inputSchema, args.raw)
+            val authorization =
+                if (schemaError != null) {
+                    McpApprovalDisposition.INVALID_ARGUMENTS to schemaError
+                } else {
+                    authorizeInvocation(tool, args, policy, revocation)
+                }
             disposition = authorization.first
             val denial = authorization.second
             result =

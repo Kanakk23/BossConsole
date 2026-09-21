@@ -51,6 +51,13 @@ enum class McpApprovalDisposition {
      * fault) but the durable grant does not exist. See [McpPolicyFault.ProviderPolicyPersistFailed].
      */
     PROVIDER_TRUST_PERSIST_FAILED,
+
+    /**
+     * The call was refused before authorization because its arguments failed the tool's
+     * declared `inputSchema` - a required key absent or a property of the wrong primitive
+     * type. The handler never ran and no approval was requested.
+     */
+    INVALID_ARGUMENTS,
 }
 
 /**

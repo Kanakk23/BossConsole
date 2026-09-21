@@ -311,6 +311,7 @@ internal val McpApprovalDisposition.unsuccessfulCategory: McpUnsuccessfulCategor
             McpApprovalDisposition.DENIED_BY_OPERATOR,
             McpApprovalDisposition.POLICY_DENIED,
             McpApprovalDisposition.PERSISTENTLY_DENIED,
+            McpApprovalDisposition.INVALID_ARGUMENTS,
             -> McpUnsuccessfulCategory.DENIED
 
             McpApprovalDisposition.CANCELLED,

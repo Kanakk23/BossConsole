@@ -25,6 +25,8 @@ class McpActivityLogDialogTest {
             McpApprovalDisposition.DENIED_BY_OPERATOR,
             McpApprovalDisposition.POLICY_DENIED,
             McpApprovalDisposition.PERSISTENTLY_DENIED,
+            // Refused on inputSchema mismatch before authorization - a denial, not a tool fault.
+            McpApprovalDisposition.INVALID_ARGUMENTS,
         ).forEach { disposition ->
             assertEquals(McpUnsuccessfulCategory.DENIED, disposition.unsuccessfulCategory, disposition.name)
         }
