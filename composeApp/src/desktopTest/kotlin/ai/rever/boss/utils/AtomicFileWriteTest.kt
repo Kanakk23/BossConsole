@@ -1,14 +1,17 @@
 package ai.rever.boss.utils
 
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermission
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 
 /**
  * Tests for the atomic file-replacement helpers.
@@ -122,5 +125,52 @@ class AtomicFileWriteTest {
         val expected = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
         val actual = Files.getPosixFilePermissions(path)
         assertEquals(expected, actual, "File permissions must remain owner-only (0600) on overwrite, got: $actual")
+    }
+
+    @Test
+    fun `atomicWriteText refuses a symlinked parent`() {
+        // The redirect shape: the declared parent is a link to another directory, so an
+        // unverified write lands the temp file and the moved-in target on the far side.
+        val attackerDir = File(tempDir, "attacker").apply { mkdirs() }
+        val link = File(tempDir, "linked-parent")
+        try {
+            Files.createSymbolicLink(link.toPath(), attackerDir.toPath())
+        } catch (e: UnsupportedOperationException) {
+            assumeTrue(false, "Filesystem does not support symlinks: ${e.message}")
+        } catch (e: IOException) {
+            assumeTrue(false, "Could not create a symlink (Windows needs privileges): ${e.message}")
+        }
+
+        assertFailsWith<IOException> { File(link, "stolen.json").atomicWriteText("payload") }
+
+        assertFalse(
+            File(attackerDir, "stolen.json").exists(),
+            "the write must not land in the directory the link points at",
+        )
+        assertTrue(
+            attackerDir.listFiles().orEmpty().none { it.name.endsWith(".tmp") },
+            "no temp file may be created through the link either",
+        )
+    }
+
+    @Test
+    fun `atomicWriteText still writes when an ancestor is a symlink`() {
+        // macOS temp dirs live under /var -> /private/var, and users legitimately symlink
+        // their config home elsewhere; only the immediate parent is refused as a link.
+        val real = File(tempDir, "real-ancestor").apply { mkdirs() }
+        val link = File(tempDir, "linked-ancestor")
+        try {
+            Files.createSymbolicLink(link.toPath(), real.toPath())
+        } catch (e: UnsupportedOperationException) {
+            assumeTrue(false, "Filesystem does not support symlinks: ${e.message}")
+        } catch (e: IOException) {
+            assumeTrue(false, "Could not create a symlink (Windows needs privileges): ${e.message}")
+        }
+
+        File(link, "nested").let { it.mkdirs() }
+        val target = File(link, "nested/state.json")
+        target.atomicWriteText("value")
+
+        assertEquals("value", File(real, "nested/state.json").readText())
     }
 }
