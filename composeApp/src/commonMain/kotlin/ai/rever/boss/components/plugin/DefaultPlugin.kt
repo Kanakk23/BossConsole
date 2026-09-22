@@ -122,10 +122,13 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Tab
 import androidx.compose.material.icons.outlined.Terminal
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
@@ -136,9 +139,12 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 import ai.rever.boss.components.plugin.panels.right_top.BrowserIntegration as InternalBrowserIntegration
 import ai.rever.boss.plugin.api.BrowserIntegration as ApiBrowserIntegration
 
@@ -152,6 +158,7 @@ import ai.rever.boss.plugin.api.BrowserIntegration as ApiBrowserIntegration
  * contexts must provide it so plugin-created browsers participate in window-scoped
  * cleanup. The null default is reserved for non-window/test contexts.
  */
+@Suppress("LongParameterList") // window-scoped dependencies; the test seam needs the sandbox manager
 class DefaultPlugin(
     override val panelRegistry: PanelRegistry,
     override val tabRegistry: TabRegistry,
@@ -160,10 +167,39 @@ class DefaultPlugin(
     private val _windowId: String? = null,
     private val workspaceManager: ai.rever.boss.components.workspaces.WorkspaceManager? = null,
     private val splitViewState: ai.rever.boss.components.window_panel.SplitViewState? = null,
+    // Constructor-visible rather than a field initializer so tests can substitute a sandbox
+    // manager that records where teardown runs.
+    private val sandboxManager: PluginSandboxManager = PluginSandboxManagerImpl(),
 ) : PluginContext {
     private val registrationOwner = WindowRegistrations.Owner()
 
     companion object {
+        /**
+         * Upper bound on a window's plugin teardown. Classloader closes and sandbox drains are
+         * allowed real time, but a teardown that cannot finish is cancelled and logged rather
+         * than pinning the closing window's bookkeeping forever.
+         */
+        internal const val PLUGIN_DISPOSE_TIMEOUT_MS = 15_000L
+
+        /**
+         * In-flight window teardowns, tracked so process shutdown can wait them out. A window
+         * close never joins its own dispose - that is the b07 stall - but the JVM exit path
+         * still owes plugins their unload, bounded.
+         */
+        private val pendingTeardowns = ConcurrentHashMap.newKeySet<Job>()
+
+        /**
+         * Join every in-flight window teardown, bounded by [timeoutMillis]. Called once, from
+         * the process-shutdown sequence - the only place that may wait on a dispose. The set is
+         * snapshotted so teardowns racing the scan are simply left to their own bound, and each
+         * join is isolated because joining a cancelled job throws.
+         */
+        internal suspend fun awaitPendingTeardowns(timeoutMillis: Long) {
+            withTimeoutOrNull(timeoutMillis) {
+                pendingTeardowns.toList().forEach { runCatching { it.join() } }
+            }
+        }
+
         /**
          * Which window's plugin copy each process-wide registration belongs to. Shared by every
          * window's DefaultPlugin because the registries it arbitrates are shared; see
@@ -341,6 +377,18 @@ class DefaultPlugin(
     // This scope should be cancelled when the plugin is disposed
     override val pluginScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
+    // Teardown scope: plugin unload is blocking-scale work (classloader closes, the sandbox
+    // drain), and the caller is the window's Compose onDispose - the UI thread. Running it
+    // there is what stalled every window close and could hang quit under load. Deliberately
+    // not pluginScope: that scope is Main, and dispose cancels it from inside the teardown.
+    private val disposeScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * The teardown job once dispose() has run - memoized so a repeat dispose hands back the same
+     * job: callers may join it, and a second teardown never launches.
+     */
+    private val teardownJobRef = AtomicReference<Job?>()
+
     // ============================================================
     // PLUGIN-TO-PLUGIN API REGISTRY
     // Enables plugins to expose and consume APIs from other plugins
@@ -392,9 +440,6 @@ class DefaultPlugin(
         // Also register under the concrete class for direct lookups
         apiRegistry[api::class.java] = api
     }
-
-    // Sandbox manager for plugin crash isolation
-    private val sandboxManager: PluginSandboxManager = PluginSandboxManagerImpl()
 
     /**
      * Health summary across all sandboxed plugins.
@@ -1242,34 +1287,96 @@ class DefaultPlugin(
     }
 
     /**
-     * Dispose the plugin and cancel all coroutines
-     * Should be called when the plugin is no longer needed
+     * Dispose the plugin and cancel all coroutines.
+     * Should be called when the plugin is no longer needed.
+     *
+     * The teardown - unloading every loaded plugin, draining the sandbox manager and
+     * closing classloaders - is blocking-scale work, so it launches on [disposeScope]
+     * rather than running inside `runBlocking` on the caller's thread. The caller is the
+     * window's Compose `onDispose`, i.e. the UI thread: blocking it made every window
+     * close pay the whole teardown, and quitting under load could stall on it. The
+     * teardown is bounded by [PLUGIN_DISPOSE_TIMEOUT_MS] and the bookkeeping after it
+     * runs even when the teardown is cancelled or fails - a skipped release leaks
+     * process-wide registrations, which is worse than a torn-down plugin.
+     *
+     * @return the [Job] running the teardown, for the callers that genuinely must wait -
+     *   tests and process shutdown. The window-close path must not join it; blocking is
+     *   the bug this fixes.
      */
-    fun dispose() {
-        // Dispose dynamic plugin manager and sandbox manager
-        runBlocking {
-            dynamicPluginManager.disposeWindow()
-            sandboxManager.dispose()
-        }
-        // After the teardown above, so it only catches what a plugin's teardown did not remove: none of it
-        // may be served again when another window later lets go of the same id.
-        registrations.release(registrationOwner)
-        // Providers that registered themselves with a process-wide singleton, or that own a
-        // coroutine, do not go away with `pluginScope` - it is not their scope. Only the ones
-        // actually built: see [logDataProviderDelegate].
-        if (logDataProviderDelegate.isInitialized()) {
-            (logDataProvider as? DisposableProvider)?.dispose()
-        }
-        if (gitDataProviderDelegate.isInitialized()) {
-            (gitDataProvider as? DisposableProvider)?.dispose()
-        }
-        if (projectDataProviderDelegate.isInitialized()) {
-            (projectDataProvider as? DisposableProvider)?.dispose()
-        }
-        if (splitViewOperationsDelegate.isInitialized()) {
-            (splitViewOperations as? DisposableProvider)?.dispose()
-        }
-        pluginScope.cancel()
+    fun dispose(): Job = dispose(PLUGIN_DISPOSE_TIMEOUT_MS)
+
+    /**
+     * The same teardown with a caller-chosen bound - the seam the regression test uses to
+     * prove a hung sandbox cannot wedge the caller beyond [timeoutMillis].
+     */
+    @Suppress("TooGenericExceptionCaught") // window teardown must not strand bookkeeping on any plugin failure
+    internal fun dispose(timeoutMillis: Long): Job {
+        teardownJobRef.get()?.let { return it }
+        val launched =
+            disposeScope.launch {
+                try {
+                    // Bounds the coroutine only: a teardown stuck inside a genuinely
+                    // blocking (non-suspending) call keeps its IO thread past the bound -
+                    // but never the caller's thread, which is the property being protected.
+                    withTimeout(timeoutMillis) {
+                        // Dispose dynamic plugin manager and sandbox manager
+                        dynamicPluginManager.disposeWindow()
+                        sandboxManager.dispose()
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    logger.error(
+                        LogCategory.SYSTEM,
+                        "Plugin teardown exceeded its bound",
+                        mapOf("timeoutMs" to timeoutMillis.toString()),
+                        error = e,
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    logger.error(LogCategory.SYSTEM, "Plugin teardown failed", error = e)
+                } finally {
+                    withContext(NonCancellable) {
+                        // After the teardown above, so it only catches what a plugin's
+                        // teardown did not remove: none of it may be served again when
+                        // another window later lets go of the same id.
+                        registrations.release(registrationOwner)
+                        // Providers that registered themselves with a process-wide
+                        // singleton, or that own a coroutine, do not go away with
+                        // `pluginScope` - it is not their scope. Only the ones actually
+                        // built: see [logDataProviderDelegate].
+                        if (logDataProviderDelegate.isInitialized()) {
+                            (logDataProvider as? DisposableProvider)?.dispose()
+                        }
+                        if (gitDataProviderDelegate.isInitialized()) {
+                            (gitDataProvider as? DisposableProvider)?.dispose()
+                        }
+                        if (projectDataProviderDelegate.isInitialized()) {
+                            (projectDataProvider as? DisposableProvider)?.dispose()
+                        }
+                        if (splitViewOperationsDelegate.isInitialized()) {
+                            (splitViewOperations as? DisposableProvider)?.dispose()
+                        }
+                        pluginScope.cancel()
+                    }
+                }
+            }
+        val canonical =
+            if (teardownJobRef.compareAndSet(null, launched)) {
+                pendingTeardowns += launched
+                launched.invokeOnCompletion {
+                    pendingTeardowns -= launched
+                    // Cancelling the scope inside the coroutine would kill a racing
+                    // duplicate dispose mid-teardown; on completion it cannot.
+                    disposeScope.cancel()
+                }
+                launched
+            } else {
+                // A concurrent dispose won: teardown is idempotent, but callers must join
+                // the canonical job - discard this duplicate so it cannot also run.
+                launched.cancel()
+                teardownJobRef.get()
+            }
+        return checkNotNull(canonical)
     }
 
     /**
