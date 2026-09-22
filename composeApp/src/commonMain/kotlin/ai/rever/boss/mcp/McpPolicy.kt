@@ -39,6 +39,13 @@ enum class McpApprovalDisposition {
     QUEUE_FULL,
 
     /**
+     * The call was refused before authorization because the argument text was not a JSON
+     * object matching the tool's inputSchema - the handler never ran, so there was never
+     * anything for an operator to approve.
+     */
+    INVALID_ARGUMENTS,
+
+    /**
      * The operator chose "Trust this plugin" and the persisted, provider-wide grant actually
      * saved - every other tool from [ai.rever.boss.mcp.McpApprovalRequest.providerId] is now
      * ALLOW too, across restarts, with no further prompts for this provider.

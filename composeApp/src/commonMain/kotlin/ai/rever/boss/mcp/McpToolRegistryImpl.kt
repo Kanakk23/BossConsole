@@ -869,12 +869,20 @@ internal class McpToolRegistryCore(
         var result: McpToolResult? = null
         var executionStarted = false
         try {
-            // The declared inputSchema is a gate, not documentation: arguments that fail it
-            // are refused here, before any approval prompt can be raised for a call that was
-            // never going to run and before the handler can see malformed input.
-            val schemaError = validateMcpToolArguments(tool.definition.inputSchema, args.raw)
+            // Argument shape and the declared inputSchema are gates, not documentation:
+            // malformed/non-object arguments and object arguments that fail the schema are
+            // refused before any approval prompt can be raised or handler can run.
+            val shapeError = nonObjectArgsError(tool.definition, arguments)
+            val schemaError =
+                if (shapeError == null) {
+                    validateMcpToolArguments(tool.definition.inputSchema, args.raw)
+                } else {
+                    null
+                }
             val authorization =
-                if (schemaError != null) {
+                if (shapeError != null) {
+                    McpApprovalDisposition.INVALID_ARGUMENTS to shapeError
+                } else if (schemaError != null) {
                     McpApprovalDisposition.INVALID_ARGUMENTS to schemaError
                 } else {
                     authorizeInvocation(tool, args, policy, revocation)
@@ -1292,6 +1300,57 @@ internal class McpToolRegistryCore(
             t.message ?: t::class.simpleName ?: "unknown error"
         }
     }
+
+    /**
+     * `null` when [arguments] is blank or parses to a JSON object; otherwise the refusal
+     * text [invoke] returns without running the handler. Blank text stays load-bearing
+     * as "no arguments" ([parseArgs] maps it to `{}`); only a caller that sent non-object
+     * content - a JSON array, a bare scalar, or unparseable text - is refused, and the
+     * message names the expected inputSchema and the received shape so the caller can
+     * fix the call rather than retry blind. The raw text is never echoed into the error.
+     */
+    private fun nonObjectArgsError(
+        definition: McpToolDefinition,
+        arguments: String,
+    ): String? {
+        if (arguments.isBlank()) return null
+        return receivedArgsShape(arguments)?.let { received ->
+            "MCP tool '${definition.name}' expects arguments as a JSON object matching " +
+                "inputSchema ${definition.inputSchema}; received $received"
+        }
+    }
+
+    /** `null` for a JSON object, else a short name for the received shape - never the raw text. */
+    private fun receivedArgsShape(arguments: String): String? =
+        try {
+            when (val el = json.parseToJsonElement(arguments)) {
+                is JsonObject -> null
+
+                // JsonNull must precede JsonPrimitive - it is one.
+                is JsonNull -> "null"
+
+                is JsonArray -> "a JSON array"
+
+                is JsonPrimitive -> primitiveShape(el)
+            }
+        } catch (t: Throwable) {
+            logger.debug(
+                LogCategory.SYSTEM,
+                "MCP tool arguments are not parseable JSON - refusing invocation",
+                mapOf("error" to t.toString()),
+            )
+            "unparseable input"
+        }
+
+    // The lenient element parser also accepts unquoted tokens ("garbage" parses as a
+    // primitive literal), so a non-boolean non-number is reported as a bare token.
+    private fun primitiveShape(el: JsonPrimitive): String =
+        when {
+            el.isString -> "a JSON string"
+            el.booleanOrNull != null -> "a JSON boolean"
+            el.longOrNull != null || el.doubleOrNull != null -> "a JSON number"
+            else -> "a bare token"
+        }
 
     /** Parse a JSON-object arguments string into a typed [McpToolArgs] of scalars. */
     private fun parseArgs(arguments: String): McpToolArgs {
