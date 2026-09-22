@@ -387,6 +387,7 @@ class McpToolRegistryCoreTest {
             val core = McpToolRegistryCore(disabledFile = null)
             val result = core.invoke("does_not_exist", "{}")
             assertTrue(result.isError)
+            assertTrue(result.text.contains("No such MCP tool"), result.text)
         }
 
     @Test
@@ -398,6 +399,7 @@ class McpToolRegistryCoreTest {
 
             val result = core.invoke("disabled_tool", "{}")
             assertTrue(result.isError)
+            assertTrue(result.text.contains("disabled"), result.text)
         }
 
     @Test
@@ -409,6 +411,51 @@ class McpToolRegistryCoreTest {
 
             val result = core.invoke("gated_tool", "{}")
             assertTrue(result.isError)
+            assertTrue(result.text.contains("not permitted"), result.text)
+        }
+
+    @Test
+    fun `invoke distinguishes unknown, disabled, and unpermitted tools`() =
+        runBlocking {
+            val core = McpToolRegistryCore(disabledFile = null)
+            core.registerProvider(
+                provider(
+                    "p1",
+                    echoTool("close_workspace"),
+                    echoTool("disabled_tool"),
+                    echoTool("gated_tool", requiredPermissions = listOf("secret.read")),
+                ),
+            )
+            core.setToolEnabled("disabled_tool", enabled = false)
+
+            val unknown = core.invoke("close_workspac", "{}")
+            val disabled = core.invoke("disabled_tool", "{}")
+            val unpermitted = core.invoke("gated_tool", "{}")
+
+            // Three distinct messages - and the typo gets a "did you mean" hint.
+            assertTrue(unknown.isError)
+            assertTrue(unknown.text.contains("did you mean 'close_workspace'"), unknown.text)
+            assertTrue(disabled.text.contains("disabled"), disabled.text)
+            assertTrue(unpermitted.text.contains("not permitted"), unpermitted.text)
+            assertEquals(3, setOf(unknown.text, disabled.text, unpermitted.text).size)
+        }
+
+    @Test
+    fun `a suggestion only names tools the caller could see`() =
+        runBlocking {
+            // The gated tool is registered but unpermitted: it must not leak into the hint.
+            val core = McpToolRegistryCore(disabledFile = null)
+            core.registerProvider(
+                provider(
+                    "p1",
+                    echoTool("gated_secret", requiredPermissions = listOf("secret.read")),
+                    echoTool("open_workspace"),
+                ),
+            )
+
+            val result = core.invoke("gated_secre", "{}")
+            assertTrue(result.isError)
+            assertFalse(result.text.contains("gated_secret"), result.text)
         }
 
     @Test

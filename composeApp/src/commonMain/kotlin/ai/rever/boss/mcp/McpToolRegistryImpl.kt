@@ -331,6 +331,38 @@ internal fun mcpToolPermitted(
     }
 
 /**
+ * The closest candidate tool name to [name], when one is near enough to be a plausible typo.
+ * Backs the "did you mean" hint in [McpToolRegistryCore.invoke]'s unknown-tool rejection; a
+ * name farther than [maxOf] `(2, name.length / 3)` edits is treated as unrelated rather than
+ * offering a misleading suggestion.
+ */
+internal fun nearestToolName(
+    name: String,
+    candidates: Collection<String>,
+): String? =
+    candidates
+        .minByOrNull { editDistance(it, name) }
+        ?.takeIf { editDistance(it, name) <= maxOf(2, name.length / 3) }
+
+/** Plain Levenshtein distance - tool names are short, no early exit needed. */
+private fun editDistance(
+    a: String,
+    b: String,
+): Int {
+    var prev = IntArray(b.length + 1) { it }
+    for (i in 1..a.length) {
+        val cur = IntArray(b.length + 1)
+        cur[0] = i
+        for (j in 1..b.length) {
+            val substitution = if (a[i - 1] == b[j - 1]) 0 else 1
+            cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + substitution)
+        }
+        prev = cur
+    }
+    return prev[b.length]
+}
+
+/**
  * Hard ceiling, in characters, on what [McpToolRegistryCore.invoke] hands back for one
  * plugin tool call.
  *
@@ -855,7 +887,7 @@ internal class McpToolRegistryCore(
     ): McpToolResult {
         val tool =
             _tools.value.firstOrNull { it.definition.name == toolName }
-                ?: return McpToolResult("Unknown or disabled MCP tool: $toolName", isError = true)
+                ?: return McpToolResult(unavailableToolMessage(toolName), isError = true)
         val args = parseMcpToolArgs(arguments, logger)
         val revocation = policyEngine.revocationVersion(toolName, tool.providerId)
         // The definition's own readOnly declaration rides along on every policy consult for
@@ -938,6 +970,26 @@ internal class McpToolRegistryCore(
                     secretRefs = secrets.references.map { it.ledgerName },
                 )
             }
+        }
+    }
+
+    /**
+     * Why [toolName] missed the exposed set, stated precisely: never registered, switched off,
+     * or denied to the current user. The single "Unknown or disabled" catch-all this replaces
+     * sent the caller to list every tool just to learn which case it had hit - and a wrong
+     * guess retried the same call. The suggestion is drawn from [permittedTools] only, so the
+     * hint cannot name a tool the caller could not see anyway.
+     */
+    private fun unavailableToolMessage(toolName: String): String {
+        if (_all.value.none { it.definition.name == toolName }) {
+            val suggestion = nearestToolName(toolName, permittedTools().map { it.definition.name })
+            return "No such MCP tool: '$toolName'" +
+                (suggestion?.let { " - did you mean '$it'?" } ?: "")
+        }
+        return if (toolName in _disabled.value) {
+            "MCP tool '$toolName' is disabled - re-enable it to call it."
+        } else {
+            "MCP tool '$toolName' is not permitted for the current user."
         }
     }
 
