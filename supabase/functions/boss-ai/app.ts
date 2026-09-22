@@ -12,6 +12,13 @@ import {
   upstreamKey,
 } from "./wire.ts"
 
+class SettlementTimeoutError extends Error {
+  constructor() {
+    super("settlement_timeout")
+    this.name = "SettlementTimeoutError"
+  }
+}
+
 export interface Dependencies {
   sessionUser(token: string): Promise<string | null>
   rpc(name: string, params: Obj): Promise<unknown>
@@ -211,23 +218,36 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         // been (or is about to be) streamed to the client; the settlement
         // is a side write that must not block returning. The 2 second
         // budget is generous for PostgREST in healthy operation and short
-        // enough to keep the function within Supabase's edge time budget,
-        // even across the retry path.
+        // enough to keep the function within Supabase's edge time budget.
         const settleRpc = deps.rpc("boss_ai_settle", {
           p_request_id: requestId,
           p_tokens: tokens,
         })
-        await Promise.race([
-          settleRpc,
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("settlement_timeout")), 2_000)
-          ),
-        ])
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          await Promise.race([
+            settleRpc,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new SettlementTimeoutError()), 2_000)
+            }),
+          ])
+        } finally {
+          if (timer !== undefined) clearTimeout(timer)
+        }
       }
       const settleWithRetry = async (tokens: number | null) => {
-        await settle(tokens).catch(async () => {
+        try {
+          await settle(tokens)
+        } catch (error) {
+          // A timed-out RPC may still commit after this edge function stops
+          // waiting. Retrying it could apply the settlement twice, so only
+          // retry failures that are known to have returned before the call.
+          if (error instanceof SettlementTimeoutError) {
+            audit("settlement_timeout")
+            return
+          }
           await settle(tokens).catch(() => audit("settlement_failed"))
-        })
+        }
       }
       if (input.stream !== true) {
         try {

@@ -47,7 +47,7 @@ async function fixture(options: {
       // BossConsole#1252: a settlement RPC that never resolves. The fix
       // bounds the call so the edge function does not hang.
       if (name === "boss_ai_settle" && options.hangSettlement) {
-        await new Promise<void>(() => { /* never resolves */ })
+        await new Promise<void>(() => {/* never resolves */})
       }
       if (name === "boss_ai_settle" && options.failFirstSettlement && ++settlements === 1) {
         throw new Error("private database detail")
@@ -499,4 +499,6 @@ Deno.test("a hung settlement does not block the response (BossConsole#1252)", as
   // RPC never resolves. Allow a generous bound for CI jitter, but anything
   // that takes more than a few seconds means the function hung on settle.
   assert(elapsed < 10_000, `response took ${elapsed}ms; settlement hung the function`)
+  assertEquals(f.calls.filter((call) => call.name === "boss_ai_settle").length, 1)
+  assert(f.audits.includes("settlement_timeout"))
 })

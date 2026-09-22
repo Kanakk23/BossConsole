@@ -1,5 +1,8 @@
 import { HttpError } from "./auth.ts"
 
+const MAX_TOOL_CALLS_PER_MESSAGE = 16
+const MAX_TOOL_DESCRIPTION_LENGTH = 4_096
+
 export type Obj = Record<string, unknown>
 export interface Model {
   id: string
@@ -196,9 +199,12 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
     // BossConsole#1251: cap tool_calls per message. A single message
     // with thousands of tool_calls multiplies the JSON.parse cost
     // in `functionCall` (now mandatory) and produces a request the
-    // upstream would reject at the wire size anyway. 16 matches the
-    // OpenAI request shape limit and stops the obvious amplifier.
-    if (Array.isArray(m.tool_calls) && m.tool_calls.length > 16) throw invalid()
+    // upstream would reject at the wire size anyway. This is a BOSS policy
+    // bound that stops the obvious amplifier; it is not an upstream limit.
+    if (
+      Array.isArray(m.tool_calls) &&
+      m.tool_calls.length > MAX_TOOL_CALLS_PER_MESSAGE
+    ) throw invalid()
     if (Array.isArray(m.tool_calls)) m.tool_calls.forEach(functionCall)
     if (
       m.role === "tool" && (m.content === null ||
@@ -234,10 +240,13 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
       // BossConsole#1251: cap the per-tool description. A multi-MB
       // description is forwarded verbatim into the upstream payload,
       // and the only sane upper bound on a tool description is the
-      // request body cap - well below that. 4 KB matches the OpenAI
-      // documented limit and stops an obvious amplification vector.
+      // request body cap - well below that. This is a BOSS policy bound,
+      // not an upstream documented limit, and stops an obvious amplifier.
       if (f.description !== undefined) {
-        if (typeof f.description !== "string" || f.description.length > 4_096) throw invalid()
+        if (
+          typeof f.description !== "string" ||
+          f.description.length > MAX_TOOL_DESCRIPTION_LENGTH
+        ) throw invalid()
       }
       if (f.strict !== undefined && typeof f.strict !== "boolean") throw invalid()
       if (f.parameters !== undefined) object(f.parameters)
