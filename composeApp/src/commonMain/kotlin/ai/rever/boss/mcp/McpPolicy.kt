@@ -39,9 +39,9 @@ enum class McpApprovalDisposition {
     QUEUE_FULL,
 
     /**
-     * The call was refused before authorization because the argument text was not a JSON
-     * object matching the tool's inputSchema - the handler never ran, so there was never
-     * anything for an operator to approve.
+     * The call was refused before authorization because its arguments were malformed or
+     * failed the tool's declared inputSchema - the handler never ran and no approval was
+     * requested.
      */
     INVALID_ARGUMENTS,
 
@@ -59,12 +59,6 @@ enum class McpApprovalDisposition {
      */
     PROVIDER_TRUST_PERSIST_FAILED,
 
-    /**
-     * The call was refused before authorization because its arguments failed the tool's
-     * declared `inputSchema` - a required key absent or a property of the wrong primitive
-     * type. The handler never ran and no approval was requested.
-     */
-    INVALID_ARGUMENTS,
 }
 
 /**
