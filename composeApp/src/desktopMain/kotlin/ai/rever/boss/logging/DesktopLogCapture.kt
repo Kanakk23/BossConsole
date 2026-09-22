@@ -210,7 +210,10 @@ class DesktopLogCapture {
      * Drain [notificationQueue] to the current listeners, one entry at a time. A listener that
      * throws is skipped so a bad consumer cannot take down delivery for the rest.
      */
-    @Suppress("TooGenericExceptionCaught") // A listener callback can throw anything; delivery continues.
+    // A listener callback can throw anything; the fault is dropped, not reported through
+    // logger/println - those feed back through this same capture and a throwing listener
+    // would churn the queue forever.
+    @Suppress("TooGenericExceptionCaught", "SwallowedException")
     private fun dispatchLoop() {
         while (true) {
             val entry =
