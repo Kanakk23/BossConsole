@@ -63,7 +63,12 @@ class ScriptFileGuardTest {
         val dir = Files.createTempDirectory("script-guard").toFile()
         try {
             val resolved = ScriptFileGuard.resolveInside(dir, "ok.swift")
-            assertEquals(dir.toPath().toRealPath().resolve("ok.swift").toFile(), resolved)
+            val expected =
+                dir.toPath()
+                    .toRealPath()
+                    .resolve("ok.swift")
+                    .toFile()
+            assertEquals(expected, resolved)
         } finally {
             dir.deleteRecursively()
         }
