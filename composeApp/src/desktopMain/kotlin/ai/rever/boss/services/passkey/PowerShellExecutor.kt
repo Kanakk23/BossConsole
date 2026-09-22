@@ -80,9 +80,7 @@ object PowerShellExecutor {
         val exitCode = process.waitFor(30, TimeUnit.SECONDS)
 
         if (!exitCode || process.exitValue() != 0) {
-            throw RuntimeException(
-                "PowerShell script failed with exit code: ${process.exitValue()}, output: $output",
-            )
+            throw RuntimeException("PowerShell script failed with exit code: ${process.exitValue()}, output: $output")
         }
 
         return output.trim()
