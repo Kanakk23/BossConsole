@@ -57,11 +57,17 @@ import kotlin.time.Clock
  * from a cold start (zero active workspaces or terminals) without manual UI actions.
  *
  * Tools exposed:
- * - list_workspaces / workspace_list
- * - open_workspace / workspace_open
- * - create_workspace / workspace_create
- * - open_terminal / terminal_open
- * - close_workspace / workspace_close
+ * - list_workspaces
+ * - open_workspace
+ * - create_workspace
+ * - open_terminal
+ * - close_workspace
+ *
+ * The reversed legacy names (workspace_list, workspace_open, workspace_create,
+ * terminal_open, workspace_close) remain invocable as invoke-only aliases via
+ * [toolAliases] but are not advertised in list_tools, the bridge mirror, or
+ * search - advertising both spellings paid a second name + description +
+ * schema per action on every listing.
  *
  * Every tool that mutates on-screen state or runs a command declares
  * `readOnly = false`, so the mutating gate's fail-closed OR classifies it as
@@ -75,7 +81,7 @@ import kotlin.time.Clock
  */
 // One cohesive MCP tool provider; handlers stay beside their tool definitions.
 @Suppress("TooManyFunctions", "LargeClass")
-object WorkspaceMcpToolProvider : McpToolProvider {
+object WorkspaceMcpToolProvider : McpToolProvider, McpToolAliasProvider {
     private val logger = BossLogger.forComponent("WorkspaceMcpToolProvider")
 
     /** Panel id of the terminal panel the bootstrap Space builds. */
@@ -185,18 +191,22 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         )
     }
 
+    override val toolAliases: Map<String, String> =
+        mapOf(
+            "workspace_list" to "list_workspaces",
+            "workspace_open" to "open_workspace",
+            "workspace_create" to "create_workspace",
+            "terminal_open" to "open_terminal",
+            "workspace_close" to "close_workspace",
+        )
+
     override fun tools(): List<McpToolDefinition> =
         listOf(
             createListWorkspacesTool("list_workspaces"),
-            createListWorkspacesTool("workspace_list"),
             createOpenWorkspaceTool("open_workspace"),
-            createOpenWorkspaceTool("workspace_open"),
             createCreateWorkspaceTool("create_workspace"),
-            createCreateWorkspaceTool("workspace_create"),
             createOpenTerminalTool("open_terminal"),
-            createOpenTerminalTool("terminal_open"),
             createCloseWorkspaceTool("close_workspace"),
-            createCloseWorkspaceTool("workspace_close"),
         )
 
     private fun createListWorkspacesTool(name: String): McpToolDefinition =

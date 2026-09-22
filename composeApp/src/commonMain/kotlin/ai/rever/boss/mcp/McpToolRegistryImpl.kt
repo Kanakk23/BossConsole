@@ -446,6 +446,18 @@ private fun truncationMarker(
         "with a narrower query, a filter, or a smaller range to get the rest.]"
 
 /**
+ * A provider that still answers to legacy tool names on invoke without
+ * advertising them. The registry reads [toolAliases] once at registration
+ * (same snapshot semantics as [McpToolProvider.tools]); the aliases never
+ * appear in `allTools`/`tools`, so they cost nothing on list_tools, the
+ * bridge mirror, or search, while old callers keep working.
+ */
+internal interface McpToolAliasProvider {
+    /** Invoked alias name -> canonical name as declared in [McpToolProvider.tools]. */
+    val toolAliases: Map<String, String>
+}
+
+/**
  * Testable core behind [McpToolRegistryImpl]. Extracted so unit tests can
  * exercise the registration/permission/persistence/dispatch logic against a
  * throwaway instance and a temp file, instead of the process-wide singleton
@@ -605,6 +617,16 @@ internal class McpToolRegistryCore(
      */
     private val _providers = MutableStateFlow<Map<String, List<McpToolDefinition>>>(emptyMap())
 
+    /**
+     * Legacy/alias tool names by provider id, captured at registration beside the
+     * cached tool list. Aliases are invoke-only: they are never flattened into
+     * [allTools], so list_tools, the bridge mirror and tool search pay one name,
+     * description and schema per action instead of two. Resolving an alias to the
+     * canonical tool means it inherits that tool's disabled, permission and
+     * policy state automatically - an alias cannot bypass the canonical gate.
+     */
+    private val _providerAliases = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
+
     private val _all = MutableStateFlow<List<RegisteredMcpTool>>(emptyList())
     val allTools: StateFlow<List<RegisteredMcpTool>> = _all.asStateFlow()
 
@@ -652,6 +674,8 @@ internal class McpToolRegistryCore(
                 )
                 emptyList()
             }
+        // Read alongside tools() outside the lock - same plugin-code discipline.
+        val aliases = (provider as? McpToolAliasProvider)?.toolAliases.orEmpty()
         synchronized(mutationLock) {
             if (_providers.value.containsKey(provider.providerId)) {
                 // Same-id re-registration replaces the previous provider. Legitimate on
@@ -664,6 +688,7 @@ internal class McpToolRegistryCore(
                 )
             }
             _providers.update { it + (provider.providerId to defs) }
+            _providerAliases.update { it + (provider.providerId to aliases) }
             recompute()
         }
         logger.info(
@@ -677,6 +702,7 @@ internal class McpToolRegistryCore(
         synchronized(mutationLock) {
             if (!_providers.value.containsKey(providerId)) return@synchronized
             _providers.update { it - providerId }
+            _providerAliases.update { it - providerId }
             recompute()
             logger.info(
                 LogCategory.SYSTEM,
@@ -880,22 +906,49 @@ internal class McpToolRegistryCore(
         return mcpToolPermitted(def, access.isAdmin, access.permissions)
     }
 
+    /**
+     * Alias name -> (providerId, canonical tool name) for the first provider
+     * that claims it, or null. The direct name lookup in [invoke] runs before
+     * this, so an alias can never shadow a real tool registered under it.
+     */
+    private fun resolveAlias(toolName: String): Pair<String, String>? =
+        _providerAliases.value.entries.firstNotNullOfOrNull { (providerId, aliases) ->
+            aliases[toolName]?.let { providerId to it }
+        }
+
     @Suppress("LongMethod") // Keep authorization and execution inside the same cancellation audit boundary.
     suspend fun invoke(
         toolName: String,
         arguments: String,
     ): McpToolResult {
+        // A registered tool wins over an alias of the same name (direct lookup
+        // first); an alias resolves to its canonical definition, so the
+        // canonical's disabled/permission state decides, never the alias name's.
+        val directTool = _tools.value.firstOrNull { it.definition.name == toolName }
+        val alias = if (directTool == null) resolveAlias(toolName) else null
         val tool =
-            _tools.value.firstOrNull { it.definition.name == toolName }
-                ?: return McpToolResult(unavailableToolMessage(toolName), isError = true)
+            directTool
+                ?: alias?.let { (providerId, canonicalName) ->
+                    _tools.value.firstOrNull {
+                        it.providerId == providerId && it.definition.name == canonicalName
+                    }
+                }
+                ?: return McpToolResult(
+                    unavailableToolMessage(alias?.second ?: toolName),
+                    isError = true,
+                )
         val args = parseMcpToolArgs(arguments, logger)
-        val revocation = policyEngine.revocationVersion(toolName, tool.providerId)
+        // Policy is consulted under the canonical name: an alias must inherit the
+        // canonical tool's policy, not fall back to whatever default the alias's
+        // own name would classify as.
+        val canonicalName = tool.definition.name
+        val revocation = policyEngine.revocationVersion(canonicalName, tool.providerId)
         // The definition's own readOnly declaration rides along on every policy consult for
         // this invocation: a tool that declared side effects classifies as mutating whatever
         // its name says (#804), so it gets the mutating default - ASK under the factory
         // config - rather than being auto-allowed for avoiding the catalog's name patterns.
-        val savedPolicy = policyEngine.policyFor(toolName, tool.providerId, tool.definition.readOnly)
-        val policy = askBeforeDestructiveShell(toolName, args, savedPolicy)
+        val savedPolicy = policyEngine.policyFor(canonicalName, tool.providerId, tool.definition.readOnly)
+        val policy = askBeforeDestructiveShell(canonicalName, args, savedPolicy)
         val startTime = System.nanoTime()
         // The secret pre-pass runs before the audit boundary below on purpose: nothing in it
         // executes the tool, and a cancellation while the vault is being read has nothing to
@@ -952,7 +1005,7 @@ internal class McpToolRegistryCore(
             // hop on the caller - the disk work itself belongs to the writer thread.
             withContext(NonCancellable + Dispatchers.IO) {
                 ledger.record(
-                    toolName = toolName,
+                    toolName = canonicalName,
                     providerId = tool.providerId,
                     policyApplied = effectivePolicy,
                     approvalDisposition = disposition,
