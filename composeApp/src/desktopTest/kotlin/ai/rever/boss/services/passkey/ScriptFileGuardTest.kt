@@ -75,13 +75,11 @@ class ScriptFileGuardTest {
         val scriptsDir = File(root, "scripts").apply { mkdirs() }
         val outside = File(root, "outside.swift").apply { writeText("print(1)") }
         try {
-            try {
+            // Windows without SeCreateSymbolicLinkPrivilege cannot create a
+            // symlink; nothing left to prove on such a host.
+            runCatching {
                 Files.createSymbolicLink(File(scriptsDir, "link.swift").toPath(), outside.toPath())
-            } catch (e: Exception) {
-                // Windows without SeCreateSymbolicLinkPrivilege cannot create one;
-                // nothing left to prove on such a host.
-                return
-            }
+            }.getOrElse { return }
             ScriptFileGuard.requireSimpleName("link.swift")
             assertFailsWith<IllegalArgumentException> {
                 ScriptFileGuard.resolveInside(scriptsDir, "link.swift")

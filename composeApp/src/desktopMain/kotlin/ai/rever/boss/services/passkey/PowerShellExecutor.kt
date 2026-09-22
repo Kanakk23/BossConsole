@@ -52,34 +52,40 @@ object PowerShellExecutor {
         ScriptFileGuard.requireSimpleName(scriptName)
 
         return try {
-            val scriptPath = ScriptFileGuard.resolveInside(File(powerShellScriptsDir), scriptName).toPath()
-
-            if (!Files.exists(scriptPath)) {
-                throw IOException("PowerShell script not found: $scriptPath")
-            }
-
-            val command = mutableListOf("powershell", "-ExecutionPolicy", "Bypass", "-File", scriptPath.toString())
-            command.addAll(args)
-
-            logger.debug(LogCategory.PASSKEY, "Executing PowerShell script", mapOf("script" to scriptName))
-
-            val process =
-                ProcessBuilder(command)
-                    .redirectErrorStream(true)
-                    .start()
-
-            val output = process.inputStream.bufferedReader().readText()
-            val exitCode = process.waitFor(30, TimeUnit.SECONDS)
-
-            if (!exitCode || process.exitValue() != 0) {
-                throw RuntimeException("PowerShell script failed with exit code: ${process.exitValue()}, output: $output")
-            }
-
-            output.trim()
+            runScript(scriptName, args)
         } catch (e: Exception) {
             logger.warn(LogCategory.PASSKEY, "Error executing PowerShell script", error = e)
             throw e
         }
+    }
+
+    private fun runScript(scriptName: String, args: Array<out String>): String {
+        val scriptPath = ScriptFileGuard.resolveInside(File(powerShellScriptsDir), scriptName).toPath()
+
+        if (!Files.exists(scriptPath)) {
+            throw IOException("PowerShell script not found: $scriptPath")
+        }
+
+        val command = mutableListOf("powershell", "-ExecutionPolicy", "Bypass", "-File", scriptPath.toString())
+        command.addAll(args)
+
+        logger.debug(LogCategory.PASSKEY, "Executing PowerShell script", mapOf("script" to scriptName))
+
+        val process =
+            ProcessBuilder(command)
+                .redirectErrorStream(true)
+                .start()
+
+        val output = process.inputStream.bufferedReader().readText()
+        val exitCode = process.waitFor(30, TimeUnit.SECONDS)
+
+        if (!exitCode || process.exitValue() != 0) {
+            throw RuntimeException(
+                "PowerShell script failed with exit code: ${process.exitValue()}, output: $output",
+            )
+        }
+
+        return output.trim()
     }
 
     /**
