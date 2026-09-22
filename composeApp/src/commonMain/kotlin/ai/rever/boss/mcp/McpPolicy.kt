@@ -58,7 +58,6 @@ enum class McpApprovalDisposition {
      * fault) but the durable grant does not exist. See [McpPolicyFault.ProviderPolicyPersistFailed].
      */
     PROVIDER_TRUST_PERSIST_FAILED,
-
 }
 
 /**
