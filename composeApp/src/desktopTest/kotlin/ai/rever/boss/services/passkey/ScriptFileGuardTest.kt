@@ -64,7 +64,8 @@ class ScriptFileGuardTest {
         try {
             val resolved = ScriptFileGuard.resolveInside(dir, "ok.swift")
             val expected =
-                dir.toPath()
+                dir
+                    .toPath()
                     .toRealPath()
                     .resolve("ok.swift")
                     .toFile()
