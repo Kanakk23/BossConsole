@@ -1,5 +1,5 @@
 /**
- * `fluck-oauth` — server entrypoint.
+ * `fluck-oauth` - server entrypoint.
  *
  * All routing, verification and output lives in ./app.ts, kept in a separate module so the
  * test suite can import `createHandler` and drive it with fakes WITHOUT starting a listener or

@@ -1,5 +1,5 @@
 /**
- * `fluck-oauth` — the OAuth redirect target for Fluck's Google connector.
+ * `fluck-oauth` - the OAuth redirect target for Fluck's Google connector.
  *
  * ## What this replaces
  *
