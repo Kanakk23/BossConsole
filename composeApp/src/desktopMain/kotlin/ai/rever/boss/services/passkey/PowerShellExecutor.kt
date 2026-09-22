@@ -59,7 +59,10 @@ object PowerShellExecutor {
         }
     }
 
-    private fun runScript(scriptName: String, args: Array<out String>): String {
+    private fun runScript(
+        scriptName: String,
+        args: Array<out String>,
+    ): String {
         val scriptPath = ScriptFileGuard.resolveInside(File(powerShellScriptsDir), scriptName).toPath()
 
         if (!Files.exists(scriptPath)) {
