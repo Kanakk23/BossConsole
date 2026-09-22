@@ -336,7 +336,9 @@ fun WorkspaceButton(
             onDismiss = { showOpenDialog = false },
             onOpen = { jsonString ->
                 workspaceManager.importWorkspace(jsonString)?.let { workspace ->
-                    workspaceManager.loadWorkspace(workspace)
+                    // Let the apply/switch callback claim the Space only after it proves that
+                    // the imported layout can build at least one declared tab. Claiming it here
+                    // would leave the manager pointing at an unapplied Space on refusal.
                     onOpenWorkspace(workspace)
                 }
                 showOpenDialog = false
