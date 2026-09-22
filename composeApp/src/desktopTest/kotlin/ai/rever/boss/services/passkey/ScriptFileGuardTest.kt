@@ -63,7 +63,7 @@ class ScriptFileGuardTest {
         val dir = Files.createTempDirectory("script-guard").toFile()
         try {
             val resolved = ScriptFileGuard.resolveInside(dir, "ok.swift")
-            assertEquals(File(dir, "ok.swift").canonicalFile, resolved)
+            assertEquals(dir.toPath().toRealPath().resolve("ok.swift").toFile(), resolved)
         } finally {
             dir.deleteRecursively()
         }
@@ -95,7 +95,7 @@ class ScriptFileGuardTest {
         try {
             File(dir, "real.swift").writeText("print(1)")
             val resolved = ScriptFileGuard.resolveInside(dir, "real.swift")
-            assertTrue(resolved.toPath().startsWith(dir.canonicalFile.toPath()))
+            assertTrue(resolved.toPath().startsWith(dir.toPath().toRealPath()))
         } finally {
             dir.deleteRecursively()
         }

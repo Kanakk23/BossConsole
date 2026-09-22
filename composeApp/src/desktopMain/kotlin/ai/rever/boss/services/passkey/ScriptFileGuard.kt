@@ -1,6 +1,7 @@
 package ai.rever.boss.services.passkey
 
 import java.io.File
+import java.nio.file.Files
 
 /**
  * Names a script file that an executor is about to hand to `swift` or
@@ -40,10 +41,14 @@ internal object ScriptFileGuard {
         dir: File,
         name: String,
     ): File {
-        val resolved = File(dir, name).canonicalFile
-        require(resolved.toPath().startsWith(dir.canonicalFile.toPath())) {
+        // toRealPath resolves symlinks on every platform; canonicalFile does
+        // not on Windows, which would let a symlink inside dir slip through.
+        val dirReal = dir.toPath().toRealPath()
+        val candidate = dirReal.resolve(name)
+        val resolved = if (Files.exists(candidate)) candidate.toRealPath() else candidate.normalize()
+        require(resolved.startsWith(dirReal)) {
             "Refusing script outside its directory: $name"
         }
-        return resolved
+        return resolved.toFile()
     }
 }
