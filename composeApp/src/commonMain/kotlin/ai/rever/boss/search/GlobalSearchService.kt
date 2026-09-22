@@ -1,6 +1,7 @@
 package ai.rever.boss.search
 
 import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
+import ai.rever.boss.components.window_panel.SplitViewStateRegistry
 import ai.rever.boss.keymap.KeymapSettingsManager
 import ai.rever.boss.keymap.model.KeymapActions
 import ai.rever.boss.keymap.model.formatShortcutLabel
@@ -335,7 +336,16 @@ object GlobalSearchService {
      * tab of neither type (terminal, diff, …) still matches on title alone, with both left null.
      */
     private fun searchTabs(query: String): List<SearchResult.TabResult> {
-        val tabs = TopOfMindStateHolder.activeTabs.value
+        // The holder is a snapshot - refreshed when the search dialog opens and by the plugin
+        // adapter's ~2s poll - so a tab closed since the last refresh is still listed here, and
+        // returning it offers activation of a tab that no longer exists: a phantom result the
+        // caller acts on and then retries. The registry is live state rather than a snapshot -
+        // a closed window unregisters and a closed tab has no location - so an entry with no
+        // live location must not come back as actionable.
+        val tabs =
+            TopOfMindStateHolder.activeTabs.value.filter { tab ->
+                SplitViewStateRegistry.getState(tab.windowId)?.findTabLocation(tab.tabInfo.id) != null
+            }
         if (tabs.isEmpty()) {
             return emptyList()
         }
