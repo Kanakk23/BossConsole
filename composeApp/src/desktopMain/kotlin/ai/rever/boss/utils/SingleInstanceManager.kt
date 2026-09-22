@@ -1306,26 +1306,30 @@ object SingleInstanceManager {
             return RESPONSE_ERROR_PREFIX + "Missing workspace name"
         }
         val handler = workspaceSwitchHandlerOverride
-        val success = if (handler != null) {
-            handler(name)
-        } else {
-            val exists =
-                workspaceValidatorOverride?.invoke(name) ?: run {
-                    val activeWorkspaces =
-                        ai.rever.boss.components.workspaces.workspaceManager.workspaces.value
-                    activeWorkspaces.any {
-                        it.name.equals(name, ignoreCase = true) || it.id.equals(name, ignoreCase = true)
-                    }
-                }
-            if (exists) {
-                ai.rever.boss.cli.CLICommandHandler
-                    .getInstance()
-                    .queueCommand(ai.rever.boss.cli.CLICommand.SwitchWorkspace(name))
-                true
+        val success =
+            if (handler != null) {
+                handler(name)
             } else {
-                false
+                val exists =
+                    workspaceValidatorOverride?.invoke(name) ?: run {
+                        val activeWorkspaces =
+                            ai.rever.boss.components.workspaces.workspaceManager.workspaces.value
+                        activeWorkspaces.any {
+                            it.name.equals(name, ignoreCase = true) || it.id.equals(name, ignoreCase = true)
+                        }
+                    }
+                if (exists) {
+                    ai.rever.boss.cli.CLICommandHandler
+                        .getInstance()
+                        .queueCommand(
+                            ai.rever.boss.cli.CLICommand
+                                .SwitchWorkspace(name),
+                        )
+                    true
+                } else {
+                    false
+                }
             }
-        }
         return if (success) RESPONSE_OK else RESPONSE_ERR_NOT_FOUND
     }
 
@@ -1369,7 +1373,9 @@ object SingleInstanceManager {
                 buildLlmTokenResponse(llmTokenProviderOverride)
             }
 
-            request.verb == VERB_WORKSPACE_SWITCH -> handleWorkspaceSwitch(request)
+            request.verb == VERB_WORKSPACE_SWITCH -> {
+                handleWorkspaceSwitch(request)
+            }
 
             request.verb == VERB_STATUS -> {
                 buildStatusResponse(statusProviderOverride, toolsJson = toolsProviderOverride)

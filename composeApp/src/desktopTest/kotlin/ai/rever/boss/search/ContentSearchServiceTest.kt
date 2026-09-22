@@ -15,8 +15,11 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.io.InputStream
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -292,6 +295,79 @@ class ContentSearchServiceTest {
     }
 
     @Test
+    fun `invalid search regex is reported instead of looking like no results`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        File(dir, "a.txt").writeText("needle\n")
+        val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
+
+        val error =
+            assertFailsWith<IllegalArgumentException> {
+                service.searchInProject(query = "(", isRegex = true)
+            }
+
+        assertTrue(error.message.orEmpty().contains("Invalid regex pattern"))
+    }
+
+    @Test
+    fun `invalid replacement regex is returned as a per-file error`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        File(dir, "a.txt").writeText("needle\n")
+        val summary =
+            ContentSearchService(projectPathProvider = { dir.absolutePath }).replaceInProject(
+                query = "(",
+                replacement = "pin",
+                files = listOf("a.txt"),
+                isRegex = true,
+                dryRun = true,
+            )
+
+        assertEquals(0, summary.totalReplacements)
+        assertTrue(
+            summary.files
+                .single()
+                .error
+                .orEmpty()
+                .contains("Invalid regex pattern"),
+        )
+    }
+
+    @Test
+    fun `a hostile regex reports an incomplete search instead of an empty result`(
+        @TempDir dir: File,
+    ): Unit =
+        runBlocking {
+            File(dir, "long.txt").writeText("a".repeat(40_000) + "b")
+            val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
+
+            assertFailsWith<ProjectSearchIncompleteException> {
+                withTimeout(5_000) {
+                    service.searchInProject(query = "(a+)+$", isRegex = true)
+                }
+            }
+        }
+
+    @Test
+    fun `a file stream that grows beyond the read limit is rejected while reading`() {
+        val result = readUtf8AtMost(GrowingInputStream(initialSize = 1_024, finalSize = 1_025), 1_024)
+
+        assertEquals(BoundedText.TooLarge, result)
+    }
+
+    @Test
+    fun `cache does not confuse distinct text with the same String hash code`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        val file = File(dir, "a.txt").apply { writeText("Aa") }
+        val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
+
+        assertEquals(listOf("a.txt"), service.searchInProject(query = "Aa").map { it.path })
+        file.writeText("BB") // "Aa" and "BB" have the same String.hashCode().
+        assertTrue(service.searchInProject(query = "Aa").isEmpty())
+    }
+
+    @Test
     fun `a per-file replace failure is reported, not swallowed`(
         @TempDir dir: File,
     ) = runBlocking {
@@ -562,6 +638,40 @@ class ContentSearchServiceTest {
     }
 
     @Test
+    fun `oversized open buffers are excluded from search and replacement`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        val file = File(dir, "open.kt").apply { writeText("needle") }
+        val bridge =
+            object : EditorBufferBridge {
+                override suspend fun readBuffer(path: String) =
+                    ai.rever.boss.plugin.api
+                        .BufferSnapshot(path, "needle" + "x".repeat(1_048_576), 1L, true)
+
+                override suspend fun applyEdit(
+                    path: String,
+                    startLine: Int,
+                    startCol: Int,
+                    endLine: Int,
+                    endCol: Int,
+                    newText: String,
+                    expectedVersion: Long,
+                ): ai.rever.boss.plugin.api.EditResult? = null
+            }
+        val service = ContentSearchService({ dir.absolutePath }, bridge, { setOf(file.absolutePath) })
+
+        assertTrue(service.searchInProject(query = "needle").isEmpty())
+        assertEquals(
+            "file too large",
+            service
+                .replaceInProject("needle", "pin", listOf("open.kt"))
+                .files
+                .single()
+                .error,
+        )
+    }
+
+    @Test
     fun `a cancelling caller unwinds a catastrophic-backtracking regex instead of pinning the thread`(
         @TempDir dir: File,
     ) {
@@ -586,10 +696,11 @@ class ContentSearchServiceTest {
                         launch(Dispatchers.IO) {
                             service.searchInProject(query = "(a+)+\$", isRegex = true)
                         }
-                    // Let the matcher start spinning before the cancel lands.
-                    kotlinx.coroutines.delay(1_000)
+                    // Cancel while the matcher is still inside the per-file budget.
+                    kotlinx.coroutines.delay(25)
                     job.cancel()
                     job.join()
+                    assertTrue(job.isCancelled, "the caller cancellation was swallowed by the matcher")
                     true
                 }
 
@@ -600,6 +711,31 @@ class ContentSearchServiceTest {
             )
         }
     }
+
+    @Test
+    fun `matcher cancellation is observed after matching has entered the character stream`() =
+        runBlocking {
+            val entered = CompletableDeferred<Unit>()
+            val cancelled = AtomicBoolean(false)
+            val matching =
+                async(Dispatchers.Default) {
+                    assertFailsWith<kotlinx.coroutines.CancellationException> {
+                        Regex("(a+)+$")
+                            .toPattern()
+                            .matcher(
+                                InterruptibleText(
+                                    "a".repeat(40_000) + "b",
+                                    { cancelled.get() },
+                                    Long.MAX_VALUE,
+                                    { entered.complete(Unit) },
+                                ),
+                            ).find()
+                    }
+                }
+            withTimeout(5_000) { entered.await() }
+            cancelled.set(true)
+            withTimeout(5_000) { matching.await() }
+        }
 
     // ---- BossConsole#622: concurrent closed-file replacements ----
     //
@@ -648,6 +784,21 @@ class ContentSearchServiceTest {
                 file.readText(),
                 "one operation silently reversed the other's completed edit (iteration $it)",
             )
+        }
+    }
+
+    private class GrowingInputStream(
+        private val initialSize: Int,
+        private val finalSize: Int,
+    ) : InputStream() {
+        private var position = 0
+        private var visibleSize = initialSize
+
+        override fun read(): Int {
+            if (position >= visibleSize) return -1
+            position++
+            if (position == initialSize) visibleSize = finalSize
+            return 'a'.code
         }
     }
 

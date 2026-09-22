@@ -78,7 +78,9 @@ class BossUrlCommand : CliktCommand(name = "url") {
  *   boss workspace <config.json>
  *   boss workspace switch <name>
  */
-class BossWorkspaceCommand : CliktCommand(name = "workspace", invokeWithoutSubcommand = true) {
+class BossWorkspaceCommand : CliktCommand(name = "workspace") {
+    override val invokeWithoutSubcommand = true
+
     override fun help(context: Context) = "Loads or manages workspaces"
 
     val configPath by argument(help = "Path to workspace config file").optional()
@@ -381,7 +383,9 @@ class BossStatusCommand : CliktCommand(name = "status") {
  *   boss mcp ledger <verify|tail|search> [--json]
  */
 @Suppress("TooManyFunctions")
-class BossMcpCommand : CliktCommand(name = "mcp", invokeWithoutSubcommand = true) {
+class BossMcpCommand : CliktCommand(name = "mcp") {
+    override val invokeWithoutSubcommand = true
+
     override fun help(context: Context) = "Discovers and invokes MCP tools in the running BOSS Console"
 
     val action by argument(
@@ -891,6 +895,7 @@ class BossMcpCallCommand : CliktCommand(name = "call") {
         }
     }
 
+    @Suppress("ThrowsCount") // Each CLI failure branch exits with the same established non-zero result.
     private fun handleInvokeResponse(responseJson: String) {
         try {
             val element = Json.parseToJsonElement(responseJson).jsonObject
