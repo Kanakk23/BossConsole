@@ -287,7 +287,7 @@ class OrchestratorServiceImpl(
                             .newBuilder()
                             .addAllJvmArgsOverride(outcome.jvmArgs)
                             .putAllEnvOverride(outcome.env)
-                            .build()
+                            .build(),
                     )
             }
 
