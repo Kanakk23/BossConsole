@@ -5,6 +5,7 @@
 import { assertEquals, assertExists } from "jsr:@std/assert"
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { generateAuthChallenge, completeAuthentication, checkAuthStatus } from "../services/auth.ts"
+import { maskUserId } from "../utils/logging.ts"
 import { createMockSupabaseClient, mockPasskey, mockChallenge, mockAuthenticationCredential } from "./helpers/mocks.ts"
 import { buildAuthenticatorData, encodePayload, TEST_RP_ID } from "./helpers/webauthn.ts"
 
@@ -342,25 +343,30 @@ Deno.test("generateAuthChallenge - logs carry no raw email or user id", async ()
     log: console.log,
     error: console.error,
     warn: console.warn,
-    info: console.info
+    info: console.info,
+    debug: console.debug
   }
   const capture = (...args: unknown[]) => {
-    logged.push(args.map(arg => typeof arg === 'string' ? arg : JSON.stringify(arg)).join(' '))
+    logged.push(args.map(arg => arg instanceof Error ? `${arg.message}\n${arg.stack ?? ''}` : Deno.inspect(arg)).join(' '))
   }
   console.log = capture
   console.error = capture
   console.warn = capture
   console.info = capture
+  console.debug = capture
   try {
-    await generateAuthChallenge(mockClient as unknown as SupabaseClient, 'victim@example.com', 'session-xyz')
+    const result = await generateAuthChallenge(mockClient as unknown as SupabaseClient, 'victim@example.com', 'session-xyz')
+    assertEquals(result.success, true)
   } finally {
     console.log = originals.log
     console.error = originals.error
     console.warn = originals.warn
     console.info = originals.info
+    console.debug = originals.debug
   }
 
   assertExists(logged.find(line => line.includes('v***@example.com')))
+  assertExists(logged.find(line => line.includes(maskUserId('user-456'))))
   for (const line of logged) {
     assertEquals(line.includes('victim@example.com'), false, `log leaked raw email: ${line}`)
     assertEquals(line.includes('user-456'), false, `log leaked raw user id: ${line}`)

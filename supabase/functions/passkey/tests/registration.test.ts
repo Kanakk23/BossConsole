@@ -5,6 +5,7 @@
 import { assertEquals, assertExists } from "jsr:@std/assert"
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { generateRegistrationChallenge, completeRegistration, type RegistrationCredential } from "../services/registration.ts"
+import { maskSessionId } from "../utils/logging.ts"
 import { createMockSupabaseClient, mockChallenge, mockRegistrationCredential } from "./helpers/mocks.ts"
 
 Deno.test("generateRegistrationChallenge - should generate challenge for user", async () => {
@@ -92,7 +93,7 @@ Deno.test("generateRegistrationChallenge - logs mask the session id", async () =
   }
 
   assertEquals(logs.some(line => line.includes('session-secret-123')), false)
-  assertEquals(logs.some(line => line.includes('sess…')), true)
+  assertEquals(logs.some(line => line.includes(maskSessionId('session-secret-123'))), true)
 })
 
 Deno.test("generateRegistrationChallenge - should work without sessionId for same-device flows", async () => {

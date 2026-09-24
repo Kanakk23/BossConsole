@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { ChallengeType } from "../types/challenge.ts"
 import { normalizeBase64Url } from "./base64.ts"
-import { maskEmail, maskUserId } from "./logging.ts"
+import { maskEmail, maskPasskeyId, maskUserId } from "./logging.ts"
 import { COSE_ALG_ES256 } from "./webauthn.ts"
 
 /**
@@ -255,7 +255,7 @@ export async function storePasskeyInDB(
   supabase: SupabaseClient,
   passkey: Omit<PasskeyRecord, 'id' | 'created_at' | 'active'>
 ) {
-  console.log('storePasskeyInDB called with credential:', passkey.credential_id)
+  console.log('storePasskeyInDB called with credential:', maskPasskeyId(passkey.credential_id))
 
   try {
     const insertData = {
@@ -411,7 +411,7 @@ export async function recordPasskeyUse(
   }
 
   if (rowsOf(data).length === 0) {
-    console.error('❌ Signature counter was already advanced past', signCount, 'for passkey', passkeyId)
+    console.error('❌ Signature counter was already advanced past', signCount, 'for passkey', maskPasskeyId(passkeyId))
     return { success: false, advanced: false, error: 'Signature counter did not advance' }
   }
 
@@ -445,7 +445,7 @@ export async function findPasskeyByCredentialId(
   supabase: SupabaseClient,
   credentialId: string
 ) {
-  console.log('Finding passkey by credential ID:', credentialId)
+  console.log('Finding passkey by credential ID:', maskPasskeyId(credentialId))
 
   // credential_id is stored canonicalised (unpadded base64url), so a client that
   // emits standard base64 or padding still resolves to the same row. Everything

@@ -17,7 +17,7 @@ import { withErrorHandler, withStatusErrorHandler } from "../utils/error-handler
 import { generateSupabaseAccessToken } from "../utils/jwt.ts"
 import { ALLOWED_ORIGINS, getAllowedOrigins, getAllowedRpIds, getRpId, rpIdMatchesOrigin } from "../utils/config.ts"
 import { normalizeBase64Url } from "../utils/base64.ts"
-import { maskEmail, maskSessionId, maskUserId } from "../utils/logging.ts"
+import { maskEmail, maskPasskeyId, maskSessionId, maskUserId } from "../utils/logging.ts"
 import {
   challengeMatches,
   COSE_ALG_ES256,
@@ -295,7 +295,7 @@ export const completeAuthentication = withErrorHandler(
     // authenticator data is known to be authentic (WebAuthn L2 §7.2 step 21).
     const counter = evaluateSignCounter(passkey.sign_count, authData.signCount)
     if (!counter.ok) {
-      console.error('❌ Signature counter regression for passkey:', passkey.id, counter.reason)
+      console.error('❌ Signature counter regression for passkey:', maskPasskeyId(passkey.id), counter.reason)
       return {
         success: false,
         error: 'Signature counter did not increase - possible cloned authenticator'
@@ -328,7 +328,7 @@ export const completeAuthentication = withErrorHandler(
     // assertion already claimed this counter value.
     const useResult = await recordPasskeyUse(supabase, passkey.id, counter.nextValue)
     if (!useResult.advanced) {
-      console.error('❌ Signature counter was claimed concurrently for passkey:', passkey.id)
+      console.error('❌ Signature counter was claimed concurrently for passkey:', maskPasskeyId(passkey.id))
       return {
         success: false,
         error: 'Signature counter did not increase - possible cloned authenticator'
