@@ -996,7 +996,7 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         }
     }
 
-    @Suppress("ReturnCount")
+    @Suppress("ReturnCount", "CyclomaticComplexMethod")
     private suspend fun handleCloseWorkspace(args: McpToolArgs): McpToolResult {
         val workspaceId = args.string("workspaceId")
         if (workspaceId.isNullOrBlank()) {

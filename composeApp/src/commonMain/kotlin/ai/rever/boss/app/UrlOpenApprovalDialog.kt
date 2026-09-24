@@ -24,11 +24,12 @@ internal fun UrlOpenApprovalDialog(
             delay(500)
             armed = true
         }
+        val visibleUrl = visibleUrlForApproval(request.url)
         ConfirmationDialog(
             title = "Open this link? ($pendingCount pending)",
             message =
                 "BOSS was asked from outside the app to open a link in a new browser tab. " +
-                    "It has not been opened. Confirm only if you recognise it:\n\n${visibleUrlForApproval(request.url)}",
+                    "It has not been opened. Confirm only if you recognise it:\n\n$visibleUrl",
             confirmText = "Open link",
             confirmEnabled = armed,
             onDismiss = onDismiss,
@@ -42,14 +43,20 @@ internal fun visibleUrlForApproval(url: String): String =
     buildString {
         url.forEach { char ->
             val code = char.code
-            if (code < 0x20 || code in 0x7f..0x9f || code == 0x034f || code == 0x061c ||
-                code in 0x200b..0x200f || code in 0x202a..0x202e || code in 0x2060..0x206f ||
-                code == 0xfeff
-            ) {
+            if (isInvisibleOrDirectional(code)) {
                 append("\\u")
                 append(code.toString(16).padStart(4, '0'))
             } else {
                 append(char)
             }
         }
+    }
+
+private fun isInvisibleOrDirectional(code: Int): Boolean =
+    when (code) {
+        in 0x00..0x1f, in 0x7f..0x9f, 0x034f, 0x061c,
+        in 0x200b..0x200f, in 0x202a..0x202e, in 0x2060..0x206f, 0xfeff,
+        -> true
+
+        else -> false
     }
