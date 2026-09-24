@@ -1,6 +1,6 @@
 import { HttpError } from "./auth.ts"
 
-const MAX_TOOL_CALLS_PER_MESSAGE = 16
+const MAX_TOOL_CALLS_PER_MESSAGE = 128
 const MAX_TOOL_DESCRIPTION_LENGTH = 4_096
 
 export type Obj = Record<string, unknown>
@@ -40,13 +40,14 @@ function functionCall(value: unknown): Obj {
     call.type !== "function" || typeof call.id !== "string" ||
     typeof f.name !== "string" || typeof f.arguments !== "string"
   ) throw invalid()
-  // BossConsole#1251: tool-call `arguments` must be parseable JSON. A
-  // string that does not parse is a malformed request that the upstream
+  // BossConsole#1251: tool-call `arguments` must be an object or the empty
+  // string that some upstreams return for a no-argument call. Other strings
+  // are malformed requests that the upstream
   // would reject, but only after the reservation has been charged for
   // the full context length. Fail closed here so the bad call never
   // reaches the dispatch path.
   try {
-    JSON.parse(f.arguments)
+    if (f.arguments !== "") object(JSON.parse(f.arguments))
   } catch {
     throw invalid()
   }
@@ -201,6 +202,7 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
     // in `functionCall` (now mandatory) and produces a request the
     // upstream would reject at the wire size anyway. This is a BOSS policy
     // bound that stops the obvious amplifier; it is not an upstream limit.
+    // Keep it high enough to replay the broker's own parallel-call responses.
     if (
       Array.isArray(m.tool_calls) &&
       m.tool_calls.length > MAX_TOOL_CALLS_PER_MESSAGE

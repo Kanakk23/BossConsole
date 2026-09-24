@@ -365,6 +365,35 @@ Deno.test("tool call arguments must be parseable JSON (BossConsole#1251)", () =>
   )
 })
 
+Deno.test("empty and object tool arguments replay, but JSON primitives do not", () => {
+  for (const args of ["", "{}", '{"id":1}']) {
+    const input = {
+      messages: [{
+        role: "assistant",
+        tool_calls: [{
+          id: "call-1",
+          type: "function",
+          function: { name: "lookup", arguments: args },
+        }],
+      }],
+    }
+    requestBody(input, model, "openai_chat")
+  }
+  for (const args of ["null", "5", "[]"]) {
+    const input = {
+      messages: [{
+        role: "assistant",
+        tool_calls: [{
+          id: "call-1",
+          type: "function",
+          function: { name: "lookup", arguments: args },
+        }],
+      }],
+    }
+    assertThrows(() => requestBody(input, model, "openai_chat"), HttpError)
+  }
+})
+
 Deno.test("a tool description over 4 KB is rejected (BossConsole#1251)", () => {
   const input = {
     ...{ messages: [{ role: "user", content: "hi" }] },
@@ -383,8 +412,8 @@ Deno.test("a tool description over 4 KB is rejected (BossConsole#1251)", () => {
   )
 })
 
-Deno.test("a message with more than 16 tool_calls is rejected (BossConsole#1251)", () => {
-  const tool_calls = Array.from({ length: 17 }, (_, i) => ({
+Deno.test("a message with more than 128 tool_calls is rejected (BossConsole#1251)", () => {
+  const tool_calls = Array.from({ length: 129 }, (_, i) => ({
     id: `call-${i}`,
     type: "function",
     function: { name: "lookup", arguments: "{}" },
