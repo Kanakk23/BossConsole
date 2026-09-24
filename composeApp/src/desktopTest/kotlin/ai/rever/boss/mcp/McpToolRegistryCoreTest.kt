@@ -665,6 +665,33 @@ class McpToolRegistryCoreTest {
         }
 
     @Test
+    fun `deeply nested arguments are rejected before schema parsing and execution`() =
+        runBlocking {
+            var calls = 0
+            val core = McpToolRegistryCore(disabledFile = null)
+            core.registerProvider(
+                provider(
+                    "p1",
+                    echoTool(
+                        "read_file",
+                        handler =
+                            McpToolHandler {
+                                calls++
+                                McpToolResult("ran")
+                            },
+                    ),
+                ),
+            )
+            val nested = "{\"value\":" + "[".repeat(1024) + "0" + "]".repeat(1024) + "}"
+
+            val result = core.invoke("read_file", nested)
+
+            assertTrue(result.isError)
+            assertTrue(result.text.contains("nesting depth"))
+            assertEquals(0, calls)
+        }
+
+    @Test
     fun `invoke times out a handler that never completes`() =
         runBlocking {
             val core = McpToolRegistryCore(disabledFile = null, invokeTimeoutMs = 50L)

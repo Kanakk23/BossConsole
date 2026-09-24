@@ -413,7 +413,6 @@ private fun truncationMarker(
         "gone, including any note it appended about content it had already left out. Re-run " +
         "with a narrower query, a filter, or a smaller range to get the rest.]"
 
-
 /**
  * Testable core behind [McpToolRegistryImpl]. Extracted so unit tests can
  * exercise the registration/permission/persistence/dispatch logic against a

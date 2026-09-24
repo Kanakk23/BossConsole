@@ -21,15 +21,14 @@ import kotlinx.serialization.json.longOrNull
  * than documentation. Two edges are deliberate:
  * - A schema that does not parse to a JSON object fails closed: the host cannot enforce
  *   a contract it cannot read, so the call is refused instead of waved through.
- * - Arguments that are not a JSON object validate as `{}` — exactly the empty map
- *   [McpToolRegistryCore.parseArgs] would have handed the handler — so a schema with
- *   required keys rejects them while a schema without keeps its previous behavior.
+ * - Non-object arguments fail closed. The invoke entry point normalizes only blank input
+ *   to `{}` before reaching this gate; malformed and deeply nested input never reaches a handler.
  *
  * Error text names fields and expected types only, never argument values: the same
  * string reaches the caller and the operation ledger, and values can be sensitive.
- * A free function next to [capMcpResultText] and [mcpToolPermitted] for the same
- * reason — the rule is testable without constructing the registry.
+ * A free function so the rule is testable without constructing the registry.
  */
+@Suppress("ReturnCount") // Malformed schema and malformed arguments are separate fail-closed guards.
 internal fun validateMcpToolArguments(
     inputSchema: String,
     argumentsJson: String,
