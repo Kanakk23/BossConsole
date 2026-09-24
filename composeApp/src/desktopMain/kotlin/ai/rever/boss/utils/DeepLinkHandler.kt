@@ -1,5 +1,6 @@
 package ai.rever.boss.utils
 
+import ai.rever.boss.cli.CLICommand
 import ai.rever.boss.cli.CLISecurityValidator
 import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.components.events.PanelEventBus
@@ -852,18 +853,13 @@ actual object DeepLinkHandler {
     ) {
         logger.debug(LogCategory.BROWSER, "Handling URL link", mapOf("origin" to origin.name))
 
-        val params = parseQueryParams(uri)
-        val url = params["url"]?.urlDecode()
-
-        if (url == null) {
+        val cliCommand = urlOpenCommandFromLink(uri, origin)
+        if (cliCommand == null) {
             logger.warn(LogCategory.BROWSER, "Missing 'url' parameter in URL deep link")
             return
         }
 
         // Queue command via CLI handler
-        val cliCommand =
-            ai.rever.boss.cli.CLICommand
-                .OpenUrl(url, origin)
         ai.rever.boss.cli.CLICommandHandler
             .getInstance()
             .queueCommand(cliCommand)
@@ -871,8 +867,16 @@ actual object DeepLinkHandler {
         logger.info(
             LogCategory.BROWSER,
             "URL command queued",
-            mapOf("url" to LogSanitizer.describeUri(url), "origin" to origin.name),
+            mapOf("url" to LogSanitizer.describeUri(cliCommand.url), "origin" to origin.name),
         )
+    }
+
+    internal fun urlOpenCommandFromLink(
+        uri: String,
+        origin: DeepLinkOrigin,
+    ): CLICommand.OpenUrl? {
+        val url = parseQueryParams(uri)["url"]?.urlDecode() ?: return null
+        return CLICommand.OpenUrl(url, origin)
     }
 
     /**

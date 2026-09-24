@@ -1426,6 +1426,33 @@ class WorkspaceMcpToolProviderTest {
         }
 
     @Test
+    fun `close_workspace ambiguity leaves a disposable file untouched`(): Unit =
+        runBlocking {
+            val first = SplitViewState(stubTabRegistry, "ws-close-disposable-a")
+            val second = SplitViewState(stubTabRegistry, "ws-close-disposable-b")
+            createdSplitViewStates.add(first)
+            createdSplitViewStates.add(second)
+            SplitViewStateRegistry.register("ws-close-disposable-a", first)
+            SplitViewStateRegistry.register("ws-close-disposable-b", second)
+
+            val core = createTestCore()
+            val created = core.invoke("create_workspace", """{"isDisposable":true}""")
+            assertFalse(created.isError, created.text)
+            val workspaceId =
+                Json
+                    .parseToJsonElement(created.text)
+                    .jsonObject["workspaceId"]!!
+                    .jsonPrimitive.content
+            val fileName = WorkspaceFileManagerCommon.fileNameForId(workspaceId)
+            assertNotNull(fileManager.loadWorkspace(fileName))
+
+            val refused = core.invoke("close_workspace", """{"workspaceId":"$workspaceId"}""")
+            assertTrue(refused.isError, refused.text)
+            assertTrue(refused.text.contains("windowId"), refused.text)
+            assertNotNull(fileManager.loadWorkspace(fileName), "an ambiguous close must not delete the file")
+        }
+
+    @Test
     fun `close_workspace does not delete a saved workspace whose id contains disposable`(): Unit =
         runBlocking {
             val core = createTestCore()

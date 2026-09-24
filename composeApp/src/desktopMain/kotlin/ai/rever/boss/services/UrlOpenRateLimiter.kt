@@ -8,11 +8,11 @@ package ai.rever.boss.services
  * [tryAcquire] admits at most [MAX_OPENS] opens per [WINDOW_MS]; the rest are
  * dropped with a log line by the caller.
  *
- * Thread-safe: [URLHandlerService.handleURL] is called off the UI thread by
- * deep-link and CLI paths.
+ * Thread-safe because deep-link and CLI paths can call [URLHandlerService.handleURL]
+ * from different threads.
  */
 internal class UrlOpenRateLimiter(
-    private val nowMs: () -> Long = System::currentTimeMillis,
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
     private val lock = Any()
     private val opens = ArrayDeque<Long>()
@@ -21,6 +21,9 @@ internal class UrlOpenRateLimiter(
     fun tryAcquire(): Boolean =
         synchronized(lock) {
             val now = nowMs()
+            // A supplied clock may jump backwards. Start a fresh window rather than
+            // refusing every request until it catches up with old timestamps.
+            if (opens.isNotEmpty() && now < opens.last()) opens.clear()
             while (opens.isNotEmpty() && now - opens.first() >= WINDOW_MS) {
                 opens.removeFirst()
             }

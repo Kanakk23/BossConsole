@@ -330,7 +330,8 @@ internal class PendingSpaceLoad(
  * BOSS reaches this state when a `boss://url?url=` request arrives over a path
  * any program can drive, rather than from the operator's own `boss` invocation
  * (see `DeepLinkOrigin`). The URL is carried verbatim so the prompt shows
- * exactly what a tab would open.
+ * exactly what a tab would open. Keep identity equality: two requests for the
+ * same URL must still get separate arming intervals and consume callbacks.
  */
 internal class PendingUrlOpen(
     val url: String,

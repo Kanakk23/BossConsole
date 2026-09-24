@@ -47,7 +47,7 @@ expect object URLHandlerService {
      */
     fun handleURL(
         url: String,
-        requiresConfirmation: Boolean = false,
+        requiresConfirmation: Boolean,
     )
 
     /**
@@ -56,6 +56,10 @@ expect object URLHandlerService {
      * Useful if the OS passes multiple URLs to open simultaneously.
      *
      * @param urls List of URLs to open
+     * @param requiresConfirmation Whether every URL requires operator approval
      */
-    fun handleURLs(urls: List<String>)
+    fun handleURLs(
+        urls: List<String>,
+        requiresConfirmation: Boolean,
+    )
 }

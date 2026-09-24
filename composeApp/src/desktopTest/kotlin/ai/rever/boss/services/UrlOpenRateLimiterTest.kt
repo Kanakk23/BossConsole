@@ -54,4 +54,17 @@ class UrlOpenRateLimiterTest {
         now += UrlOpenRateLimiter.WINDOW_MS
         assertTrue(limiter.tryAcquire())
     }
+
+    @Test
+    fun `a backwards clock step does not wedge the limiter`() {
+        var now = 10_000L
+        val limiter = UrlOpenRateLimiter(nowMs = { now })
+        repeat(UrlOpenRateLimiter.MAX_OPENS) { assertTrue(limiter.tryAcquire()) }
+        assertFalse(limiter.tryAcquire())
+
+        now = 1_000L
+        assertTrue(limiter.tryAcquire())
+        now += UrlOpenRateLimiter.WINDOW_MS
+        assertTrue(limiter.tryAcquire())
+    }
 }

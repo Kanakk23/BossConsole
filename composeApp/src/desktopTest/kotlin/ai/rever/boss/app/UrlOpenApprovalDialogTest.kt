@@ -17,8 +17,8 @@ class UrlOpenApprovalDialogTest {
     @Test
     fun `approval displays bidi and invisible characters as escapes`() {
         assertEquals(
-            "https://example.test/path\\u202e\\u200b\\u2066\\u000aend",
-            visibleUrlForApproval("https://example.test/path\u202e\u200b\u2066\nend"),
+            "https://example.test/path\\u202e\\u200b\\u2066\\u000a\\u2028\\u2029\\u00ad\\ud804\\udcbdend",
+            visibleUrlForApproval("https://example.test/path\u202e\u200b\u2066\n\u2028\u2029\u00ad\uD804\uDCBDend"),
         )
     }
 

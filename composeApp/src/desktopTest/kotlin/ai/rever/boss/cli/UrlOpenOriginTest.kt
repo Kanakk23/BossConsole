@@ -1,5 +1,6 @@
 package ai.rever.boss.cli
 
+import ai.rever.boss.utils.DeepLinkHandler
 import ai.rever.boss.utils.DeepLinkOrigin
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -85,5 +86,16 @@ class UrlOpenOriginTest {
 
         assertFalse(queue.enqueueOrClaimForCaller(command))
         assertEquals(listOf(command), queue.markReadyAndClaimQueued())
+    }
+
+    @Test
+    fun `URL deep link decoding carries its origin into the queued command`() {
+        val link = "boss://url?url=https%3A%2F%2Fexample.com%2Fpath"
+        val external = DeepLinkHandler.urlOpenCommandFromLink(link, DeepLinkOrigin.EXTERNAL)
+        val operator = DeepLinkHandler.urlOpenCommandFromLink(link, DeepLinkOrigin.OPERATOR_CLI)
+
+        assertEquals("https://example.com/path", external?.url)
+        assertEquals(DeepLinkOrigin.EXTERNAL, external?.origin)
+        assertEquals(DeepLinkOrigin.OPERATOR_CLI, operator?.origin)
     }
 }

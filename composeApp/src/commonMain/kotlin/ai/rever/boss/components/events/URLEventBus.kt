@@ -21,7 +21,7 @@ data class URLOpenEvent(
     val url: String,
     val title: String,
     val sourceWindowId: String,
-    val requiresConfirmation: Boolean = false,
+    val requiresConfirmation: Boolean,
 )
 
 /**
@@ -58,7 +58,7 @@ object URLEventBus {
         url: String,
         title: String = "Loading...",
         sourceWindowId: String,
-        requiresConfirmation: Boolean = false,
+        requiresConfirmation: Boolean,
     ) {
         val event = URLOpenEvent(url, title, sourceWindowId, requiresConfirmation)
         _urlOpenEvents.emit(event)

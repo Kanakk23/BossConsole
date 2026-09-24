@@ -1,5 +1,7 @@
 package ai.rever.boss.app
 
+import ai.rever.boss.cli.HIDDEN_DISPLAY_CHARACTERS
+import ai.rever.boss.cli.isSupplementaryFormatCharacter
 import ai.rever.boss.components.dialogs.ConfirmationDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -41,22 +43,27 @@ internal fun UrlOpenApprovalDialog(
 /** Render invisible and direction-changing characters as visible escapes in the approval prompt. */
 internal fun visibleUrlForApproval(url: String): String =
     buildString {
-        url.forEach { char ->
-            val code = char.code
-            if (isInvisibleOrDirectional(code)) {
-                append("\\u")
-                append(code.toString(16).padStart(4, '0'))
+        var index = 0
+        while (index < url.length) {
+            val character = url[index]
+            val next = url.getOrNull(index + 1)
+            if (next != null && isSupplementaryFormatCharacter(character, next)) {
+                appendVisibleEscape(character)
+                appendVisibleEscape(next)
+                index += 2
             } else {
-                append(char)
+                if (isInvisibleOrDirectional(character)) appendVisibleEscape(character) else append(character)
+                index++
             }
         }
     }
 
-private fun isInvisibleOrDirectional(code: Int): Boolean =
-    when (code) {
-        in 0x00..0x1f, in 0x7f..0x9f, 0x034f, 0x061c,
-        in 0x200b..0x200f, in 0x202a..0x202e, in 0x2060..0x206f, 0xfeff,
-        -> true
+private fun StringBuilder.appendVisibleEscape(character: Char) {
+    append("\\u")
+    append(character.code.toString(16).padStart(4, '0'))
+}
 
-        else -> false
-    }
+private fun isInvisibleOrDirectional(character: Char): Boolean {
+    val hiddenCategory = character.category in HIDDEN_DISPLAY_CHARACTERS
+    return hiddenCategory || character.code == 0x034f
+}
