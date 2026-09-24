@@ -66,11 +66,20 @@ class McpArgumentSubstitutionTest {
     }
 
     @Test
-    fun `a reference in a key is neither scanned nor substituted`() {
+    fun `a reference in a key is refused and never substituted`() {
         val arguments = obj("""{"{{secret:$id}}":"v"}""")
-        assertIs<SecretReferenceScan.None>(McpArgumentSubstitution.scan(arguments))
+        assertIs<SecretReferenceScan.Malformed>(McpArgumentSubstitution.scan(arguments))
         val out = McpArgumentSubstitution.substitute(arguments, mapOf(ref to "value"))
         assertEquals(setOf("{{secret:$id}}"), out.keys)
+    }
+
+    @Test
+    fun `nested and escaped key markers refuse even alongside valid values`() {
+        val escaped = "\\u007b\\u007bsecret:$id}}"
+        for (key in listOf("{{secret:$id}}", "{{secret:broken", escaped)) {
+            val arguments = obj("""{"items":[{"$key":"v"}],"value":"{{secret:$id}}"}""")
+            assertIs<SecretReferenceScan.Malformed>(McpArgumentSubstitution.scan(arguments))
+        }
     }
 
     @Test
