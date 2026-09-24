@@ -8,6 +8,11 @@ import java.nio.charset.StandardCharsets;
 public final class TerminalTestProcess {
     public static void main(String[] args) throws Exception {
         switch (args[0]) {
+            case "ignore-stdin" -> {
+                System.out.println("ready");
+                System.out.flush();
+                Thread.sleep(30000);
+            }
             case "background" -> {
                 new ProcessBuilder(
                     System.getProperty("java.home") + "/bin/java", "-cp", System.getProperty("java.class.path"),
