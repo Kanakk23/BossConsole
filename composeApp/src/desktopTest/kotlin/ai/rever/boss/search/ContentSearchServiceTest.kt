@@ -713,7 +713,7 @@ class ContentSearchServiceTest {
     }
 
     @Test
-    fun `matcher cancellation is observed after matching has entered the character stream`() =
+    fun `matcher cancellation is observed after matching has entered the character stream`() {
         runBlocking {
             val entered = CompletableDeferred<Unit>()
             val cancelled = AtomicBoolean(false)
@@ -736,6 +736,7 @@ class ContentSearchServiceTest {
             cancelled.set(true)
             withTimeout(5_000) { matching.await() }
         }
+    }
 
     // ---- BossConsole#622: concurrent closed-file replacements ----
     //
