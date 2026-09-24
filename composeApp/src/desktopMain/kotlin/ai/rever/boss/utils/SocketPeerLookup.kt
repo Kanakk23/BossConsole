@@ -121,16 +121,17 @@ internal object SocketPeerLookup {
             File("/proc").listFiles { file -> file.isDirectory && file.name.all { it.isDigit() } }
                 ?: return null
         var unreadable = false
-        val owners = pidDirs
-            .mapNotNull { pidDir ->
-                val fds = File(pidDir, "fd").listFiles()
-                if (fds == null) unreadable = true
-                val holdsInode =
-                    fds?.any { fd ->
-                        runCatching { Files.readSymbolicLink(fd.toPath()).toString() }.getOrNull() == target
-                    }
-                if (holdsInode == true) pidDir.name.toLongOrNull() else null
-            }.toSet()
+        val owners =
+            pidDirs
+                .mapNotNull { pidDir ->
+                    val fds = File(pidDir, "fd").listFiles()
+                    if (fds == null) unreadable = true
+                    val holdsInode =
+                        fds?.any { fd ->
+                            runCatching { Files.readSymbolicLink(fd.toPath()).toString() }.getOrNull() == target
+                        }
+                    if (holdsInode == true) pidDir.name.toLongOrNull() else null
+                }.toSet()
         return owners.takeIf { it.isNotEmpty() || !unreadable }
     }
 

@@ -1296,7 +1296,7 @@ class DefaultPlugin(
      * rather than running inside `runBlocking` on the caller's thread. The caller is the
      * window's Compose `onDispose`, i.e. the UI thread: blocking it made every window
      * close pay the whole teardown, and quitting under load could stall on it. The
-     * teardown is bounded by [PLUGIN_DISPOSE_TIMEOUT_MS] and the bookkeeping after it
+     * each teardown phase is bounded by [PLUGIN_DISPOSE_TIMEOUT_MS] and the bookkeeping after it
      * runs even when the teardown is cancelled or fails - a skipped release leaks
      * process-wide registrations, which is worse than a torn-down plugin.
      *
@@ -1320,9 +1320,7 @@ class DefaultPlugin(
                     // blocking (non-suspending) call keeps its IO thread past the bound -
                     // but never the caller's thread, which is the property being protected.
                     withTimeout(timeoutMillis) {
-                        // Dispose dynamic plugin manager and sandbox manager
                         dynamicPluginManager.disposeWindow()
-                        sandboxManager.dispose()
                     }
                 } catch (e: TimeoutCancellationException) {
                     logger.error(
@@ -1337,6 +1335,7 @@ class DefaultPlugin(
                     logger.error(LogCategory.SYSTEM, "Plugin teardown failed", error = e)
                 } finally {
                     withContext(NonCancellable) {
+                        disposeSandboxWithin(timeoutMillis)
                         // After the teardown above, so it only catches what a plugin's
                         // teardown did not remove: none of it may be served again when
                         // another window later lets go of the same id.
@@ -1379,6 +1378,18 @@ class DefaultPlugin(
                 teardownJobRef.get()
             }
         return checkNotNull(canonical)
+    }
+
+    /** Run sandbox cleanup even when plugin unloading used up its own timeout. */
+    @Suppress("TooGenericExceptionCaught") // a failing plugin must not skip release bookkeeping
+    private suspend fun disposeSandboxWithin(timeoutMillis: Long) {
+        try {
+            withTimeout(timeoutMillis) { sandboxManager.dispose() }
+        } catch (e: TimeoutCancellationException) {
+            logger.error(LogCategory.SYSTEM, "Sandbox teardown exceeded its bound", error = e)
+        } catch (e: Exception) {
+            logger.error(LogCategory.SYSTEM, "Sandbox teardown failed", error = e)
+        }
     }
 
     /**
