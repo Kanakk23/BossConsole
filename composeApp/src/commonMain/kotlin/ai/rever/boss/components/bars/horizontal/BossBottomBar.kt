@@ -293,6 +293,10 @@ fun BossRightBottomBar() {
     // it used to be one of, rather than at the far edge of the bar.
     DownloadCenterStatusItem()
 
+    // Workspace health: shown only while something is wrong, beside the performance figures it
+    // complements - those say what BOSS costs, this says what is not working (BossConsole#394).
+    WorkspaceHealthStatusItem()
+
     // Performance indicator (shows memory/CPU usage)
     val showIndicator = PerformanceState.shouldShowIndicator()
     if (showIndicator) {
@@ -554,11 +558,15 @@ private fun McpActivityStatusItem() {
     if (showActivityLog) {
         val totalCalls by McpToolRegistryImpl.ledger.totalCalls.collectAsState()
         val totalErrors by McpToolRegistryImpl.ledger.totalErrors.collectAsState()
+        val pendingWriteIds by McpToolRegistryImpl.ledger.pendingWriteIds.collectAsState()
+        val droppedWrites by McpToolRegistryImpl.ledger.droppedWrites.collectAsState()
         McpActivityLogDialog(
             operations = recentOps,
             totalCalls = totalCalls,
             totalErrors = totalErrors,
             ledgerPath = McpToolRegistryImpl.ledger.persistencePath,
+            pendingWriteIds = pendingWriteIds,
+            droppedWrites = droppedWrites,
             onDismiss = { showActivityLog = false },
         )
     }

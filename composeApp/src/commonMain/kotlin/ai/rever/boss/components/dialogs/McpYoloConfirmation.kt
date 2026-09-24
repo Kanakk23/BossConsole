@@ -39,8 +39,9 @@ internal const val MCP_YOLO_CONFIRMATION_MESSAGE =
     "Every MCP tool call that would normally ask for approval will run without asking, from " +
         "every agent and plugin, including tools added later and high-risk ones such as shell " +
         "commands.\n\n" +
-        "Still enforced: tools and plugins you set to Always deny, the kill switch, and your " +
-        "role's permissions. Every call is still recorded in the MCP activity log as " +
+        "Still enforced: tools and plugins you set to Always deny, the approval prompt for " +
+        "calls that use a vault secret, the kill switch, and your role's permissions. Every " +
+        "call is still recorded in the MCP activity log as " +
         "\"Yolo allowed\", and so is turning this on and off.\n\n" +
         "Shown as \"MCP: YOLO\" in the bottom bar and as a checked \"MCP YOLO Mode\" in the " +
         "Tools menu. Lasts until you turn it off or quit BOSS."

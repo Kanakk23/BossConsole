@@ -28,10 +28,7 @@ import ai.rever.boss.components.workspaces.workspaceManager
 import ai.rever.boss.consumePendingInitialProject
 import ai.rever.boss.consumePendingInitialTab
 import ai.rever.boss.health.WorkspaceHealthSources
-import ai.rever.boss.performance.BrowserTabInfo
-import ai.rever.boss.performance.EditorTabResourceInfo
 import ai.rever.boss.performance.PerformanceState
-import ai.rever.boss.performance.TerminalInfo
 import ai.rever.boss.plugin.api.Panel.Companion.bottom
 import ai.rever.boss.plugin.api.Panel.Companion.left
 import ai.rever.boss.plugin.api.Panel.Companion.right
@@ -44,7 +41,6 @@ import ai.rever.boss.services.auth.CoreAuthService
 import ai.rever.boss.services.auth.UserDataStorage
 import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
 import ai.rever.boss.services.terminal.TerminalAPIAccess
-import ai.rever.boss.setupDownloadTabCloseCallback
 import ai.rever.boss.startup.StartupSettingsManager
 import ai.rever.boss.updater.UpdateCoordinator
 import ai.rever.boss.utils.CLIInstaller
@@ -189,11 +185,6 @@ internal fun BossAppStartupEffects(state: BossAppState) {
         }
     }
 
-    // Register callback for FluckEngine to auto-close download redirect tabs (desktop only)
-    LaunchedEffect(splitViewState) {
-        setupDownloadTabCloseCallback(splitViewState)
-    }
-
     // Cancel any active drag when window loses focus (prevents stuck ghost)
     LaunchedEffect(state.tabDragComponent, windowId) {
         WindowFocusManager.activeWindowFlow.collect { focusedWindowId ->
@@ -245,7 +236,7 @@ internal fun BossAppStartupEffects(state: BossAppState) {
     // Use DisposableEffect to clean up on disposal and prevent memory leaks
     DisposableEffect(splitViewState, state.draggablePanelComponent) {
         // Cache for getAllPanels() to avoid repeated tree traversals
-        // All 6 providers are called within milliseconds of each other every 5 seconds
+        // The count providers are called within milliseconds of each other every 5 seconds
         // Using synchronized block for thread-safe access from provider lambdas
         val cacheLock = Any()
         var cachedPanels: List<SplitNode.Panel>? = null
@@ -297,51 +288,6 @@ internal fun BossAppStartupEffects(state: BossAppState) {
             },
             windows = {
                 SplitViewStateRegistry.states.value.size
-            },
-        )
-
-        // Register detailed resource providers for the Resources tab
-        PerformanceState.registerDetailedResourceProviders(
-            browserTabs = {
-                getCachedPanels().flatMap { panel ->
-                    val tabsState = panel.tabsComponent.tabsState.value
-                    val activeTabId = tabsState.activeTab?.id
-                    tabsState.tabs.filterIsInstance<FluckTabInfo>().map { tab ->
-                        BrowserTabInfo(
-                            id = tab.id,
-                            title = tab.title,
-                            url = tab.currentUrl,
-                            isActive = tab.id == activeTabId,
-                        )
-                    }
-                }
-            },
-            terminals = {
-                getCachedPanels().flatMap { panel ->
-                    val tabsState = panel.tabsComponent.tabsState.value
-                    val activeTabId = tabsState.activeTab?.id
-                    tabsState.tabs.filterIsInstance<TerminalTabInfo>().map { tab ->
-                        TerminalInfo(
-                            id = tab.id,
-                            title = tab.title,
-                            isActive = tab.id == activeTabId,
-                        )
-                    }
-                }
-            },
-            editorTabs = {
-                getCachedPanels().flatMap { panel ->
-                    val tabsState = panel.tabsComponent.tabsState.value
-                    val activeTabId = tabsState.activeTab?.id
-                    tabsState.tabs.filterIsInstance<EditorTabInfo>().map { tab ->
-                        EditorTabResourceInfo(
-                            id = tab.id,
-                            fileName = tab.title,
-                            filePath = tab.filePath,
-                            isActive = tab.id == activeTabId,
-                        )
-                    }
-                }
             },
         )
 
