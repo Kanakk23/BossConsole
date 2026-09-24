@@ -75,6 +75,26 @@ Deno.test("generateRegistrationChallenge - should accept and return sessionId fo
   }
 })
 
+Deno.test("generateRegistrationChallenge - logs mask the session id", async () => {
+  const mockClient = createMockSupabaseClient()
+  mockClient.mockResponse('passkey_challenges', {
+    data: [{ id: 'challenge-789' }],
+    error: null
+  }, 'insert')
+
+  const logs: string[] = []
+  const originalLog = console.log
+  console.log = (...args: unknown[]) => logs.push(args.join(' '))
+  try {
+    await generateRegistrationChallenge(mockClient as unknown as SupabaseClient, 'user-456', 'session-secret-123')
+  } finally {
+    console.log = originalLog
+  }
+
+  assertEquals(logs.some(line => line.includes('session-secret-123')), false)
+  assertEquals(logs.some(line => line.includes('sess…')), true)
+})
+
 Deno.test("generateRegistrationChallenge - should work without sessionId for same-device flows", async () => {
   const mockClient = createMockSupabaseClient()
 

@@ -1,7 +1,7 @@
 import { encodeBase64Url } from "@std/encoding/base64url"
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { ChallengeType } from "../types/challenge.ts"
-import { maskUserId } from "./logging.ts"
+import { maskSessionId, maskUserId } from "./logging.ts"
 
 /**
  * Generates a random challenge for WebAuthn ceremonies
@@ -27,7 +27,7 @@ export async function storeChallenge(
   console.log('Storing challenge:', {
     challenge: challenge.substring(0, 20) + '...',
     type,
-    sessionId: options?.sessionId,
+    sessionId: options?.sessionId ? maskSessionId(options.sessionId) : undefined,
     userId: options?.userId ? maskUserId(options.userId) : undefined
   })
 

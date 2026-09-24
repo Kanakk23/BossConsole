@@ -17,7 +17,7 @@ import { withErrorHandler, withStatusErrorHandler } from "../utils/error-handler
 import { generateSupabaseAccessToken } from "../utils/jwt.ts"
 import { ALLOWED_ORIGINS, getAllowedOrigins, getAllowedRpIds, getRpId, rpIdMatchesOrigin } from "../utils/config.ts"
 import { normalizeBase64Url } from "../utils/base64.ts"
-import { maskEmail, maskUserId } from "../utils/logging.ts"
+import { maskEmail, maskSessionId, maskUserId } from "../utils/logging.ts"
 import {
   challengeMatches,
   COSE_ALG_ES256,
@@ -374,12 +374,12 @@ export const completeAuthentication = withErrorHandler(
     // Store completed authentication if there's a session_id
     console.log('🔍 Challenge data:', {
       has_session_id: !!challengeData.session_id,
-      session_id: challengeData.session_id,
+      session_id: maskSessionId(challengeData.session_id),
       user_id: maskUserId(passkey.user_id)
     })
 
     if (challengeData.session_id) {
-      console.log('💾 Storing completed authentication for session:', challengeData.session_id)
+      console.log('💾 Storing completed authentication for session:', maskSessionId(challengeData.session_id))
       const storeResult = await storeCompletedAuthentication(supabase, {
         challenge: signedChallenge,
         sessionId: challengeData.session_id,
@@ -468,7 +468,7 @@ function parseStoredExpiryMillis(value: unknown): number | null {
  */
 export const checkAuthStatus = withStatusErrorHandler(
   async (supabase: SupabaseClient, sessionId: string) => {
-    console.log('🔍 Checking auth status for session:', sessionId)
+    console.log('🔍 Checking auth status for session:', maskSessionId(sessionId))
 
     // maybeSingle + newest-first: a client-supplied sessionId can legitimately be
     // reused, and .single() on two rows returns PGRST116, which would wedge the
@@ -509,7 +509,7 @@ export const checkAuthStatus = withStatusErrorHandler(
       })
 
       if (completedError || !completedAuth) {
-        console.log('❌ No completed authentication found for session:', sessionId)
+        console.log('❌ No completed authentication found for session:', maskSessionId(sessionId))
         return {
           status: 'expired' as const,
           message: 'Session not found or expired'
@@ -594,7 +594,7 @@ export const checkAuthStatus = withStatusErrorHandler(
         .eq('id', completedAuth.id)
 
       if (tokenStoreError) {
-        console.error('⚠️ Failed to persist session for session id:', sessionId, tokenStoreError)
+        console.error('⚠️ Failed to persist session for session id:', maskSessionId(sessionId), tokenStoreError)
       }
 
       return {

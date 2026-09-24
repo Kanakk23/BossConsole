@@ -20,3 +20,9 @@ export function maskUserId(userId: string): string {
   if (typeof userId !== 'string' || userId.length === 0) return '***'
   return userId.length <= 4 ? '***' : `${userId.slice(0, 4)}…`
 }
+
+/** Keep a short prefix for correlation without persisting the polling secret. */
+export function maskSessionId(sessionId: string | null | undefined): string {
+  if (typeof sessionId !== 'string' || sessionId.length <= 4) return '***'
+  return `${sessionId.slice(0, 4)}…`
+}

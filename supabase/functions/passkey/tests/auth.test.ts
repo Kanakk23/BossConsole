@@ -364,5 +364,6 @@ Deno.test("generateAuthChallenge - logs carry no raw email or user id", async ()
   for (const line of logged) {
     assertEquals(line.includes('victim@example.com'), false, `log leaked raw email: ${line}`)
     assertEquals(line.includes('user-456'), false, `log leaked raw user id: ${line}`)
+    assertEquals(line.includes('session-xyz'), false, `log leaked raw session id: ${line}`)
   }
 })
