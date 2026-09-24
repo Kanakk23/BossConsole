@@ -427,6 +427,21 @@ Deno.test("a message with more than 128 tool_calls is rejected (BossConsole#1251
   )
 })
 
+Deno.test("structured-output schemas share bounded schema work limits", () => {
+  const input = (schema: unknown) => ({
+    messages: [{ role: "user", content: "hi" }],
+    response_format: { type: "json_schema", json_schema: { name: "answer", schema } },
+  })
+  requestBody(input({ type: "object" }), model, "openai_chat")
+  let deep: unknown = {}
+  for (let i = 0; i < 34; i++) deep = { nested: deep }
+  for (
+    const schema of [deep, { enum: Array(8193).fill("x") }, { description: "x".repeat(65536) }]
+  ) {
+    assertThrows(() => requestBody(input(schema), model, "openai_chat"), HttpError)
+  }
+})
+
 Deno.test("tool envelope accepted boundaries and schema work limits are explicit", () => {
   const tool = (parameters: unknown, description = "x".repeat(4096)) => ({
     type: "function",

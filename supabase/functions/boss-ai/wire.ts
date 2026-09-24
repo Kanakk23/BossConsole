@@ -303,7 +303,7 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
         (schema.description !== undefined && typeof schema.description !== "string") ||
         (schema.strict !== undefined && typeof schema.strict !== "boolean")
       ) throw invalid()
-      object(schema.schema)
+      boundedToolSchema(schema.schema)
     }
     if (type === "openai_chat") common.response_format = format
     else {common.text = {

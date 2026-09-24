@@ -154,10 +154,10 @@ attempts emit `settlement_failed_reservation_retained`; operators must reconcile
 by that ID. There is no automatic refund or background reconciler in this change.
 
 Tool envelopes allow at most 128 tools and 128 replayed calls per message. Per-tool descriptions are
-limited to 4,096 characters; parameter schemas to 65,536 serialized characters, depth 32 and 8,192
-visited values. The overall 4 MiB body cap is the aggregate limit. Valid signed-in sessions without
-AI eligibility receive 403, not a request to sign in again; eligibility RPC failures return 503
-without minting a token.
+limited to 4,096 characters; parameter and structured-output schemas to 65,536 serialized
+characters, depth 32 and 8,192 visited values. The overall 4 MiB body cap is the aggregate limit.
+Valid signed-in sessions without AI eligibility receive 403, not a request to sign in again;
+eligibility RPC failures return 503 without minting a token.
 
 Requests are limited to four minutes, below the five-minute concurrency lease. A worker crash leaves
 the charge in place but releases its concurrency slot after the lease. Usage rows should be retained
