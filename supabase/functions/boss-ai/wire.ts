@@ -2,6 +2,22 @@ import { HttpError } from "./auth.ts"
 
 const MAX_TOOL_CALLS_PER_MESSAGE = 128
 const MAX_TOOL_DESCRIPTION_LENGTH = 4_096
+const MAX_TOOL_SCHEMA_LENGTH = 65_536
+
+function boundedToolSchema(value: unknown): void {
+  const pending: { value: unknown; depth: number }[] = [{ value: object(value), depth: 0 }]
+  let visited = 0
+  while (pending.length) {
+    const next = pending.pop()!
+    if (++visited > 8_192 || next.depth > 32) throw invalid()
+    if (next.value && typeof next.value === "object") {
+      const children = Object.values(next.value)
+      if (children.length + pending.length + visited > 8_192) throw invalid()
+      for (const child of children) pending.push({ value: child, depth: next.depth + 1 })
+    }
+  }
+  if (JSON.stringify(value).length > MAX_TOOL_SCHEMA_LENGTH) throw invalid()
+}
 
 export type Obj = Record<string, unknown>
 export interface Model {
@@ -239,11 +255,8 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
       const f = object(t.function)
       onlyKeys(t, ["type", "function"])
       onlyKeys(f, ["name", "description", "parameters", "strict"])
-      // BossConsole#1251: cap the per-tool description. A multi-MB
-      // description is forwarded verbatim into the upstream payload,
-      // and the only sane upper bound on a tool description is the
-      // request body cap - well below that. This is a BOSS policy bound,
-      // not an upstream documented limit, and stops an obvious amplifier.
+      // Host policy bounds each description/schema as well as the 128-tool list.
+      // The overall 4 MiB request-body cap remains the aggregate bound.
       if (f.description !== undefined) {
         if (
           typeof f.description !== "string" ||
@@ -251,7 +264,7 @@ export function requestBody(input: Obj, model: Model, type: Connection["api_type
         ) throw invalid()
       }
       if (f.strict !== undefined && typeof f.strict !== "boolean") throw invalid()
-      if (f.parameters !== undefined) object(f.parameters)
+      if (f.parameters !== undefined) boundedToolSchema(f.parameters)
       if (
         t.type !== "function" || typeof f.name !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(f.name)
       ) throw invalid()

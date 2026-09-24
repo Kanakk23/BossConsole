@@ -25,6 +25,7 @@ export interface Dependencies {
   secret(name: string): string | undefined
   fetch: typeof fetch
   upstreamTimeoutMs?: number
+  settlementTimeoutMs?: number
   audit?: (event: string, requestId: string) => void
 }
 const headers = { "Content-Type": "application/json", "Cache-Control": "no-store" }
@@ -35,6 +36,42 @@ function failure(error: unknown, requestId: string): Response {
     ? error
     : new HttpError(503, "unavailable", "BOSS AI is temporarily unavailable.")
   return json({ error: { code: e.code, message: e.message } }, e.status, requestId)
+}
+
+async function settleReservation(
+  deps: Dependencies,
+  requestId: string,
+  tokens: number | null,
+  audit: (event: string) => void,
+): Promise<void> {
+  // boss_ai_settle updates only WHERE NOT settled. Retrying the same request ID is safe
+  // even if a timed-out first attempt commits late. Two bounded attempts cost at most
+  // four seconds by default, on success, streaming cleanup, AND upstream failure paths.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        deps.rpc("boss_ai_settle", { p_request_id: requestId, p_tokens: tokens }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new SettlementTimeoutError()),
+            deps.settlementTimeoutMs ?? 2_000,
+          )
+        }),
+      ])
+      return
+    } catch (error) {
+      if (error instanceof SettlementTimeoutError) audit("settlement_timeout")
+      if (attempt === 1) {
+        // Reservation accounting is conservative: the full reserved allowance remains
+        // charged, not unbilled. Alert operators for reconciliation by this request ID.
+        audit("settlement_failed_reservation_retained")
+        audit("settlement_failed")
+      }
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
 }
 
 export function createHandler(deps: Dependencies): (request: Request) => Promise<Response> {
@@ -82,7 +119,7 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
         // honest about who is allowed.
         const eligible = await deps.rpc("boss_ai_token_eligible", { p_user_id: user })
         if (eligible !== true) {
-          throw new HttpError(401, "unauthorized", "Sign in to BOSS to use AI.")
+          throw new HttpError(403, "forbidden", "This account is not permitted to use BOSS AI.")
         }
         return json(await mintToken(user, key), 200, requestId)
       }
@@ -207,47 +244,13 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
           "The model is temporarily unavailable. Please try again.",
         )
       }
-      const settle = async (tokens: number | null) => {
+      const settleWithRetry = async (tokens: number | null) => {
         if (tokens === null) audit("usage_unknown_reservation_retained")
         if (tokens !== null && tokens > result.model.context_length) {
           audit("usage_exceeds_configured_context")
         }
         phase = "settlement"
-        // BossConsole#1252: bound the settlement RPC so a slow database
-        // cannot wedge the edge function. The upstream response has already
-        // been (or is about to be) streamed to the client; the settlement
-        // is a side write that must not block returning. The 2 second
-        // budget is generous for PostgREST in healthy operation and short
-        // enough to keep the function within Supabase's edge time budget.
-        const settleRpc = deps.rpc("boss_ai_settle", {
-          p_request_id: requestId,
-          p_tokens: tokens,
-        })
-        let timer: ReturnType<typeof setTimeout> | undefined
-        try {
-          await Promise.race([
-            settleRpc,
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new SettlementTimeoutError()), 2_000)
-            }),
-          ])
-        } finally {
-          if (timer !== undefined) clearTimeout(timer)
-        }
-      }
-      const settleWithRetry = async (tokens: number | null) => {
-        try {
-          await settle(tokens)
-        } catch (error) {
-          // A timed-out RPC may still commit after this edge function stops
-          // waiting. Retrying it could apply the settlement twice, so only
-          // retry failures that are known to have returned before the call.
-          if (error instanceof SettlementTimeoutError) {
-            audit("settlement_timeout")
-            return
-          }
-          await settle(tokens).catch(() => audit("settlement_failed"))
-        }
+        await settleReservation(deps, requestId, tokens, audit)
       }
       if (input.stream !== true) {
         try {
@@ -340,13 +343,7 @@ export function createHandler(deps: Dependencies): (request: Request) => Promise
       if (!(error instanceof HttpError) || error.status >= 500) audit(`${phase}_failed`)
       if (reservation) {
         if (dispatched && measuredTokens === null) audit("usage_unknown_reservation_retained")
-        const settlement = {
-          p_request_id: reservation,
-          p_tokens: dispatched ? measuredTokens : 0,
-        }
-        await deps.rpc("boss_ai_settle", settlement).catch(async () => {
-          await deps.rpc("boss_ai_settle", settlement).catch(() => audit("settlement_failed"))
-        })
+        await settleReservation(deps, reservation, dispatched ? measuredTokens : 0, audit)
       }
       return failure(error, requestId)
     }

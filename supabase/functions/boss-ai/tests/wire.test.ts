@@ -426,3 +426,54 @@ Deno.test("a message with more than 128 tool_calls is rejected (BossConsole#1251
     HttpError,
   )
 })
+
+Deno.test("tool envelope accepted boundaries and schema work limits are explicit", () => {
+  const tool = (parameters: unknown, description = "x".repeat(4096)) => ({
+    type: "function",
+    function: { name: "lookup", description, parameters },
+  })
+  const input = (tools: unknown[]) => ({ messages: [{ role: "user", content: "hi" }], tools })
+  const exactSchema = {
+    description: "x".repeat(65536 - JSON.stringify({ description: "" }).length),
+  }
+  requestBody(input([tool(exactSchema)]), model, "openai_chat")
+  requestBody(input(Array.from({ length: 128 }, () => tool({}))), model, "openai_chat")
+  assertThrows(
+    () => requestBody(input(Array.from({ length: 129 }, () => tool({}))), model, "openai_chat"),
+    HttpError,
+  )
+  assertThrows(
+    () => requestBody(input([tool({}, "x".repeat(4097))]), model, "openai_chat"),
+    HttpError,
+  )
+  assertThrows(
+    () =>
+      requestBody(
+        input([tool({ description: exactSchema.description + "x" })]),
+        model,
+        "openai_chat",
+      ),
+    HttpError,
+  )
+  let deep: unknown = {}
+  for (let i = 0; i < 34; i++) deep = { nested: deep }
+  assertThrows(() => requestBody(input([tool(deep)]), model, "openai_chat"), HttpError)
+  assertThrows(
+    () => requestBody(input([tool({ enum: Array(8193).fill("x") })]), model, "openai_chat"),
+    HttpError,
+  )
+  requestBody(
+    {
+      messages: [{
+        role: "assistant",
+        tool_calls: Array.from({ length: 128 }, (_, i) => ({
+          id: `call-${i}`,
+          type: "function",
+          function: { name: "lookup", arguments: "{}" },
+        })),
+      }],
+    },
+    model,
+    "openai_chat",
+  )
+})
