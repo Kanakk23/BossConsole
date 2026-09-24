@@ -72,6 +72,30 @@ class WorkspacePortabilityTest {
     }
 
     @Test
+    fun `export leaves sibling paths and command arguments untouched`() {
+        val workspace = sampleWorkspace(projectPath)
+        val originalPanel = (workspace.layout as SplitConfig.SinglePanel).panel
+        val sibling = "/Users/me/proj-old/src/A.kt"
+        val altered =
+            workspace.copy(
+                layout =
+                    SplitConfig.SinglePanel(
+                        originalPanel.copy(
+                            tabs =
+                                listOf(
+                                    TabConfig(type = "editor", title = "Sibling", filePath = sibling),
+                                    TabConfig(type = "terminal", title = "Command", initialCommand = "cat $sibling"),
+                                ),
+                        ),
+                    ),
+            )
+
+        val portable = WorkspacePortability.toPortable(altered)
+        assertEquals(sibling, tabs(portable)[0].filePath)
+        assertEquals("cat $sibling", tabs(portable)[1].initialCommand)
+    }
+
+    @Test
     fun `fromPortable binds a new project path and mints a fresh id`() {
         val portable = WorkspacePortability.toPortable(sampleWorkspace(projectPath))
         val restored = WorkspacePortability.fromPortable(portable, "/opt/other")

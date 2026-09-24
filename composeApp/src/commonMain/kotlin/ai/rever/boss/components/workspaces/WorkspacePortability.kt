@@ -24,12 +24,12 @@ import ai.rever.boss.plugin.workspace.TabConfig
  */
 @Suppress("TooManyFunctions")
 object WorkspacePortability {
-    const val PLACEHOLDER = "{projectPath}"
+    const val PLACEHOLDER = WorkspacePlaceholders.PROJECT_PATH_PLACEHOLDER
 
     /**
      * The Space with its own [LayoutWorkspace.projectPath] rewritten to [PLACEHOLDER] everywhere it
-     * appears, and `projectPath` cleared. A Space with no project path is already portable and is
-     * returned unchanged.
+     * appears, and `projectPath` cleared. A Space with no project path is returned unchanged;
+     * without an origin path, embedded absolute tab paths cannot be identified safely.
      */
     fun toPortable(workspace: LayoutWorkspace): LayoutWorkspace {
         val projectPath = workspace.projectPath
@@ -100,11 +100,23 @@ object WorkspacePortability {
         projectPath: String,
     ): TabConfig =
         tab.copy(
-            url = tab.url?.replace(projectPath, PLACEHOLDER),
-            filePath = tab.filePath?.replace(projectPath, PLACEHOLDER),
-            workingDirectory = tab.workingDirectory?.replace(projectPath, PLACEHOLDER),
+            url = tab.url?.let { parameterizePath(it, projectPath) },
+            filePath = tab.filePath?.let { parameterizePath(it, projectPath) },
+            workingDirectory = tab.workingDirectory?.let { parameterizePath(it, projectPath) },
             initialCommand = tab.initialCommand?.let { parameterizeCommand(it, projectPath) },
         )
+
+    /** Only the project root or one of its descendants belongs to this Space. */
+    private fun parameterizePath(
+        path: String,
+        projectPath: String,
+    ): String =
+        when {
+            path.startsWith("file://") -> "file://" + parameterizePath(path.removePrefix("file://"), projectPath)
+            path == projectPath -> PLACEHOLDER
+            path.startsWith("$projectPath/") -> PLACEHOLDER + path.removePrefix(projectPath)
+            else -> path
+        }
 
     /**
      * A command holds the project path shell-quoted (that is how the template writes it), so the
@@ -114,7 +126,11 @@ object WorkspacePortability {
     private fun parameterizeCommand(
         command: String,
         projectPath: String,
-    ): String = command.replace(CommandProcessor.quotePath(projectPath), PLACEHOLDER).replace(projectPath, PLACEHOLDER)
+    ): String {
+        val quoted = command.replace(CommandProcessor.quotePath(projectPath), PLACEHOLDER)
+        val pathPattern = Regex("(?<![\\w./~-])${Regex.escape(projectPath)}(?=/|$|[\\s\\\"';&|)])")
+        return quoted.replace(pathPattern, PLACEHOLDER)
+    }
 
     /** Resolve [PLACEHOLDER] back to [projectPath], raw for path fields and shell-quoted for commands. */
     private fun resolve(

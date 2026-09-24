@@ -13,6 +13,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.UUID
 
 /**
  * Persistent history of completed downloads, in `~/.boss/download-history.json`.
@@ -50,6 +51,11 @@ object DownloadHistoryManager {
 
     private val _downloads = MutableStateFlow<List<DownloadRecord>>(emptyList())
 
+    /** A failed read must not be replaced by a later download's one-record history. */
+    @Volatile
+    internal var loadFailed: Boolean = false
+        private set
+
     /** Newest first. */
     val downloads: StateFlow<List<DownloadRecord>> = _downloads.asStateFlow()
 
@@ -66,17 +72,20 @@ object DownloadHistoryManager {
             } else {
                 _downloads.value = emptyList()
             }
+            loadFailed = false
         } catch (
             @Suppress("TooGenericExceptionCaught") e: Exception,
         ) {
             logger.warn(LogCategory.SYSTEM, "Failed to load download history", error = e)
             _downloads.value = emptyList()
+            loadFailed = true
         }
     }
 
     internal fun resetForTesting(testFile: File? = null) {
         storageFile = testFile ?: defaultStorageFile
         clock = { System.currentTimeMillis() }
+        storageFile.parentFile?.mkdirs()
         loadSync()
     }
 
@@ -90,31 +99,34 @@ object DownloadHistoryManager {
         sizeBytes: Long? = null,
     ): DownloadRecord =
         mutex.withLock {
+            check(!loadFailed) { "Download history could not be read; clear it before recording new downloads" }
+            val completedAt = clock()
             val record =
                 DownloadRecord(
-                    id = "download-${clock()}-${(0..9999).random()}",
+                    id = "download-${UUID.randomUUID()}",
                     url = url,
                     fileName = File(filePath).name,
                     filePath = filePath,
                     sizeBytes = sizeBytes,
-                    completedAt = clock(),
+                    completedAt = completedAt,
                 )
             val updated = (listOf(record) + _downloads.value).take(MAX_ENTRIES)
-            _downloads.value = updated
             persist(updated)
+            _downloads.value = updated
             record
         }
 
     /** Remove one record. Returns true when it existed. */
     suspend fun remove(id: String): Boolean =
         mutex.withLock {
+            check(!loadFailed) { "Download history could not be read; clear it before removing records" }
             val current = _downloads.value
             val updated = current.filterNot { it.id == id }
             if (updated.size == current.size) {
                 false
             } else {
-                _downloads.value = updated
                 persist(updated)
+                _downloads.value = updated
                 true
             }
         }
@@ -123,9 +135,9 @@ object DownloadHistoryManager {
     suspend fun clear(): Int =
         mutex.withLock {
             val removed = _downloads.value.size
-            if (removed == 0) return@withLock 0
-            _downloads.value = emptyList()
             persist(emptyList())
+            _downloads.value = emptyList()
+            loadFailed = false
             removed
         }
 
@@ -138,6 +150,7 @@ object DownloadHistoryManager {
                 @Suppress("TooGenericExceptionCaught") e: Exception,
             ) {
                 logger.warn(LogCategory.SYSTEM, "Failed to save download history", error = e)
+                throw e
             }
         }
 }

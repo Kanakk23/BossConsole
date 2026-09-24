@@ -11,6 +11,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -101,9 +102,28 @@ class DownloadHistoryManagerTest {
         }
 
     @Test
-    fun `a corrupt file loads as an empty history rather than throwing`() {
-        tempFile.writeText("{ not valid")
-        DownloadHistoryManager.resetForTesting(tempFile)
-        assertTrue(DownloadHistoryManager.downloads.value.isEmpty())
-    }
+    fun `a corrupt file is preserved until an explicit clear`() =
+        runBlocking {
+            tempFile.writeText("{ not valid")
+            DownloadHistoryManager.resetForTesting(tempFile)
+            assertTrue(DownloadHistoryManager.downloads.value.isEmpty())
+            assertTrue(DownloadHistoryManager.loadFailed)
+            assertFailsWith<IllegalStateException> { DownloadHistoryManager.record("u", "/d/new") }
+            assertEquals("{ not valid", tempFile.readText())
+            assertEquals(0, DownloadHistoryManager.clear())
+            assertFalse(DownloadHistoryManager.loadFailed)
+            assertTrue(json.decodeFromString(DownloadHistory.serializer(), tempFile.readText()).downloads.isEmpty())
+        }
+
+    @Test
+    fun `a failed save does not claim an in-memory change`() =
+        runBlocking {
+            DownloadHistoryManager.record("u", "/d/first")
+            val before = DownloadHistoryManager.downloads.value
+            assertTrue(tempFile.delete())
+            assertTrue(tempFile.mkdir())
+
+            assertFailsWith<Exception> { DownloadHistoryManager.record("u", "/d/second") }
+            assertEquals(before, DownloadHistoryManager.downloads.value)
+        }
 }

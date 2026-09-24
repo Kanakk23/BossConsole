@@ -30,7 +30,7 @@ object WorkspacePlaceholders {
     // Also the guards in [processPlaceholders], so a guard and its substitution cannot drift.
     // Every placeholder whose value costs something to compute needs one: a mkdir, a `git`
     // subprocess and a directory listing respectively.
-    private const val PROJECT_PATH_PLACEHOLDER = "{projectPath}"
+    const val PROJECT_PATH_PLACEHOLDER = "{projectPath}"
     private const val GIT_REMOTE_URL_PLACEHOLDER = "{gitRemoteUrl}"
     private const val CLAUDE_CONTINUE_FLAG_PLACEHOLDER = "{claudeContinueFlag}"
 
