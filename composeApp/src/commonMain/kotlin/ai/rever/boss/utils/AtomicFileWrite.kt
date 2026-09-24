@@ -5,10 +5,12 @@ import java.io.IOException
 import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 
 private val OWNER_ONLY_FILE_PERMISSIONS: Set<PosixFilePermission> =
     setOf(
@@ -92,15 +94,29 @@ private fun forceFileContentsToDisk(file: File) {
  * previously open-coded this dance with a FIXED temp name, which concurrent
  * writers could clobber.
  *
- * @param sync durability step run on the temp file just before it replaces
- * the target; injectable so tests can observe the flush ordering or refuse it.
+ * The parent directory is verified before use: a symlinked parent (or one swapped for a
+ * symlink between the check and the move) would redirect both the temp file and the
+ * destination wherever the link points, so the write refuses one outright and otherwise
+ * runs against the resolved real path.
  */
 fun File.atomicWriteText(
     text: String,
     sync: (File) -> Unit = ::forceFileContentsToDisk,
 ) {
-    parentFile?.mkdirs()
-    val tmp = File.createTempFile("$name.", ".tmp", parentFile)
+    val parent = verifiedWriteParent()
+    val tmp =
+        try {
+            Files.createTempFile(
+                parent,
+                "$name.",
+                ".tmp",
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")),
+            )
+        } catch (_: UnsupportedOperationException) {
+            // A non-POSIX filesystem has no mode to set; the temp still inherits the
+            // directory's ACL, which is the tightest available there.
+            Files.createTempFile(parent, "$name.", ".tmp")
+        }.toFile()
     try {
         if (Files.getFileAttributeView(tmp.toPath(), PosixFileAttributeView::class.java) != null) {
             // Fail closed if a filesystem advertises POSIX permissions but refuses the
@@ -110,9 +126,69 @@ fun File.atomicWriteText(
         }
         tmp.writeText(text)
         sync(tmp)
-        atomicMoveFrom(tmp)
+        parent.resolve(name).toFile().atomicMoveFrom(tmp)
     } finally {
         // No-op when the move took it away; cleans up on failure paths.
         tmp.delete()
+    }
+}
+
+/**
+ * The directory the temp file and the move both run in.
+ *
+ * A swapped or symlinked parent used to redirect the temp file and the destination
+ * together. The declared parent is refused when it is itself a symlink; ancestors that are
+ * links (macOS `/var`, a symlinked home) stay legal because `toRealPath` pins the write to
+ * the directory they resolve to right now - a later swap of the declared path cannot
+ * redirect a write that no longer goes through it. Where the filesystem reports a POSIX
+ * owner, a directory owned by another user is refused unless it is world-writable shared
+ * scratch (`/tmp` and friends are root-owned by convention).
+ *
+ * Closing the last sliver of the swap race - a link landing between the refusal check and
+ * the resolve - needs a held directory fd (O_NOFOLLOW/openat), which java.nio does not
+ * expose; the post-resolve re-check below shrinks that window to the minimum the API
+ * allows rather than pretending it is closed.
+ */
+private fun File.verifiedWriteParent(): Path {
+    val declared =
+        (parentFile ?: absoluteFile.parentFile)
+            ?: throw IOException("Cannot resolve a parent directory for $path")
+    declared.mkdirs()
+    val declaredPath = declared.toPath()
+    declaredPath.throwIfSymlinked()
+    val real = declaredPath.toRealPath()
+    real.throwIfNotDirectory()
+    // Swapped for a link while resolving: real now points wherever the link does.
+    declaredPath.throwIfSymlinked()
+    real.throwIfNotOwnedByCurrentUser()
+    return real
+}
+
+private fun Path.throwIfSymlinked() {
+    if (Files.isSymbolicLink(this)) {
+        throw IOException("Refusing to write through a symlinked directory: $this")
+    }
+}
+
+private fun Path.throwIfNotDirectory() {
+    if (!Files.isDirectory(this)) {
+        throw IOException("Refusing to write into a non-directory: $this")
+    }
+}
+
+private fun Path.throwIfNotOwnedByCurrentUser() {
+    val posix = Files.getFileAttributeView(this, PosixFileAttributeView::class.java) ?: return
+    val attributes = posix.readAttributes()
+    // Numeric identity is independent of passwd entries and the overridable user.name property.
+    val owner = (Files.getAttribute(this, "unix:uid") as Number).toLong()
+    val currentUser =
+        com.sun.security.auth.module
+            .UnixSystem()
+            .uid
+    // Another user's private directory must not absorb our write; a world-writable one
+    // (/tmp and friends, root-owned by convention) is shared scratch space and legal.
+    val foreignPrivate = owner != currentUser && PosixFilePermission.OTHERS_WRITE !in attributes.permissions()
+    if (foreignPrivate) {
+        throw IOException("Refusing to write into $this: owned by $owner, this process runs as $currentUser")
     }
 }
