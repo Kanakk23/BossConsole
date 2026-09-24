@@ -41,6 +41,7 @@ class FileIndexer(
         indexingMutex.withLock {
             try {
                 if (!forceReindex && _indexedPath.value == projectPath && _indexedFiles.value.isNotEmpty()) {
+                    _indexError.value = null
                     logger.debug(LogCategory.FILE, "Project already indexed", mapOf("path" to projectPath))
                     return@withLock
                 }
@@ -73,6 +74,8 @@ class FileIndexer(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                _indexedFiles.value = emptyList()
+                _indexedPath.value = null
                 _indexError.value = e.message ?: "indexing failed"
                 logger.error(LogCategory.FILE, "Error indexing project", error = e)
             } finally {

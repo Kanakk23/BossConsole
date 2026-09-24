@@ -22,7 +22,7 @@ internal data class ProjectDiscoveryResult(
 )
 
 /** Thrown by content search rather than silently returning a trustworthy-looking partial list. */
-internal class ProjectDiscoveryIncompleteException(
+class ProjectDiscoveryIncompleteException(
     reason: String,
 ) : IllegalStateException(reason)
 
@@ -33,7 +33,7 @@ internal class ProjectDiscoveryIncompleteException(
  * anchoring, directory patterns, `*`, `?`, bracket classes/ranges, escaped characters, and the
  * three boundary-positioned `**` forms. File links are deliberately excluded: an atomic replace
  * would replace the link rather than its target. Directory links are followed only inside the
- * resolved root and only when they do not create an ancestor cycle.
+ * resolved root. Canonical directories are visited once, including through in-root links.
  */
 internal object ProjectFileDiscovery {
     private val logger = BossLogger.forComponent("ProjectFileDiscovery")
@@ -68,21 +68,26 @@ internal object ProjectFileDiscovery {
     suspend fun discover(
         projectPath: String,
         acceptFile: (String) -> Boolean = { true },
+        maxFiles: Int = MAX_FILES,
+        maxDirectories: Int = MAX_DIRECTORIES,
     ): ProjectDiscoveryResult {
-        val root = resolveRoot(projectPath) ?: return ProjectDiscoveryResult(emptyList())
+        val root =
+            resolveRoot(projectPath)
+                ?: return ProjectDiscoveryResult(emptyList(), "Project directory cannot be resolved: $projectPath")
         val files = mutableListOf<ProjectFile>()
         val pending = ArrayDeque<DirectoryWork>()
+        val seenDirectories = mutableSetOf(root.realPath)
         pending += DirectoryWork(root.absolutePath, emptyList(), emptyList(), setOf(root.realPath))
         var visitedDirectories = 0
 
         while (pending.isNotEmpty()) {
             currentCoroutineContext().ensureActive()
-            if (++visitedDirectories > MAX_DIRECTORIES) return incomplete("directory", projectPath, files)
+            if (++visitedDirectories > maxDirectories) return incomplete("directory budget", projectPath, files)
             val work = pending.removeLast()
             val ignoreRules = readIgnoreRules(work.path, work.relativePath)
             if (ignoreRules.incomplete) return incomplete(".gitignore", projectPath, files)
             val rules = work.rules + ignoreRules.rules
-            val visit = visitDirectory(work, root, rules, pending, files, acceptFile)
+            val visit = visitDirectory(work, root, rules, pending, seenDirectories, files, acceptFile, maxFiles)
             if (visit != null) return incomplete(visit, projectPath, files)
         }
         return ProjectDiscoveryResult(files)
@@ -99,8 +104,10 @@ internal object ProjectFileDiscovery {
         root: ProjectRoot,
         rules: List<IgnoreRule>,
         pending: ArrayDeque<DirectoryWork>,
+        seenDirectories: MutableSet<Path>,
         files: MutableList<ProjectFile>,
         acceptFile: (String) -> Boolean,
+        maxFiles: Int,
     ): String? =
         try {
             Files.newDirectoryStream(work.path).use { children ->
@@ -120,7 +127,7 @@ internal object ProjectFileDiscovery {
                                     "Skipping project directory link cycle",
                                     mapOf("path" to child.toString()),
                                 )
-                            } else {
+                            } else if (seenDirectories.add(real)) {
                                 pending += DirectoryWork(child, relative, rules, work.ancestorRealPaths + real)
                             }
                         }
@@ -128,7 +135,7 @@ internal object ProjectFileDiscovery {
                         kind.regularFile -> {
                             val relativeText = relative.joinToString(File.separator)
                             if (!acceptFile(relativeText.replace('\\', '/'))) continue
-                            if (files.size >= MAX_FILES) return "file"
+                            if (files.size >= maxFiles) return "file budget"
                             files += ProjectFile(child.toFile(), relativeText)
                         }
                     }
@@ -138,13 +145,13 @@ internal object ProjectFileDiscovery {
         } catch (e: java.io.IOException) {
             logger.debug(
                 LogCategory.FILE,
-                "Skipping unreadable project directory",
+                "Could not read project directory",
                 mapOf(
                     "path" to work.path.toString(),
                     "error" to e.toString(),
                 ),
             )
-            null
+            "directory read"
         }
 
     private fun incomplete(
@@ -152,7 +159,7 @@ internal object ProjectFileDiscovery {
         projectPath: String,
         files: List<ProjectFile>,
     ): ProjectDiscoveryResult {
-        val reason = "Project discovery reached its $kind budget; results are incomplete"
+        val reason = "Project discovery could not complete ($kind); results are incomplete"
         logger.warn(
             LogCategory.FILE,
             reason,
@@ -239,7 +246,15 @@ internal object ProjectFileDiscovery {
                     "error" to e.toString(),
                 ),
             )
-            IgnoreRead(emptyList())
+            IgnoreRead(emptyList(), incomplete = true)
+        } catch (e: java.util.regex.PatternSyntaxException) {
+            logger.warn(
+                LogCategory.FILE,
+                "Invalid project gitignore pattern",
+                mapOf("path" to ignoreFile.toString()),
+                error = e,
+            )
+            IgnoreRead(emptyList(), incomplete = true)
         }
     }
 
@@ -432,7 +447,7 @@ internal object ProjectFileDiscovery {
         }
     }
 
-    private const val MAX_DIRECTORIES = 25_000
-    private const val MAX_FILES = 50_000
+    private const val MAX_DIRECTORIES = 100_000
+    private const val MAX_FILES = 250_000
     private const val MAX_IGNORE_CHARS = 1_048_576
 }

@@ -106,7 +106,7 @@ class ContentSearchService(
                         "error" to (e.message ?: "invalid regex"),
                     ),
                 )
-                throw e
+                return emptyList()
             }
         val rawOpenPaths = snapshotOpenEditorPaths()
         return withContext(Dispatchers.IO) {
@@ -158,33 +158,34 @@ class ContentSearchService(
                         file.absolutePath,
                     )
                 val key = cacheKeyArg + if (buffer != null) "|buf" else "|disk"
+                if (buffer == null && file.length() > MAX_FILE_SIZE) continue
                 val text = buffer?.content ?: readTextAtMost(file).textOrNull() ?: continue
                 if (!isWithinContentLimit(text)) continue
                 // The content fingerprint covers unsaved buffer edits, close/reopen, and disk
                 // rewrites even where mtimes have coarse resolution. Do not use hashCode here:
                 // its ordinary collisions (for example, "Aa" and "BB") can serve stale hits.
-                val fingerprint = contentFingerprint(text)
+                val cached = synchronized(cache) { cache[key] }
+                val fingerprint = if (cached != null) contentFingerprint(text) else null
+                val cachedMatches = if (cached != null && cached.fingerprint == fingerprint) cached.matches else null
                 val matches: List<FileMatch> =
-                    synchronized(cache) {
-                        val cached = cache[key]
-                        if (cached != null && cached.fingerprint == fingerprint) cached.matches else null
-                    }
-                        ?: scanText(
-                            file = file,
-                            text = text,
-                            regex = regex,
-                            relativePath = relativePath,
-                            isCancelled = isCancelled,
-                        )?.also { found ->
-                            // Empty results are not cached: on a large project most files
-                            // match nothing, and caching them all filled the map and tripped
-                            // the wholesale clear below, so a repeat search - the one this
-                            // cache exists for - hit on nothing. Re-scanning a no-match file
-                            // is cheap; evicting a real hit is not.
-                            if (found.isNotEmpty()) {
-                                synchronized(cache) { cache[key] = CacheEntry(fingerprint, found) }
+                    cachedMatches ?: scanText(
+                        file = file,
+                        text = text,
+                        regex = regex,
+                        relativePath = relativePath,
+                        isCancelled = isCancelled,
+                    )?.also { found ->
+                        // Empty results are not cached: on a large project most files
+                        // match nothing, and caching them all filled the map and tripped
+                        // the wholesale clear below, so a repeat search - the one this
+                        // cache exists for - hit on nothing. Re-scanning a no-match file
+                        // is cheap; evicting a real hit is not.
+                        if (found.isNotEmpty()) {
+                            synchronized(cache) {
+                                cache[key] = CacheEntry(fingerprint ?: contentFingerprint(text), found)
                             }
-                        } ?: continue
+                        }
+                    } ?: continue
 
                 for (match in matches) {
                     results.add(match)
@@ -516,10 +517,12 @@ class ContentSearchService(
             // The matcher reads through [InterruptibleText] rather than the raw
             // string, so a cancel lands inside a wedged pattern instead of at the
             // next suspension point.
-            val searchable =
-                InterruptibleText(text, isCancelled, System.nanoTime() + MAX_REGEX_MATCH_NANOS)
             var searchFrom = 0
             while (searchFrom <= text.length && matches.size < MAX_MATCHES_PER_FILE) {
+                // Each find gets its own deadline. A benign file with many matches must not
+                // spend the same 250 ms allowance across all of them.
+                val searchable =
+                    InterruptibleText(text, isCancelled, System.nanoTime() + MAX_REGEX_MATCH_NANOS)
                 val m = regex.find(searchable, searchFrom) ?: break
                 matches.add(
                     FileMatch(
@@ -944,7 +947,7 @@ class ContentSearchService(
 }
 
 /** Search cannot represent a known-incomplete result as an ordinary empty result. */
-internal class ProjectSearchIncompleteException(
+class ProjectSearchIncompleteException(
     reason: String,
 ) : IllegalStateException(reason)
 
@@ -1180,7 +1183,9 @@ internal class InterruptibleText(
     private fun checkBudget() {
         onCharacterAccess?.invoke()
         if (isCancelled()) throw CancellationException("search cancelled")
-        if (System.nanoTime() - deadlineNanos >= 0) throw RegexMatchTimeoutException()
+        if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() - deadlineNanos >= 0) {
+            throw RegexMatchTimeoutException()
+        }
     }
 }
 

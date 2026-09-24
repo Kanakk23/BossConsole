@@ -14,6 +14,51 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ProjectFileDiscoveryTest {
+    @Test
+    fun `file budget and invalid root report incomplete discovery`(
+        @TempDir root: File,
+    ) = runBlocking {
+        repeat(3) { File(root, "file-$it.txt").writeText("needle") }
+        val limited = ProjectFileDiscovery.discover(root.absolutePath, maxFiles = 2)
+        assertTrue(limited.incompleteReason?.contains("file budget") == true)
+        assertTrue(ProjectFileDiscovery.discover(File(root, "missing").path).incompleteReason != null)
+    }
+
+    @Test
+    fun `failed reindex clears stale files and exposes the reason`(
+        @TempDir root: File,
+    ) = runBlocking {
+        File(root, "visible.txt").writeText("needle")
+        val indexer = FileIndexer()
+        indexer.indexProject(root.absolutePath)
+        assertTrue(indexer.indexedFiles.value.isNotEmpty())
+
+        indexer.indexProject(File(root, "missing").absolutePath)
+        assertTrue(indexer.indexedFiles.value.isEmpty())
+        assertTrue(indexer.indexError.value?.contains("cannot be resolved") == true)
+    }
+
+    @Test
+    fun `non UTF8 gitignore fails closed`(
+        @TempDir root: File,
+    ) = runBlocking {
+        File(root, ".gitignore").writeBytes(byteArrayOf(0xff.toByte()))
+        File(root, "visible.txt").writeText("needle")
+        assertTrue(ProjectFileDiscovery.discover(root.absolutePath).incompleteReason != null)
+    }
+
+    @Test
+    fun `an in root directory alias does not duplicate results`(
+        @TempDir root: File,
+    ) = runBlocking {
+        val source = File(root, "source").apply { mkdirs() }
+        val target = File(source, "one.txt").apply { writeText("needle") }
+        assumeTrue(createDirectoryLink(File(root, "alias").toPath(), source.toPath()))
+        val discovery = ProjectFileDiscovery.discover(root.absolutePath)
+        assertEquals(null, discovery.incompleteReason)
+        assertEquals(1, discovery.files.count { it.file.toPath().toRealPath() == target.toPath().toRealPath() })
+    }
+
     private fun index(root: File): Set<String> {
         val indexer = FileIndexer()
         runBlocking { indexer.indexProject(root.absolutePath) }
