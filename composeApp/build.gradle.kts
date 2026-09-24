@@ -1101,10 +1101,12 @@ kotlin {
                 implementation(project(":plugin-platform:plugin-api-ipc"))
             }
         }
-        // Without the IPC module (Windows ARM64) the drift test can't compile;
-        // drop it from the source set — every other platform still enforces it.
+        // Without the IPC module (Windows ARM64) the drift test and the Downloads
+        // consistency test can't compile; drop them from the source set - every other
+        // platform still enforces them.
         if (findProject(":plugin-platform:plugin-api-ipc") == null) {
             desktopTest.kotlin.exclude("**/SkipListDriftTest.kt")
+            desktopTest.kotlin.exclude("**/DownloadsDirectoryConsistencyTest.kt")
         }
         // Mirror of the desktopMain exclusions above: **/kernel/** and
         // **/plugin/remote/** aren't compiled on Windows ARM64 (no boss-ipc, no
