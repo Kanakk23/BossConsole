@@ -93,8 +93,8 @@ sealed interface SecretReferenceScan {
  * - The field is optional and defaults to `password`, the value an agent needs most often.
  * - Any other `{{secret:...}}` shape is [SecretReferenceScan.Malformed], never ignored.
  *
- * The scan looks at decoded string values only (see [findIn]); JSON keys are not scanned and are
- * never substituted, so a reference in a key passes through as literal text.
+ * This parser handles decoded string values (see [findIn]). [McpArgumentSubstitution.scan]
+ * separately rejects markers in JSON keys, which are never substituted.
  */
 object SecretReferenceParser {
     /** Cheap pre-check every governed call pays: a substring search, no regex, no parse. */
