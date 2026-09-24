@@ -152,10 +152,30 @@ class EngineArchiveIntegrityVetTest {
     // ---- the gate inside installFromCandidates ----
 
     @Test
+    fun `a hashless release reports its refusal through download progress`() =
+        runBlocking {
+            val progress = mutableListOf<ChromiumAutoDownloader.DownloadProgress>()
+            val result =
+                ChromiumAutoDownloader.downloadChromium(
+                    version = VERSION,
+                    staged = false,
+                    onProgress = progress::add,
+                    resolveCandidates = { _, _ -> listOf(hashlessCandidate()) },
+                )
+
+            assertTrue(result.isFailure)
+            assertTrue(
+                progress.lastOrNull()?.error?.contains("no catalog checksum") == true,
+                "the first-launch setup dialog must receive the refusal",
+            )
+        }
+
+    @Test
     fun `an unverifiable candidate is refused and the previous engine survives`() =
         runBlocking {
             makePreviousEngine()
             var fetched = false
+            val progress = mutableListOf<ChromiumAutoDownloader.DownloadProgress>()
 
             val result =
                 ChromiumAutoDownloader.installFromCandidates(
@@ -163,7 +183,7 @@ class EngineArchiveIntegrityVetTest {
                     version = VERSION,
                     targetDir = engineDir.toPath(),
                     staged = false,
-                    onProgress = {},
+                    onProgress = progress::add,
                     fetch = { _, _ -> fetched = true },
                     extract = { _, _ -> error("a refused archive must never be extracted") },
                 )
@@ -175,6 +195,10 @@ class EngineArchiveIntegrityVetTest {
             )
             assertPreviousEngineIntact()
             assertTrue(!fetched, "a hashless archive must be refused before download")
+            assertTrue(
+                progress.lastOrNull()?.error?.contains("no catalog checksum") == true,
+                "the setup dialog must receive the refusal through download progress",
+            )
         }
 
     @Test
@@ -230,6 +254,34 @@ class EngineArchiveIntegrityVetTest {
                 "both candidates must have been tried",
             )
             assertEquals(VERSION, File(engineDir, "version.txt").readText())
+        }
+
+    @Test
+    fun `a corrupt primary is cleaned up and a hashless backup is skipped`() =
+        runBlocking {
+            makePreviousEngine()
+            val attempted = mutableListOf<String>()
+            var tempArchive: Path? = null
+
+            val result =
+                ChromiumAutoDownloader.installFromCandidates(
+                    candidates = listOf(pinnedCandidate("supabase"), hashlessCandidate()),
+                    version = VERSION,
+                    targetDir = engineDir.toPath(),
+                    staged = false,
+                    onProgress = {},
+                    fetch = { url, dest ->
+                        attempted += url
+                        tempArchive = dest
+                        dest.toFile().writeBytes(tamperedBytes)
+                    },
+                    extract = { _, _ -> error("a refused archive must never be extracted") },
+                )
+
+            assertTrue(result.isFailure)
+            assertEquals(listOf("https://supabase/boss-chromium.zip"), attempted)
+            assertTrue(tempArchive?.toFile()?.exists() == false, "the refused download must be deleted")
+            assertPreviousEngineIntact()
         }
 
     @Test

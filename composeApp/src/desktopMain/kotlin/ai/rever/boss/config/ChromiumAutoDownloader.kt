@@ -453,15 +453,17 @@ object ChromiumAutoDownloader {
         version: String,
         staged: Boolean = false,
         onProgress: (DownloadProgress) -> Unit,
+    ): Result<Path> = downloadChromium(version, staged, onProgress, ChromiumReleaseSource::downloadCandidates)
+
+    internal suspend fun downloadChromium(
+        version: String,
+        staged: Boolean,
+        onProgress: (DownloadProgress) -> Unit,
+        resolveCandidates: suspend (String, String) -> List<EngineDownloadCandidate>,
     ): Result<Path> =
         withContext(Dispatchers.IO) {
             val archiveName = "boss-chromium-${detectPlatform()}.zip"
-            val candidates = ChromiumReleaseSource.downloadCandidates(version, archiveName)
-            if (candidates.none { !it.sha256.isNullOrBlank() }) {
-                return@withContext Result.failure(
-                    IllegalStateException("No catalog checksum is available for engine $version on this platform"),
-                )
-            }
+            val candidates = resolveCandidates(version, archiveName)
             installFromCandidates(
                 candidates = candidates,
                 version = version,
