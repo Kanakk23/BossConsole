@@ -31,6 +31,8 @@ import kotlin.test.assertTrue
  * cannot be read or written (BossConsole#85) — lives in
  * [McpKillSwitchPersistenceTest].
  */
+// Keep the invocation contracts in one fixture so the shared registry setup is consistent.
+@Suppress("LargeClass")
 class McpToolRegistryCoreTest {
     private val tempFiles = mutableListOf<File>()
 

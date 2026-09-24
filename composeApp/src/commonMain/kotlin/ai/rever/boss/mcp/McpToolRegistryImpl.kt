@@ -869,24 +869,7 @@ internal class McpToolRegistryCore(
         var result: McpToolResult? = null
         var executionStarted = false
         try {
-            // Argument shape and the declared inputSchema are gates, not documentation:
-            // malformed/non-object arguments and object arguments that fail the schema are
-            // refused before any approval prompt can be raised or handler can run.
-            val shapeError = nonObjectArgsError(tool.definition, arguments)
-            val schemaError =
-                if (shapeError == null) {
-                    validateMcpToolArguments(tool.definition.inputSchema, args.raw)
-                } else {
-                    null
-                }
-            val authorization =
-                if (shapeError != null) {
-                    McpApprovalDisposition.INVALID_ARGUMENTS to shapeError
-                } else if (schemaError != null) {
-                    McpApprovalDisposition.INVALID_ARGUMENTS to schemaError
-                } else {
-                    authorizeInvocation(tool, args, policy, revocation)
-                }
+            val authorization = validatedAuthorization(tool, arguments, args, policy, revocation)
             disposition = authorization.first
             val denial = authorization.second
             result =
@@ -937,6 +920,24 @@ internal class McpToolRegistryCore(
 
     private fun isAvailable(tool: RegisteredMcpTool): Boolean =
         _tools.value.any { it.providerId == tool.providerId && it.definition === tool.definition }
+
+    /** Validate argument shape and schema before raising an approval or invoking a handler. */
+    private suspend fun validatedAuthorization(
+        tool: RegisteredMcpTool,
+        arguments: String,
+        args: McpToolArgs,
+        policy: McpPolicyAction,
+        revocation: Long,
+    ): Pair<McpApprovalDisposition, String?> {
+        val shapeError = nonObjectArgsError(tool.definition, arguments)
+        val schemaError =
+            if (shapeError == null) validateMcpToolArguments(tool.definition.inputSchema, args.raw) else null
+        return when {
+            shapeError != null -> McpApprovalDisposition.INVALID_ARGUMENTS to shapeError
+            schemaError != null -> McpApprovalDisposition.INVALID_ARGUMENTS to schemaError
+            else -> authorizeInvocation(tool, args, policy, revocation)
+        }
+    }
 
     private suspend fun confirmApproval(
         tool: RegisteredMcpTool,
