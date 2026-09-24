@@ -3,9 +3,9 @@ package ai.rever.boss.plugin.pathutils
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import java.io.File
+import java.nio.file.Files
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -121,8 +121,14 @@ class WindowsDownloadsFolderTest {
         private val java = File(File(System.getProperty("java.home"), "bin"), "java").path
 
         @Test
-        fun `a successful run returns its output`() {
-            assertNotNull(WindowsDownloadsFolder.runRegQuery(listOf(java, "-version"), timeoutMillis = 60_000))
+        fun `a successful run returns its standard output`() {
+            // --version prints to stdout; -version prints to stderr, which is discarded.
+            val output = WindowsDownloadsFolder.runRegQuery(listOf(java, "--version"), timeoutMillis = 60_000)
+
+            assertTrue(
+                output.orEmpty().contains(System.getProperty("java.specification.version")),
+                "expected the launcher's version on stdout, got: $output",
+            )
         }
 
         @Test
@@ -139,7 +145,20 @@ class WindowsDownloadsFolderTest {
 
         @Test
         fun `a run that outlives the timeout gives null`() {
-            assertNull(WindowsDownloadsFolder.runRegQuery(listOf(java, "-version"), timeoutMillis = 0))
+            // A single-file source program that sleeps far longer than the timeout, so the
+            // outcome does not depend on how fast the JVM starts.
+            val dir = Files.createTempDirectory("boss-reg-timeout").toFile()
+            val sleeper = File(dir, "Sleeper.java")
+            sleeper.writeText(
+                "class Sleeper { public static void main(String[] a) throws Exception " +
+                    "{ Thread.sleep(60_000); } }",
+            )
+
+            try {
+                assertNull(WindowsDownloadsFolder.runRegQuery(listOf(java, sleeper.path), timeoutMillis = 1_000))
+            } finally {
+                dir.deleteRecursively()
+            }
         }
     }
 }

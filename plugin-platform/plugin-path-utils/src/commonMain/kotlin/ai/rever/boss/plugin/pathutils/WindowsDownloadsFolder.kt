@@ -31,12 +31,18 @@ object WindowsDownloadsFolder {
     /**
      * The shell's Downloads folder, or null when it cannot be read.
      *
-     * Also null when [userHome] is not the Windows profile folder. The registry describes the
-     * profile's folders, so it says nothing about a home the JVM was pointed elsewhere, as the
-     * test tasks do; in that case the registry is not queried at all.
+     * Also null off Windows, and when [userHome] is not the Windows profile folder. The
+     * registry describes the profile's folders, so it says nothing about a home the JVM was
+     * pointed elsewhere, as the test tasks do; in either case the registry is not queried.
      */
     fun current(userHome: String): String? {
-        val describesHome = isProfileHome(userHome, System.getenv("USERPROFILE"))
+        val onWindows =
+            System
+                .getProperty("os.name")
+                .orEmpty()
+                .lowercase()
+                .contains("windows")
+        val describesHome = onWindows && isProfileHome(userHome, System.getenv("USERPROFILE"))
 
         return if (describesHome) registryValue else null
     }
