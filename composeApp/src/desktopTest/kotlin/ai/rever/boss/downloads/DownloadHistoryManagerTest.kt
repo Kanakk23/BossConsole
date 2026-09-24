@@ -5,6 +5,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import org.junit.jupiter.api.parallel.ResourceLock
 import java.io.File
 import java.nio.file.Files
 import kotlin.test.AfterTest
@@ -20,6 +21,7 @@ import kotlin.test.assertTrue
  * Persistence and concurrency tests for [DownloadHistoryManager], pinning the shared state-file
  * contract: atomic writes, mutex-serialized mutations, forward-coercing reads, and bounded size.
  */
+@ResourceLock("DownloadHistoryManager")
 class DownloadHistoryManagerTest {
     private lateinit var tempDir: File
     private lateinit var tempFile: File
@@ -125,5 +127,22 @@ class DownloadHistoryManagerTest {
 
             assertFailsWith<Exception> { DownloadHistoryManager.record("u", "/d/second") }
             assertEquals(before, DownloadHistoryManager.downloads.value)
+        }
+
+    @Test
+    fun `first list loads history without creating the parent at initialization`(): Unit =
+        runBlocking {
+            DownloadHistoryManager.record("u", "/d/first")
+            val saved = tempFile.readText()
+            val missingParent = File(tempDir, "nested")
+            val nestedFile = File(missingParent, "download-history.json")
+            DownloadHistoryManager.resetForTesting(nestedFile, loadNow = false)
+            assertFalse(missingParent.exists())
+            assertTrue(DownloadHistoryManager.list().isEmpty())
+            assertTrue(missingParent.isDirectory)
+
+            nestedFile.writeText(saved)
+            DownloadHistoryManager.resetForTesting(nestedFile, loadNow = false)
+            assertEquals(1, DownloadHistoryManager.list().size)
         }
 }

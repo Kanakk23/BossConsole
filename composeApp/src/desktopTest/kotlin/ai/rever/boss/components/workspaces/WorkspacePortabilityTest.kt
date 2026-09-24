@@ -110,9 +110,96 @@ class WorkspacePortabilityTest {
     }
 
     @Test
-    fun `a Space with no project path is already portable and returned unchanged`() {
+    fun `a Space with no project path keeps its unknown absolute tab paths`() {
         val ws = sampleWorkspace(null)
         assertSame(ws, WorkspacePortability.toPortable(ws))
+        assertEquals("/Users/me/proj/src/A.kt", tabs(WorkspacePortability.toPortable(ws))[1].filePath)
+    }
+
+    @Test
+    fun `nested split branches all convert and resolve`() {
+        fun paths(layout: SplitConfig): List<String?> =
+            when (layout) {
+                is SplitConfig.SinglePanel -> layout.panel.tabs.map { it.filePath }
+                is SplitConfig.VerticalSplit -> paths(layout.left) + paths(layout.right)
+                is SplitConfig.HorizontalSplit -> paths(layout.top) + paths(layout.bottom)
+            }
+
+        fun leaf(id: String) =
+            SplitConfig.SinglePanel(
+                PanelConfig(
+                    id = id,
+                    tabs = listOf(TabConfig(type = "editor", title = id, filePath = "$projectPath/$id.kt")),
+                ),
+            )
+        val workspace =
+            sampleWorkspace(projectPath).copy(
+                layout =
+                    SplitConfig.VerticalSplit(
+                        leaf("left"),
+                        SplitConfig.HorizontalSplit(leaf("top"), leaf("bottom")),
+                    ),
+            )
+
+        val portable = WorkspacePortability.toPortable(workspace)
+        assertEquals(
+            listOf("{projectPath}/left.kt", "{projectPath}/top.kt", "{projectPath}/bottom.kt"),
+            paths(portable.layout),
+        )
+        val restored = WorkspacePortability.fromPortable(portable, "/opt/other")
+        assertEquals(
+            listOf("/opt/other/left.kt", "/opt/other/top.kt", "/opt/other/bottom.kt"),
+            paths(restored.layout),
+        )
+    }
+
+    @Test
+    fun `already portable tabs stay portable and quoted placeholders resolve once`() {
+        val workspace =
+            sampleWorkspace(null).copy(
+                layout =
+                    SplitConfig.SinglePanel(
+                        PanelConfig(
+                            id = "main",
+                            tabs =
+                                listOf(
+                                    TabConfig(
+                                        type = "terminal",
+                                        title = "T",
+                                        filePath = "{projectPath}/A.kt",
+                                        initialCommand = "cd \"{projectPath}\" && pwd",
+                                    ),
+                                ),
+                        ),
+                    ),
+            )
+        val portable = WorkspacePortability.toPortable(workspace)
+        assertSame(workspace, portable)
+        val resolved = WorkspacePortability.fromPortable(portable, "/opt/my project")
+        assertEquals("/opt/my project/A.kt", tabs(resolved)[0].filePath)
+        assertEquals("cd \"/opt/my project\" && pwd", tabs(resolved)[0].initialCommand)
+    }
+
+    @Test
+    fun `a command descendant quotes the whole resolved path`() {
+        val workspace = sampleWorkspace(projectPath)
+        val panel = (workspace.layout as SplitConfig.SinglePanel).panel
+        val withDescendant =
+            workspace.copy(
+                layout =
+                    SplitConfig.SinglePanel(
+                        panel.copy(
+                            tabs =
+                                listOf(
+                                    TabConfig(type = "terminal", title = "T", initialCommand = "cd $projectPath/src"),
+                                ),
+                        ),
+                    ),
+            )
+        val portable = WorkspacePortability.toPortable(withDescendant)
+        assertEquals("cd {projectPath}/src", tabs(portable)[0].initialCommand)
+        val resolved = WorkspacePortability.fromPortable(portable, "/opt/my project")
+        assertEquals("cd ${CommandProcessor.quotePath("/opt/my project/src")}", tabs(resolved)[0].initialCommand)
     }
 
     @Test

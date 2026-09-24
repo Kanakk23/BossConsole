@@ -152,5 +152,14 @@ object WorkspacePortability {
     private fun cmd(
         content: String,
         projectPath: String,
-    ): String = WorkspacePlaceholders.substituteProjectPath(content, projectPath, true)
+    ): String {
+        // Quote the entire descendant path. PowerShell cannot concatenate a quoted root with
+        // an unquoted /suffix the way POSIX shells can.
+        val descendant = Regex("(?<![\"'])\\{projectPath\\}(/[^\\s\"';&|)]*)")
+        val quotedDescendants =
+            descendant.replace(content) { match ->
+                CommandProcessor.quotePath(projectPath + match.groupValues[1])
+            }
+        return WorkspacePlaceholders.substituteProjectPath(quotedDescendants, projectPath, true)
+    }
 }

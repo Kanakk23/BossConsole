@@ -33,10 +33,16 @@ object DownloadHistoryManager {
     /** Newest records kept; older ones drop off on the next record. */
     const val MAX_ENTRIES = 500
 
-    private val defaultStorageFile = BossDirectories.resolve("download-history.json")
+    private val defaultStorageFile by lazy { BossDirectories.resolve("download-history.json") }
 
     @Volatile
-    internal var storageFile: File = defaultStorageFile
+    private var storageFileOverride: File? = null
+
+    internal var storageFile: File
+        get() = storageFileOverride ?: defaultStorageFile
+        set(value) {
+            storageFileOverride = value
+        }
 
     @Volatile
     internal var clock: () -> Long = { System.currentTimeMillis() }
@@ -51,6 +57,9 @@ object DownloadHistoryManager {
 
     private val _downloads = MutableStateFlow<List<DownloadRecord>>(emptyList())
 
+    @Volatile
+    private var loaded = false
+
     /** A failed read must not be replaced by a later download's one-record history. */
     @Volatile
     internal var loadFailed: Boolean = false
@@ -58,11 +67,6 @@ object DownloadHistoryManager {
 
     /** Newest first. */
     val downloads: StateFlow<List<DownloadRecord>> = _downloads.asStateFlow()
-
-    init {
-        storageFile.parentFile?.mkdirs()
-        loadSync()
-    }
 
     internal fun loadSync() {
         try {
@@ -79,15 +83,42 @@ object DownloadHistoryManager {
             logger.warn(LogCategory.SYSTEM, "Failed to load download history", error = e)
             _downloads.value = emptyList()
             loadFailed = true
+        } finally {
+            loaded = true
         }
     }
 
-    internal fun resetForTesting(testFile: File? = null) {
+    internal fun resetForTesting(
+        testFile: File? = null,
+        loadNow: Boolean = true,
+    ) {
         storageFile = testFile ?: defaultStorageFile
         clock = { System.currentTimeMillis() }
-        storageFile.parentFile?.mkdirs()
-        loadSync()
+        loaded = false
+        _downloads.value = emptyList()
+        loadFailed = false
+        if (loadNow) {
+            storageFile.parentFile?.mkdirs()
+            loadSync()
+        }
     }
+
+    /** Load on the IO dispatcher before the first operation, without blocking object initialization. */
+    private suspend fun ensureLoaded() {
+        if (loaded) return
+        withContext(Dispatchers.IO) {
+            storageFile.parentFile?.mkdirs()
+            loadSync()
+        }
+    }
+
+    /** Read a consistent snapshot after the initial disk load. */
+    suspend fun list(): List<DownloadRecord> =
+        mutex.withLock {
+            ensureLoaded()
+            check(!loadFailed) { "Download history could not be read; clear it before listing" }
+            _downloads.value
+        }
 
     /**
      * Record a completed download of [url] saved to [filePath]. The file name is derived from the
@@ -99,6 +130,7 @@ object DownloadHistoryManager {
         sizeBytes: Long? = null,
     ): DownloadRecord =
         mutex.withLock {
+            ensureLoaded()
             check(!loadFailed) { "Download history could not be read; clear it before recording new downloads" }
             val completedAt = clock()
             val record =
@@ -119,6 +151,7 @@ object DownloadHistoryManager {
     /** Remove one record. Returns true when it existed. */
     suspend fun remove(id: String): Boolean =
         mutex.withLock {
+            ensureLoaded()
             check(!loadFailed) { "Download history could not be read; clear it before removing records" }
             val current = _downloads.value
             val updated = current.filterNot { it.id == id }
@@ -134,6 +167,7 @@ object DownloadHistoryManager {
     /** Remove every record. Returns the number removed. */
     suspend fun clear(): Int =
         mutex.withLock {
+            ensureLoaded()
             val removed = _downloads.value.size
             persist(emptyList())
             _downloads.value = emptyList()
