@@ -54,15 +54,13 @@ private fun heapMegabytes(arg: String): Long {
     val raw = arg.removePrefix("-Xmx").removePrefix("-Xms")
     val bytes = raw.toLongOrNull() // all-digits: unitless means bytes
     val number = raw.dropLast(1).toLongOrNull()
+    val unit = raw.lastOrNull()?.lowercaseChar()
     return when {
         bytes != null -> bytes / (1024 * 1024)
-        number == null -> 0
-        else ->
-            when (raw.lastOrNull()?.lowercaseChar()) {
-                'g' -> number * 1024
-                'm' -> number
-                'k' -> number / 1024
-                else -> 0
-            }
+        number == null -> 0L
+        unit == 'g' -> number * 1024
+        unit == 'm' -> number
+        unit == 'k' -> number / 1024
+        else -> 0L
     }
 }
