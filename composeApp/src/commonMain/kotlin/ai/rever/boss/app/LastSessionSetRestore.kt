@@ -43,7 +43,7 @@ private val logger = BossLogger.forComponent("LastSessionSetRestore")
  *   rebuilt (a plugin tab type that never registered, a corrupt entry) must not take the Spaces
  *   after it - and above all must not take the ACTIVE one, which is applied last.
  *
- * @param onLoad called with each Space just before it is applied, so the caller can set
+ * @param onLoad called with each Space only after it is applied, so the caller can set
  *   `currentWorkspace` and record the restored project path. Called for every Space in turn, which
  *   leaves the manager holding the active one, because that is the last call.
  * @return the Spaces that were applied without throwing.
@@ -61,7 +61,7 @@ internal suspend fun restoreLastSessionSet(
     val order = withKnownNames(restoreOrder(set), knownSpaces)
     val applied = mutableListOf<LayoutWorkspace>()
 
-    order.forEachIndexed { index, space ->
+    order.forEach { space ->
         // Preserve whatever is on screen under its OWN id, so it stays a live Space this window is
         // running rather than being replaced by the next apply. Read off the split state rather
         // than off the previous iteration deliberately: `preserveCurrentState` stores under the id
@@ -77,26 +77,23 @@ internal suspend fun restoreLastSessionSet(
             )
         }
 
-        onLoad(space)
         try {
             if (
                 applyWorkspace(
                     workspace = space,
                     splitViewState = splitViewState,
                     windowProjectState = windowProjectState,
-                    restoreProject = index == 0,
+                    restoreProject = applied.isEmpty(),
                 )
             ) {
+                onLoad(space)
                 applied += space
             } else {
                 // Refused: the screen still shows the leaving tree, which the preserve above
                 // also filed a snapshot of - the workspace currently shown kept as preserved
                 // too would be written into the next session record as a second running Space.
-                // And the manager, which onLoad just moved onto the refused Space, is pointed
-                // back at the one that is actually on screen - the workspace claiming leavingId,
-                // or the last thing applied when that id names nothing in this set.
+                // onLoad has not run, so the manager still names the last successful Space.
                 leavingId?.let(splitViewState::discardPreservedState)
-                (order.firstOrNull { it.id == leavingId } ?: applied.lastOrNull())?.let(onLoad)
             }
         } catch (e: CancellationException) {
             throw e

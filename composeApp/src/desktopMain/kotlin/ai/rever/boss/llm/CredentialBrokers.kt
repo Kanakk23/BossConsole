@@ -113,7 +113,7 @@ internal object CredentialBrokers {
                 logger.warn(
                     LogCategory.SYSTEM,
                     "$RISA_TOKEN_URL_ENV override rejected - using the built-in endpoint",
-                    mapOf("override" to LogSanitizer.describeUri(override)),
+                    mapOf("override" to LogSanitizer.describeUri(trimmed)),
                 )
             }
             RISA_TOKEN_URL
@@ -173,6 +173,8 @@ internal object CredentialBrokerClient {
 
         val client =
             HttpClient(CIO) {
+                // The allowlist covers the first endpoint, never an arbitrary redirect target.
+                followRedirects = false
                 install(HttpTimeout) {
                     requestTimeoutMillis = REQUEST_TIMEOUT_MS
                     connectTimeoutMillis = CONNECT_TIMEOUT_MS

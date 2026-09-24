@@ -242,6 +242,8 @@ internal class BossAppState(
     // Track if workspace restoration has completed (for first window only)
     // New windows don't restore Last Session, so start as complete
     var workspaceRestorationComplete by mutableStateOf(!isFirstWindow)
+    var workspaceRestorationStarted by mutableStateOf(false)
+    var sessionRestoreRefused by mutableStateOf(false)
 
     /**
      * The project path startup restored from Last Session, if any.

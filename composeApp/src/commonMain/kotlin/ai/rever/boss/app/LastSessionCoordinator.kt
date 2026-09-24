@@ -54,6 +54,7 @@ class LastSessionCoordinator internal constructor(
         val isPrimary: Boolean,
         val extractLayout: () -> LayoutWorkspace,
         val extractSet: () -> LastSessionSet?,
+        val canSave: () -> Boolean,
     )
 
     private val liveWindows = ConcurrentHashMap<String, LiveWindow>()
@@ -78,9 +79,10 @@ class LastSessionCoordinator internal constructor(
          * own. Invoked at teardown alongside [extractLayout], so it must read live state too.
          */
         extractSet: () -> LastSessionSet? = { null },
+        canSave: () -> Boolean = { true },
         extractLayout: () -> LayoutWorkspace,
     ) {
-        liveWindows[windowId] = LiveWindow(isFirstWindow, extractLayout, extractSet)
+        liveWindows[windowId] = LiveWindow(isFirstWindow, extractLayout, extractSet, canSave)
         // A new window means a new session to persist later.
         writtenThisSession.set(false)
     }
@@ -132,11 +134,14 @@ class LastSessionCoordinator internal constructor(
         return entry != null && writeLastSession(entry.key, entry.value, trigger = "process-exit")
     }
 
+    @Suppress("ReturnCount") // Refused restoration and an already-claimed write are independent guards.
     private fun writeLastSession(
         windowId: String,
         window: LiveWindow,
         trigger: String,
     ): Boolean {
+        // A refused restore must leave both recovery records untouched, including on shutdown.
+        if (!window.canSave()) return false
         // Claim the write before doing it: the dispose path and the shutdown hook
         // can run concurrently (a hook fires while Compose is still tearing down).
         if (!writtenThisSession.compareAndSet(false, true)) return false

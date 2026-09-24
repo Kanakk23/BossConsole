@@ -179,8 +179,12 @@ private fun Path.throwIfNotDirectory() {
 private fun Path.throwIfNotOwnedByCurrentUser() {
     val posix = Files.getFileAttributeView(this, PosixFileAttributeView::class.java) ?: return
     val attributes = posix.readAttributes()
-    val owner = attributes.owner().name
-    val currentUser = System.getProperty("user.name")
+    // Numeric identity is independent of passwd entries and the overridable user.name property.
+    val owner = (Files.getAttribute(this, "unix:uid") as Number).toLong()
+    val currentUser =
+        com.sun.security.auth.module
+            .UnixSystem()
+            .uid
     // Another user's private directory must not absorb our write; a world-writable one
     // (/tmp and friends, root-owned by convention) is shared scratch space and legal.
     val foreignPrivate = owner != currentUser && PosixFilePermission.OTHERS_WRITE !in attributes.permissions()

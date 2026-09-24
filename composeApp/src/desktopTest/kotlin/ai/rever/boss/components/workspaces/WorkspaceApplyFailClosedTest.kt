@@ -195,6 +195,29 @@ class WorkspaceApplyFailClosedTest {
     }
 
     @Test
+    fun `one buildable tab cannot hide missing tabs and overwrite the saved layout`() {
+        val (state, project) = newState()
+        state.getPanelTabsComponent("main")!!.addTab(TerminalTabInfo(id = "live", title = "Live"))
+        val partial =
+            workspace(
+                SinglePanel(
+                    PanelConfig(
+                        id = "main",
+                        tabs =
+                            listOf(
+                                TabConfig(type = "terminal", title = "Present"),
+                                TabConfig(type = "gone", title = "Gone"),
+                            ),
+                    ),
+                ),
+            )
+
+        assertFalse(runBlocking { applyWorkspace(partial, state, project) })
+        assertEquals(listOf("live"), tabsOnScreen(state).map { it.id })
+        assertNull(state.currentWorkspaceId)
+    }
+
+    @Test
     fun `a workspace declaring no tabs is empty by design and still applies`() {
         val (state, projectState) = newState()
         state.getPanelTabsComponent("main")!!.addTab(TerminalTabInfo(id = "live-terminal", title = "Live"))

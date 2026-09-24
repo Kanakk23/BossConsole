@@ -155,6 +155,19 @@ class AtomicFileWriteTest {
     }
 
     @Test
+    fun `ownership validation does not trust the overridable user name`() {
+        val previous = System.getProperty("user.name")
+        try {
+            System.setProperty("user.name", "not-the-process-owner")
+            val target = File(tempDir, "numeric-owner.json")
+            target.atomicWriteText("owned")
+            assertEquals("owned", target.readText())
+        } finally {
+            if (previous == null) System.clearProperty("user.name") else System.setProperty("user.name", previous)
+        }
+    }
+
+    @Test
     fun `atomicWriteText flushes the temp bytes before publishing them`() {
         // The durability contract, observed from inside the flush step: the temp sibling must
         // already hold the new bytes while the live file still holds the previous ones. Reversed,

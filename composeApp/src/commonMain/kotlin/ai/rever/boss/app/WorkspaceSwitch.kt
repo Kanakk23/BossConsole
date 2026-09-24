@@ -34,6 +34,7 @@ internal class WorkspaceSwitch internal constructor(
 )
 
 @Composable
+@Suppress("CyclomaticComplexMethod") // Keep/close, same-Space reopen, and refusal each preserve distinct ownership.
 internal fun rememberWorkspaceSwitch(
     state: BossAppState,
     splitViewState: SplitViewState,
@@ -51,8 +52,11 @@ internal fun rememberWorkspaceSwitch(
             // on the refusal path can rebuild it. A close the user asked for happens below,
             // once the apply has actually landed - closing here cleared the live tabs first and
             // a refused apply then left an emptied window, the wipe this ordering exists for.
-            if (leavingId != null) {
+            if (leavingId != null && (keepLeaving || leavingId != workspace.id)) {
                 splitViewState.preserveCurrentState(leavingId, leaving?.name.orEmpty())
+            } else if (leavingId != null) {
+                // Reopening this Space with discard must rebuild its saved definition.
+                splitViewState.discardPreservedState(leavingId)
             }
 
             // A TEMPLATE picked here becomes a Space first: substituted, named for the project and
@@ -86,7 +90,9 @@ internal fun rememberWorkspaceSwitch(
                 // it is how the save lands under the right identity - so a refusal can leave the
                 // manager claiming a Space that was never applied. Point it back at what is on
                 // screen, which also re-applies that Space's theme over the one just set.
-                if (leaving != null && workspaceManager.currentWorkspace.value?.id != leaving.id) {
+                if (leaving == null) {
+                    workspaceManager.resetToDefault()
+                } else if (workspaceManager.currentWorkspace.value?.id != leaving.id) {
                     workspaceManager.loadWorkspace(leaving)
                 }
             }

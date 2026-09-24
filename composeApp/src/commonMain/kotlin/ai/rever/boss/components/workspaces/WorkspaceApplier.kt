@@ -51,7 +51,7 @@ private val logger = BossLogger.forComponent("WorkspaceApplier")
  * @param warmEngine Starts the browser engine boot. A parameter only so a test can observe that it
  *                   is asked BEFORE the tab-type wait rather than after - move those lines below
  *                   the wait and the whole benefit evaporates with every test still green.
- * @return false when the apply was refused: a layout that declares tabs but cannot build any of
+ * @return false when the apply was refused: a layout that declares tabs but cannot build all of
  *         them leaves the live tree, the project selection and the workspace-id claim untouched.
  *         Callers that preserve or close the outgoing workspace before calling must use the
  *         result to put that tree back - see `WorkspaceSwitch`.
@@ -134,7 +134,7 @@ suspend fun applyWorkspace(
     // types are all gone - the plugin that owned them was uninstalled since it was saved, or a
     // hand-edited type string - used to clear first and build nothing, which presents as "my
     // work vanished".
-    if (nothingBuildable(workspace.layout, currentProjectPath, splitViewState)) {
+    if (hasUnbuildableTabs(workspace.layout, currentProjectPath, splitViewState)) {
         refuseUnbuildableWorkspace(workspace, workspaceId)
         return false
     }
@@ -416,19 +416,24 @@ private suspend fun applyWorkspaceNode(
 }
 
 /**
- * Whether [layout] declares tabs but cannot put a single one on screen - the proof
+ * Whether [layout] declares tabs that cannot all be put on screen - the proof
  * [applyWorkspace] needs before it may clear the live tree.
  *
  * A layout declaring no tabs at all is empty by design and still applies; one that declares
- * tabs and builds none is a failure that must leave the live tree alone.
+ * tabs that cannot all build is a failure that must leave the live tree alone.
  */
-private fun nothingBuildable(
+private fun hasUnbuildableTabs(
     layout: SplitConfig,
     projectPath: String,
     splitViewState: SplitViewState,
-): Boolean =
-    layout.declaredTabTypes().isNotEmpty() &&
-        collectBuildableTabs(layout, projectPath, splitViewState).isEmpty()
+): Boolean = collectBuildableTabs(layout, projectPath, splitViewState).size < layout.declaredTabCount()
+
+private fun SplitConfig.declaredTabCount(): Int =
+    when (this) {
+        is SinglePanel -> panel.tabs.size
+        is VerticalSplit -> left.declaredTabCount() + right.declaredTabCount()
+        is HorizontalSplit -> top.declaredTabCount() + bottom.declaredTabCount()
+    }
 
 /**
  * Report a refused apply - a WORKSPACE error for the log and a status message for the user,
@@ -440,7 +445,7 @@ private fun refuseUnbuildableWorkspace(
 ) {
     logger.error(
         LogCategory.WORKSPACE,
-        "Workspace declares tabs but none can be built - keeping the live layout",
+        "Workspace contains tabs that cannot be built - keeping the live layout",
         mapOf(
             "workspace" to workspace.name,
             "id" to workspaceId,
@@ -448,7 +453,7 @@ private fun refuseUnbuildableWorkspace(
         ),
     )
     StatusMessageManager.showMessage(
-        "Could not open \"${workspace.name}\" - none of its tabs can be restored. " +
+        "Could not open \"${workspace.name}\" - some of its tabs cannot be restored. " +
             "The plugin that provides them may have been removed.",
         durationMs = 6_000,
     )
@@ -470,9 +475,9 @@ private fun SplitConfig.declaredTabTypes(): Set<String> =
 /**
  * The tabs [node] would actually put on screen if applied right now.
  *
- * This is the proof [applyWorkspace] needs before it may clear the live tree, and resolving
- * touches nothing: the `createTabFromWorkspaceConfig` constructors are pure, so a tab that
- * resolves now resolves after the clear. Two checks decide, both of them the same ones the
+ * This is the proof [applyWorkspace] needs before it may clear the live tree. The probe uses
+ * metadata, without invoking tab constructors or loading their favicon cache. Two checks
+ * decide, both of them the same ones the
  * build runs - a type nothing can build (a plugin uninstalled since the Space was saved)
  * resolves to null, and a resolved tab still needs a registered factory or `addTab` drops it.
  *
@@ -486,7 +491,7 @@ private fun collectBuildableTabs(
     node: SplitConfig,
     projectPath: String,
     splitViewState: SplitViewState,
-): List<TabInfo> =
+): List<TabConfig> =
     when (node) {
         is SinglePanel -> {
             node.panel.tabs.mapNotNull { buildableTab(it, projectPath, splitViewState) }
@@ -524,16 +529,46 @@ private fun firstTabResolves(
     splitViewState: SplitViewState,
 ): Boolean =
     getFirstTab(node)
-        ?.let { createTabFromWorkspaceConfig(it, projectPath, splitViewState) } != null
+        ?.let { resolvableTabType(it, projectPath, splitViewState) } != null
 
 /** The tab [tabConfig] would become and actually land, or null when nothing on screen could hold it. */
 private fun buildableTab(
     tabConfig: TabConfig,
     projectPath: String,
     splitViewState: SplitViewState,
-): TabInfo? =
-    createTabFromWorkspaceConfig(tabConfig, projectPath, splitViewState)
-        ?.takeIf { splitViewState.tabRegistry.isRegistered(it.typeId) }
+): TabConfig? =
+    resolvableTabType(tabConfig, projectPath, splitViewState)
+        ?.takeIf { splitViewState.tabRegistry.isRegistered(it) }
+        ?.let { tabConfig }
+
+/** Probe metadata only: never read favicons, allocate tab IDs or invoke constructors twice. */
+private fun resolvableTabType(
+    config: TabConfig,
+    projectPath: String,
+    state: SplitViewState,
+): TabTypeId? =
+    when (val type = tabTypeIdFor(config)) {
+        DiffTabType.typeId -> {
+            type.takeUnless {
+                config.filePath
+                    ?.let { path ->
+                        WorkspacePlaceholders.processPlaceholders(path, projectPath, null)
+                    }.isNullOrBlank()
+            }
+        }
+
+        ComposerTabType.typeId -> {
+            type.takeUnless { config.filePath.isNullOrBlank() }
+        }
+
+        JupyterTabInfo.TYPE_ID -> {
+            if (state.tabRegistry.isRegistered(type)) type else CodeEditorTabType.typeId
+        }
+
+        else -> {
+            type
+        }
+    }
 
 private fun getFirstTab(workspaceConfig: SplitConfig): TabConfig? =
     when (workspaceConfig) {

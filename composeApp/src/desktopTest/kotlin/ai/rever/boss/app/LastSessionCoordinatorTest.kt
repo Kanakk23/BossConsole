@@ -46,6 +46,23 @@ class LastSessionCoordinatorTest {
 
     private fun coordinatorWith(recorder: RecordingSave) = LastSessionCoordinator(recorder::save)
 
+    @Test
+    fun `a refused restore protects both recovery files on shutdown and dispose`() {
+        val recorder = RecordingSave()
+        var setWrites = 0
+        val coordinator =
+            LastSessionCoordinator(recorder::save, saveSet = {
+                setWrites++
+                true
+            })
+        coordinator.register("primary", true, canSave = { false }) { layoutNamed("empty") }
+
+        assertFalse(coordinator.saveOnProcessExit())
+        assertFalse(coordinator.onWindowDisposed("primary"))
+        assertTrue(recorder.saved.isEmpty())
+        assertEquals(0, setWrites)
+    }
+
     private fun LastSessionCoordinator.registerWindow(
         windowId: String,
         isFirstWindow: Boolean = false,

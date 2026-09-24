@@ -4,6 +4,8 @@ import ai.rever.boss.components.events.FileEventBus
 import ai.rever.boss.components.events.PanelEventBus
 import ai.rever.boss.components.window_panel.SplitOrientation
 import ai.rever.boss.components.window_panel.SplitViewState
+import ai.rever.boss.components.workspaces.extractRunningWorkspaces
+import ai.rever.boss.components.workspaces.workspaceManager
 import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.api.TabInfo
 import ai.rever.boss.plugin.api.TabsComponent
@@ -123,6 +125,11 @@ class SplitViewOperationsImpl(
                     ?.value
                     ?.path
                     .orEmpty()
+            val onScreen =
+                extractRunningWorkspaces(splitViewState, projectPath) { id ->
+                    workspaceManager.currentWorkspace.value?.takeIf { it.id == id }
+                        ?: workspaceManager.savedCopyOf(id)
+                }.firstOrNull { it.id == splitViewState.currentWorkspaceId }
             val opened =
                 ai.rever.boss.components.workspaces.spaceToOpen(
                     picked = workspace,
@@ -147,24 +154,17 @@ class SplitViewOperationsImpl(
                         // and creating one here would be inventing state from a workspace switch.
                         windowProjectState = WindowProjectStateRegistry.get(windowId),
                     )
-            if (!applied) {
+            if (applied) {
+                workspaceManager.loadWorkspace(opened)
+            } else {
                 // Refused: the live tree was kept, but the manager was already moved - the
                 // plugin loaded the workspace it picked before calling, and spaceToOpen enters
                 // a materialised template. Point it back at the workspace whose tree is on
                 // screen, looked up by the id the split state still claims.
-                val onScreenId = splitViewState.currentWorkspaceId
-                val onScreen =
-                    ai.rever.boss.components.workspaces.workspaceManager
-                        .workspaces.value
-                        .firstOrNull { it.id == onScreenId }
-                if (
-                    onScreen != null &&
-                    ai.rever.boss.components.workspaces.workspaceManager
-                        .currentWorkspace.value
-                        ?.id != onScreen.id
-                ) {
-                    ai.rever.boss.components.workspaces.workspaceManager
-                        .loadWorkspace(onScreen)
+                if (onScreen == null) {
+                    workspaceManager.resetToDefault()
+                } else {
+                    workspaceManager.loadWorkspace(onScreen)
                 }
             }
         }
