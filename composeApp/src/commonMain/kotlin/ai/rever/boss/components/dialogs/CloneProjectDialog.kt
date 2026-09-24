@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.SaveableStateHolder
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
@@ -74,63 +75,70 @@ internal fun CloneProjectDialog(
                 usePlatformDefaultWidth = false,
             ),
     ) {
-        Surface(
-            modifier =
-                Modifier
-                    .width(600.dp)
-                    .wrapContentHeight(),
-            shape = RoundedCornerShape(8.dp),
-            color = BossTheme.colors.panel,
-            elevation = 8.dp,
-        ) {
-            when (val step = cloneStep) {
-                is CloneStep.Configuration -> {
-                    configurationState.SaveableStateProvider("configuration") {
-                        ConfigurationStep(
-                            onDismiss = onDismiss,
-                            onClone = { url, directory ->
-                                cloneStep = CloneStep.Cloning(url, directory, "Initializing...")
-                            },
-                        )
-                    }
-                }
+        CloneProjectStepContent(cloneStep, configurationState, cloneRepository, onDismiss, onProjectCloned) {
+            cloneStep = it
+        }
+    }
+}
 
-                is CloneStep.Cloning -> {
-                    CloningStep(
-                        cloneRepository = cloneRepository,
-                        repositoryUrl = step.repositoryUrl,
-                        targetDirectory = step.targetDirectory,
-                        progressMessage = step.progressMessage,
-                        onProgress = { progress ->
-                            cloneStep = CloneStep.Cloning(step.repositoryUrl, step.targetDirectory, progress)
-                        },
-                        onSuccess = { projectPath ->
-                            cloneStep = CloneStep.Success(projectPath)
-                        },
-                        onError = { message ->
-                            cloneStep = CloneStep.Error(message)
+@Composable
+private fun CloneProjectStepContent(
+    step: CloneStep,
+    configurationState: SaveableStateHolder,
+    cloneRepository: suspend (String, String, (String) -> Unit) -> GitOperationResult,
+    onDismiss: () -> Unit,
+    onProjectCloned: (String) -> Unit,
+    onStepChange: (CloneStep) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.width(600.dp).wrapContentHeight(),
+        shape = RoundedCornerShape(8.dp),
+        color = BossTheme.colors.panel,
+        elevation = 8.dp,
+    ) {
+        when (step) {
+            is CloneStep.Configuration -> {
+                configurationState.SaveableStateProvider("configuration") {
+                    ConfigurationStep(
+                        onDismiss = onDismiss,
+                        onClone = { url, directory ->
+                            onStepChange(CloneStep.Cloning(url, directory, "Initializing..."))
                         },
                     )
                 }
+            }
 
-                is CloneStep.Success -> {
-                    SuccessStep(
-                        projectPath = step.projectPath,
-                        onOpenProject = {
-                            onProjectCloned(step.projectPath)
-                            onDismiss()
-                        },
-                        onClose = onDismiss,
-                    )
-                }
+            is CloneStep.Cloning -> {
+                CloningStep(
+                    cloneRepository = cloneRepository,
+                    repositoryUrl = step.repositoryUrl,
+                    targetDirectory = step.targetDirectory,
+                    progressMessage = step.progressMessage,
+                    onProgress = { progress ->
+                        onStepChange(CloneStep.Cloning(step.repositoryUrl, step.targetDirectory, progress))
+                    },
+                    onSuccess = { projectPath -> onStepChange(CloneStep.Success(projectPath)) },
+                    onError = { message -> onStepChange(CloneStep.Error(message)) },
+                )
+            }
 
-                is CloneStep.Error -> {
-                    ErrorStep(
-                        message = step.message,
-                        onRetry = { cloneStep = CloneStep.Configuration },
-                        onClose = onDismiss,
-                    )
-                }
+            is CloneStep.Success -> {
+                SuccessStep(
+                    projectPath = step.projectPath,
+                    onOpenProject = {
+                        onProjectCloned(step.projectPath)
+                        onDismiss()
+                    },
+                    onClose = onDismiss,
+                )
+            }
+
+            is CloneStep.Error -> {
+                ErrorStep(
+                    message = step.message,
+                    onRetry = { onStepChange(CloneStep.Configuration) },
+                    onClose = onDismiss,
+                )
             }
         }
     }
