@@ -804,13 +804,21 @@ class SecretReferenceInvariantTest {
         }
 
     @Test
-    fun `INV5 - the marker inside a key alone is not secret-bearing`() =
+    fun `INV2 - the marker inside a key is refused before vault access or handler execution`() =
         runBlocking {
             val vault = CountingVault(listOf(record))
             val h = Harness(vault)
-            h.register(tool("read") { args -> McpToolResult(args.raw) })
+            var called = false
+            h.register(
+                tool("read") {
+                    called = true
+                    McpToolResult("ran")
+                },
+            )
             val raw = """{"{{secret:$id}}":"v"}"""
-            assertEquals(raw, h.core.invoke("read", raw).text)
+            assertTrue(h.core.invoke("read", raw).isError)
+            assertFalse(called)
+            assertTrue(h.seenRequests.isEmpty())
             assertEquals(0, vault.reads.get())
         }
 
