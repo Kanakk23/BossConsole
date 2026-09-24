@@ -100,7 +100,7 @@ use and short lived.
    ```sh
    supabase db push --project-ref pcnwqamqdnsadranufjv
    # or, to apply this one file against a linked project:
-   # psql "$DATABASE_URL" -f supabase/migrations/20260920000000_fluck_oauth.sql
+   # psql "$DATABASE_URL" -f supabase/migrations/20260924230000_fluck_oauth.sql
    ```
 
 2. Set the environment:
