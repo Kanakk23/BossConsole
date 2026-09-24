@@ -106,7 +106,7 @@ class ContentSearchService(
                         "error" to (e.message ?: "invalid regex"),
                     ),
                 )
-                return emptyList()
+                throw e
             }
         val rawOpenPaths = snapshotOpenEditorPaths()
         return withContext(Dispatchers.IO) {
