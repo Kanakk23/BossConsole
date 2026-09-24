@@ -52,14 +52,17 @@ private fun heapFlagKey(arg: String): String? =
  */
 private fun heapMegabytes(arg: String): Long {
     val raw = arg.removePrefix("-Xmx").removePrefix("-Xms")
-    if (raw.isNotEmpty() && raw.all { it.isDigit() }) {
-        return (raw.toLongOrNull() ?: return 0) / (1024 * 1024)
-    }
-    val number = raw.dropLast(1).toLongOrNull() ?: return 0
-    return when (raw.lastOrNull()?.lowercaseChar()) {
-        'g' -> number * 1024
-        'm' -> number
-        'k' -> number / 1024
-        else -> 0
+    val bytes = raw.toLongOrNull() // all-digits: unitless means bytes
+    val number = raw.dropLast(1).toLongOrNull()
+    return when {
+        bytes != null -> bytes / (1024 * 1024)
+        number == null -> 0
+        else ->
+            when (raw.lastOrNull()?.lowercaseChar()) {
+                'g' -> number * 1024
+                'm' -> number
+                'k' -> number / 1024
+                else -> 0
+            }
     }
 }
