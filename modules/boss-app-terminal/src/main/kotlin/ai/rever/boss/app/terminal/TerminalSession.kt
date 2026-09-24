@@ -188,14 +188,19 @@ internal class TerminalSession(
     }
 
     private fun discardInput(output: OutputStream) {
-        // Close-on-failure: releasing the write end lets the stalled writer drain on process
-        // exit, and marks the input path so later sends fail fast instead of retrying a dead pipe.
+        // ProcessPipeOutputStream.close() can wait on the monitor held by a stalled write.
+        // Never do that on the RPC thread (or while holding up subsequent input requests).
+        // At most one cleanup worker is created per session: inputClosed fences later sends.
+        // These daemon workers may live until the child/reader exits; a timeout is not
+        // permission to terminate the user's process, nor proof that no bytes were delivered.
         inputClosed = true
-        try {
-            output.close()
-        } catch (_: IOException) {
-            // The pipe may already be broken; the input path is closed either way.
-        }
+        Thread({
+            try {
+                output.close()
+            } catch (_: IOException) {
+                // The pipe may already be broken; the input path is closed either way.
+            }
+        }, "terminal-input-close-$id").apply { isDaemon = true }.start()
     }
 
     /**
@@ -219,7 +224,7 @@ internal class TerminalSession(
             throw inputBusy(inputQueueTimeoutMillis)
         }
         try {
-            if (inputClosedByCaller) return
+            if (inputClosed) return
             inputClosedByCaller = true
             inputClosed = true
             try {

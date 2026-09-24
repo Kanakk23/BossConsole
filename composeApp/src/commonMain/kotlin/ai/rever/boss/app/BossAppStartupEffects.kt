@@ -42,7 +42,6 @@ import ai.rever.boss.services.auth.CoreAuthService
 import ai.rever.boss.services.auth.UserDataStorage
 import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
 import ai.rever.boss.services.terminal.TerminalAPIAccess
-import ai.rever.boss.setupDownloadTabCloseCallback
 import ai.rever.boss.startup.StartupSettingsManager
 import ai.rever.boss.updater.UpdateCoordinator
 import ai.rever.boss.utils.CLIInstaller
@@ -186,11 +185,6 @@ internal fun BossAppStartupEffects(state: BossAppState) {
         onDispose {
             LastSessionCoordinator.instance.onWindowDisposed(windowId)
         }
-    }
-
-    // Register callback for FluckEngine to auto-close download redirect tabs (desktop only)
-    LaunchedEffect(splitViewState) {
-        setupDownloadTabCloseCallback(splitViewState)
     }
 
     // Cancel any active drag when window loses focus (prevents stuck ghost)
