@@ -54,6 +54,77 @@ class EncryptedSessionSettingsTest {
     private fun reopenedStore(): EncryptedSessionSettings = newStore()
 
     @Test
+    fun `another process publishing an empty key is awaited without replacing its key`() {
+        val key = File(temporary, KEY_FILE_NAME)
+        val source = File(requireNotNull(javaClass.getResource("/SessionKeyLockHolder.java")).toURI())
+        val javaExecutable = File(System.getProperty("java.home"), "bin/java").absolutePath
+        val process =
+            ProcessBuilder(javaExecutable, source.absolutePath, key.absolutePath)
+                .redirectErrorStream(true)
+                .start()
+        val workers =
+            java.util.concurrent.Executors
+                .newFixedThreadPool(2)
+        try {
+            val ready = workers.submit<String> { process.inputStream.bufferedReader().readLine() }
+            assertEquals("locked", ready.get(30, java.util.concurrent.TimeUnit.SECONDS))
+            val starting = java.util.concurrent.CountDownLatch(1)
+            val pending =
+                workers.submit<EncryptedSessionSettings> {
+                    starting.countDown()
+                    newStore()
+                }
+            assertTrue(starting.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertFailsWith<java.util.concurrent.TimeoutException> {
+                pending.get(200, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+            assertEquals(0L, key.length())
+            process.outputStream.write(1)
+            process.outputStream.flush()
+            assertTrue(process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(0, process.exitValue())
+            val settings = pending.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals(Base64.getEncoder().encodeToString(ByteArray(32)), key.readText())
+            settings.putString("token", "shared-session")
+            assertEquals("shared-session", reopenedStore().getStringOrNull("token"))
+        } finally {
+            process.destroyForcibly()
+            workers.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `concurrent constructors share a key even when replacing an empty key`() {
+        for (emptyKey in listOf(false, true)) {
+            val directory = File(temporary, "concurrent-$emptyKey").apply { mkdirs() }
+            val key = File(directory, KEY_FILE_NAME)
+            if (emptyKey) key.createNewFile()
+            val workers =
+                java.util.concurrent.Executors
+                    .newFixedThreadPool(8)
+            val start = java.util.concurrent.CountDownLatch(1)
+            try {
+                val stores =
+                    (1..8).map { index ->
+                        workers.submit<EncryptedSessionSettings> {
+                            start.await()
+                            EncryptedSessionSettings(File(directory, "store-$index"), key)
+                        }
+                    }
+                start.countDown()
+                stores.forEachIndexed { index, future ->
+                    val store = future.get(10, java.util.concurrent.TimeUnit.SECONDS)
+                    store.putString("token", "test-session-$index")
+                    val reopened = EncryptedSessionSettings(File(directory, "store-${index + 1}"), key)
+                    assertEquals("test-session-$index", reopened.getStringOrNull("token"))
+                }
+            } finally {
+                workers.shutdownNow()
+            }
+        }
+    }
+
+    @Test
     fun `session strings roundtrip and survive reopening the store`() {
         val settings = newStore()
         settings.putString(SettingsSessionManager.SETTINGS_KEY, sessionJson)
