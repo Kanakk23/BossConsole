@@ -176,6 +176,9 @@ object McpArgumentSanitizer {
     /** npm's registry token line: `//registry.npmjs.org/:_authToken x` (also written with `=`). */
     private val npmAuthToken = Regex("""(?i)(_auth[_-]?token)[ \t]*[:= ][ \t]*$VALUE""")
 
+    /** A purely numeric `uid:gid`, which `-u`/`--user` takes in docker and podman; see [basicAuthFlag]. */
+    private const val uidGidValue = """[0-9]+:[0-9]*(?=[\s&,;}"']|$)"""
+
     /**
      * A credential handed to a command-line client as basic auth, `curl -u admin:hunter2` or
      * `--user admin:hunter2`. The value has no sensitive key, is not an assignment and has no
@@ -183,12 +186,38 @@ object McpArgumentSanitizer {
      * `-u` is also `git push -u origin` and `python -u`, and an operator has to be able to read
      * those. A URL after `-u` (`redis-cli -u redis://...`) is not basic auth either: its userinfo
      * was redacted by the pass before this one and its host must stay readable.
+     *
+     * A purely numeric `uid:gid` is not basic auth either: `docker run -u 1000:1000` and
+     * `podman run --user=0:0` are among the commonest invocations there are, and which uid a
+     * container is about to run as is exactly the kind of thing approval exists to show. No
+     * credential is two integers, so the exclusion costs nothing; a numeric password with a
+     * non-numeric user (`-u admin:1234`) still redacts, because only both sides being integers
+     * makes it a uid pair.
      */
     private val basicAuthFlag =
         Regex(
-            """(?<![A-Za-z0-9_-])(-u|--user)(?:[ \t]+|=)(?!["']?[A-Za-z][A-Za-z0-9+.-]*://)""" +
+            """(?<![A-Za-z0-9_-])(-u|--user)(?:[ \t]+|=)""" +
+                """(?!["']?[A-Za-z][A-Za-z0-9+.-]*://)(?!["']?$uidGidValue)""" +
                 """(?:"[^"]*:[^"]*"|'[^']*:[^']*'|[^\s&,;}"']+:[^\s&,;}"']*)""",
         )
+
+    /**
+     * The cookie jar given as a flag rather than as a header: `curl -b 'session=x'`,
+     * `curl --cookie "session=x"`. `sensitiveAssignment` closes `Cookie: session=x` because the
+     * word `cookie` sits directly before the separator, and closes nothing here: after the flag the
+     * cookie's name is whatever the site chose (`session`, `sid`, `JSESSIONID`), so the flag is the
+     * signal and the whole value is taken.
+     *
+     * The short `-b` is gated on `curl`, exactly as [shortSecretFlag] gates `-p`: elsewhere `-b` is
+     * a branch (`git checkout -b feature/x`), a bind address (`ssh -b`), a block size (`tar -b 20`),
+     * a build file (`gradle -b`), or takes no value at all (`cp -b`, `grep -b`, `wget -b`), and an
+     * ungated rule would redact the branch name or eat the next positional. The long spellings
+     * carry their meaning in their name and are unconditional, like [longSecretFlag]. `-b` after
+     * curl also names a jar file, which is redacted too: telling a path from cookies needs a
+     * filesystem the sanitizer does not have.
+     */
+    private val cookieShortFlag = Regex("""(?<![A-Za-z0-9_-])(curl\b[^\n;&|]*?[ \t]-b)[ \t]+(?!-)$VALUE""")
+    private val cookieLongFlag = Regex("""(?<![A-Za-z0-9_-])(--cookie(?:-jar)?)(?:[ \t]+|=)(?!-)$VALUE""")
 
     /**
      * Shapes the issue measured leaking that the vendor-prefix rule above does not cover: an AWS
@@ -224,6 +253,8 @@ object McpArgumentSanitizer {
             .replace(pemPrivateKey, "[REDACTED]")
             .replace(awsAccessKeyId, "[REDACTED]")
             .replace(basicAuthFlag, "$1 [REDACTED]")
+            .replace(cookieShortFlag, "$1 [REDACTED]")
+            .replace(cookieLongFlag, "$1 [REDACTED]")
             .replace(credentialShapePattern, "[REDACTED]")
             .replace(sensitiveAssignment, "[REDACTED]")
             .replace(authorizationHeader, "[REDACTED]")

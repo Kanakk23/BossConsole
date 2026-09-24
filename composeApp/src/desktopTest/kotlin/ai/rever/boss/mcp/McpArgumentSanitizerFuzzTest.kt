@@ -32,7 +32,16 @@ import kotlin.test.assertTrue
  * A shape or a context is added by adding a line, not a test.
  */
 class McpArgumentSanitizerFuzzTest {
-    /** A value that cannot occur by accident in the surrounding text: letters and digits only. */
+    /**
+     * A value that cannot occur by accident in the surrounding text: letters and digits only.
+     *
+     * That choice is what makes `output.contains(secret)` mean anything, and it is also the
+     * property's largest blind spot, stated here because this file is written as the contract:
+     * a generated secret can never contain a character that ENDS a value for these rules
+     * (whitespace, `&`, `,`, `;`, `}`, or a matching quote), so no generated cell can discover
+     * that `password=Xk9&mQ2` leaves `mQ2` in the clear. Shapes whose real values routinely carry
+     * such characters need an example test rather than a cell here.
+     */
     private val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
 
     /**
@@ -74,6 +83,8 @@ class McpArgumentSanitizerFuzzTest {
             "authorization basic" to Shape { "curl -H \"Authorization: Basic $it\" https://api.example.invalid" },
             "custom api key header" to Shape { "curl -H 'X-API-Key: $it' https://api.example.invalid" },
             "cookie header" to Shape { "curl -H 'Cookie: session=$it; theme=dark' https://app.example.invalid" },
+            "cookie short flag" to Shape { "curl -b 'session=$it' https://app.example.invalid" },
+            "cookie long flag" to Shape { "curl --cookie \"session=$it\" https://app.example.invalid" },
             "long flag with equals" to Shape { "mysql --password=$it -e 'select 1'" },
             "long flag with space" to Shape { "mysql --password $it -e 'select 1'" },
             "token flag with space" to Shape { "vault login --token $it" },
@@ -147,10 +158,14 @@ class McpArgumentSanitizerFuzzTest {
                 }
             }
         }
-        val report = failures.distinct().joinToString("\n")
+        // One entry per shape and context: each failure string embeds that repetition's random
+        // secret, so a plain distinct() would collapse nothing and `repeat(3)` would report every
+        // leaking cell three times.
+        val distinct = failures.distinctBy { it.substringBefore('\n') }
+        val report = distinct.joinToString("\n")
         assertTrue(
-            failures.isEmpty(),
-            "$SEED_VARIABLE=$seed reproduces this run; ${failures.size} leaking cell(s):\n$report",
+            distinct.isEmpty(),
+            "$SEED_VARIABLE=$seed reproduces this run; ${distinct.size} leaking cell(s):\n$report",
         )
     }
 
@@ -187,6 +202,12 @@ class McpArgumentSanitizerFuzzTest {
             "curl -u admin https://api.example.invalid/health",
             "open https://example.com/@handle/status/1",
             "docker run -p 8080:80 nginx",
+            "docker run -u 1000:1000 nginx",
+            "docker run --user=1000:1000 nginx",
+            "podman run --user 0:0 alpine id",
+            "git checkout -b feature/login-fix",
+            "cp -b src.txt dst.txt",
+            "ssh -b 10.0.0.1 host.example.invalid",
             "ssh -p 2222 deploy@host.example.invalid",
             "grep -rn 'password' src/ --include='*.kt'",
             "cat docs/tokens.md",
