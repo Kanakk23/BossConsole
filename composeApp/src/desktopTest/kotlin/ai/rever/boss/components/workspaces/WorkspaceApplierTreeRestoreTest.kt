@@ -12,6 +12,7 @@ import ai.rever.boss.plugin.workspace.SplitConfig
 import androidx.compose.runtime.Composable
 import com.arkivanov.decompose.ComponentContext
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Disabled
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -150,6 +151,34 @@ class WorkspaceApplierTreeRestoreTest {
             listOf(
                 listOf("Left.kt"),
                 listOf("Same.kt", "Same.kt", "Other.kt"),
+            ),
+            restoredTitles(layout),
+        )
+    }
+
+    @Test
+    @Disabled("restores [[A],[C],[B]] instead of the saved order - tracked in #1610")
+    fun `a nested split on the left restores in saved order`() {
+        // The mirror of the first case with the nest on the LEFT: the inner recursion
+        // splits "main" for its own right side, so the outer split for C splits the
+        // already-split panel again and the panels come back out of saved order
+        // ([[A],[C],[B]] instead of the saved [[A],[B],[C]]). Disabled until #1610
+        // lands, so the suite does not claim coverage it lacks.
+        val layout =
+            SplitConfig.VerticalSplit(
+                left =
+                    SplitConfig.VerticalSplit(
+                        left = panel(editorTab("A.kt")),
+                        right = panel(editorTab("B.kt")),
+                    ),
+                right = panel(editorTab("C.kt")),
+            )
+
+        assertEquals(
+            listOf(
+                listOf("A.kt"),
+                listOf("B.kt"),
+                listOf("C.kt"),
             ),
             restoredTitles(layout),
         )
