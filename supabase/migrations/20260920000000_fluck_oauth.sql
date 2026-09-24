@@ -66,7 +66,8 @@ AS $$
 DECLARE
     v_claimed boolean;
 BEGIN
-    IF p_nonce IS NULL OR p_nonce = '' THEN
+    IF p_nonce IS NULL OR p_nonce = '' OR p_expires_at IS NULL
+       OR p_expires_at <= now() OR p_expires_at > now() + interval '15 minutes' THEN
         RETURN false;
     END IF;
 
@@ -149,6 +150,12 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM auth.users WHERE id = p_user_id) THEN
         RAISE EXCEPTION 'unknown user';
     END IF;
+
+    -- Serialize replacements even when no row exists yet. Two callbacks with
+    -- different Google usernames must not both insert a value for the same key.
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(p_user_id::text || ':' || p_website, 0)
+    );
 
     DELETE FROM public.secrets
     WHERE user_id = p_user_id
