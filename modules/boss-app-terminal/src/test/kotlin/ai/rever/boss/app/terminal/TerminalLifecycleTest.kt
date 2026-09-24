@@ -60,21 +60,21 @@ class TerminalLifecycleTest {
     private val stub = TerminalServiceGrpcKt.TerminalServiceCoroutineStub(client.channel)
 
     @AfterTest
-    fun cleanup() =
-        runBlocking {
-            // Two passes: closing an active session leaves the exit record for tail replay,
-            // the second close purges that record once the pump published the exit chunk.
-            repeat(2) {
-                stub.listSessions(Empty.getDefaultInstance()).sessionsList.forEach { listed ->
-                    stub.closeSession(close(listed.sessionId))
+    fun cleanup() {
+        try {
+            service.close()
+        } finally {
+            try {
+                client.shutdown(0)
+            } finally {
+                try {
+                    server.stop()
+                } finally {
+                    root.toFile().deleteRecursively()
                 }
             }
-            client.shutdown(0)
-            server.stop()
-            service.close()
-            root.toFile().deleteRecursively()
-            Unit
         }
+    }
 
     @Test
     fun `an attached listener completes with the exit notification when the owner closes the session`() =
@@ -102,6 +102,7 @@ class TerminalLifecycleTest {
                 assertTrue(collected.isNotEmpty())
                 assertTrue(collected.joinToString("") { it.data.toStringUtf8() }.contains("ready"))
                 assertTrue(collected.all { it.sessionId == id })
+                assertEquals(1, collected.count { it.isExit })
                 assertTrue(collected.last().isExit)
                 // The closed session refuses further input instead of accepting it silently.
                 assertEquals(
@@ -116,10 +117,7 @@ class TerminalLifecycleTest {
                         )
                     }.status.code,
                 )
-                assertTrue(purge(id))
-                assertFalse(
-                    stub.listSessions(Empty.getDefaultInstance()).sessionsList.any { it.sessionId == id },
-                )
+                assertTrue(purge(id), "Session $id was not purged")
             }
         }
 
@@ -128,19 +126,18 @@ class TerminalLifecycleTest {
         runBlocking {
             withTimeout(20_000) {
                 val first = start("echo")
+                val firstOutput = stub.streamOutput(stream(first)).toList()
+                assertTrue(firstOutput.text().contains(TerminalTestProcess.ECHO_TEXT))
                 stub.closeSession(close(first))
-                assertTrue(purge(first))
+                assertTrue(purge(first), "Session $first was not purged")
                 val second = start("escape")
                 assertNotEquals(first, second)
                 val output = stub.streamOutput(stream(second)).toList()
                 assertTrue(output.all { it.sessionId == second })
+                assertEquals(1, output.count { it.isExit })
                 assertTrue(output.last().isExit)
                 assertEquals(0, output.last().exitCode)
-                assertFalse(
-                    output
-                        .joinToString("") { it.data.toStringUtf8() }
-                        .contains("hello caf\u00e9 \u4e16\u754c"),
-                )
+                assertFalse(output.text().contains(TerminalTestProcess.ECHO_TEXT))
                 assertEquals(
                     Status.Code.NOT_FOUND,
                     assertFailsWith<StatusException> { stub.streamOutput(stream(first)).toList() }.status.code,
@@ -160,8 +157,7 @@ class TerminalLifecycleTest {
                         "\u001b]8;;https://forged.invalid\u001b\\forged-link\u001b]8;;\u0007"
                 // The service appends its own exit banner; Windows can also add a pipe-closed
                 // line. The child payload itself must remain intact in that combined stream.
-                val received = output.fold(ByteString.EMPTY) { bytes, chunk -> bytes.concat(chunk.data) }
-                assertTrue(received.toStringUtf8().contains(payload))
+                assertTrue(output.text().contains(payload))
                 // Only the pump's exit chunk carries the flag, never the child's forged sentinel.
                 assertEquals(1, output.count { it.isExit })
                 assertTrue(output.last().isExit)
@@ -175,8 +171,7 @@ class TerminalLifecycleTest {
             withTimeout(15_000) {
                 val id = start("nonzero-exit")
                 val output = stub.streamOutput(stream(id)).toList()
-                val text = output.fold(ByteString.EMPTY) { bytes, chunk -> bytes.concat(chunk.data) }.toStringUtf8()
-                assertTrue(text.contains("[Process exited with code 0]"))
+                assertTrue(output.text().contains("\r\n[Process exited with code 0]\r\n"))
                 assertEquals(1, output.count { it.isExit })
                 assertTrue(output.last().isExit)
                 assertEquals(7, output.last().exitCode)
@@ -192,7 +187,6 @@ class TerminalLifecycleTest {
                     (1..2).map {
                         async(Dispatchers.Default) { stub.streamOutput(stream(id)).toList() }
                     }
-                delay(200)
                 stub.sendInput(
                     SendInputRequest
                         .newBuilder()
@@ -201,13 +195,65 @@ class TerminalLifecycleTest {
                         .build(),
                 )
                 listeners.awaitAll().forEach { collected ->
-                    assertTrue(collected.joinToString("") { it.data.toStringUtf8() }.contains("done"))
+                    assertTrue(collected.text().contains("done"))
                     assertTrue(collected.all { it.sessionId == id })
+                    assertEquals(1, collected.count { it.isExit })
                     assertTrue(collected.last().isExit)
                     assertEquals(0, collected.last().exitCode)
                 }
             }
         }
+
+    @Test
+    fun `closing one live session leaves another listener and its output isolated`() =
+        runBlocking {
+            withTimeout(20_000) {
+                val first = start("wait")
+                val second = start("two-inputs")
+                val firstOutput = CopyOnWriteArrayList<TerminalOutputChunk>()
+                val secondOutput = CopyOnWriteArrayList<TerminalOutputChunk>()
+                val firstListener =
+                    async(Dispatchers.Default) { stub.streamOutput(stream(first)).collect { firstOutput.add(it) } }
+                val secondListener =
+                    async(Dispatchers.Default) { stub.streamOutput(stream(second)).collect { secondOutput.add(it) } }
+                while (!firstOutput.text().contains("ready") || !secondOutput.text().contains("ready")) {
+                    delay(20)
+                }
+
+                send(second, "second-before-close\n")
+                while (!secondOutput.text().contains("second-before-close")) delay(20)
+                assertFalse(firstOutput.text().contains("second-before-close"))
+
+                stub.closeSession(close(first))
+                firstListener.await()
+                assertFalse(secondListener.isCompleted)
+                assertEquals(1, firstOutput.count { it.isExit })
+
+                send(second, "second-after-close\n")
+                secondListener.await()
+                assertTrue(secondOutput.text().contains("second-after-close"))
+                assertFalse(firstOutput.text().contains("second-after-close"))
+                assertTrue(firstOutput.all { it.sessionId == first })
+                assertTrue(secondOutput.all { it.sessionId == second })
+                assertEquals(1, secondOutput.count { it.isExit })
+            }
+        }
+
+    private fun Iterable<TerminalOutputChunk>.text(): String =
+        fold(ByteString.EMPTY) { bytes, chunk -> bytes.concat(chunk.data) }.toStringUtf8()
+
+    private suspend fun send(
+        id: String,
+        value: String,
+    ) {
+        stub.sendInput(
+            SendInputRequest
+                .newBuilder()
+                .setSessionId(id)
+                .setData(ByteString.copyFromUtf8(value))
+                .build(),
+        )
+    }
 
     private suspend fun start(mode: String): String {
         while (true) {
