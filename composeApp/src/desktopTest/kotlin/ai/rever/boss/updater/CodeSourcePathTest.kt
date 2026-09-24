@@ -33,6 +33,35 @@ class CodeSourcePathTest {
     }
 
     @Test
+    fun `unusable code source selects installed applications bundle`() {
+        val directory = Files.createTempDirectory("BOSS fallback ").toFile()
+        val installed = File(directory, "BOSS.app")
+        try {
+            assertTrue(installed.mkdir())
+            val expected = AppBundleCandidate(installed, fromCodeSource = false)
+
+            assertEquals(expected, appBundleFromCodeSourceOrApplications(null, installed))
+            assertEquals(
+                expected,
+                appBundleFromCodeSourceOrApplications(URL("jar:file:/BOSS.app/Contents/app/BOSS.jar!/"), installed),
+            )
+            assertEquals(
+                expected,
+                appBundleFromCodeSourceOrApplications(URL("file:/BOSS App.app/Contents/app/BOSS.jar"), installed),
+            )
+
+            val running = File(directory, "Running App.app/Contents/app/BOSS.jar").toURI().toURL()
+            assertEquals(
+                AppBundleCandidate(File(directory, "Running App.app"), fromCodeSource = true),
+                appBundleFromCodeSourceOrApplications(running, installed),
+            )
+        } finally {
+            installed.delete()
+            directory.delete()
+        }
+    }
+
+    @Test
     fun `bundle walk checks six levels`() {
         val bundle = File("BOSS.app").absoluteFile
         val withinLimit = File(bundle, "one/two/three/four/BOSS.jar")

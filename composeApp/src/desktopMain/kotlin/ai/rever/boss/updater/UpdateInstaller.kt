@@ -85,6 +85,19 @@ internal fun appBundleAncestorOf(location: URL?): File? {
     return null
 }
 
+internal data class AppBundleCandidate(
+    val file: File,
+    val fromCodeSource: Boolean,
+)
+
+/** Prefer the running bundle, then an installed copy when the code source is unavailable. */
+internal fun appBundleFromCodeSourceOrApplications(
+    location: URL?,
+    applicationsBundle: File,
+): AppBundleCandidate? =
+    appBundleAncestorOf(location)?.let { AppBundleCandidate(it, fromCodeSource = true) }
+        ?: applicationsBundle.takeIf(File::exists)?.let { AppBundleCandidate(it, fromCodeSource = false) }
+
 /**
  * Resolve a macOS app bundle path without coupling the decision logic to the
  * filesystem or Spotlight. The injected functions keep App Translocation path
@@ -934,19 +947,19 @@ object UpdateInstaller {
                 mapOf("url" to (codeSourceLocation?.toString() ?: "<unavailable>")),
             )
 
-            val appBundle = appBundleAncestorOf(codeSourceLocation)
-            if (appBundle != null) {
+            val applicationsPath = "$MACOS_APPLICATIONS_DIRECTORY/$BOSS_MACOS_APP_BUNDLE_NAME"
+            val appBundle = appBundleFromCodeSourceOrApplications(codeSourceLocation, File(applicationsPath))
+            if (appBundle?.fromCodeSource == true) {
                 logger.debug(
                     LogCategory.SYSTEM,
                     "Found app bundle via directory traversal",
-                    mapOf("path" to appBundle.absolutePath),
+                    mapOf("path" to appBundle.file.absolutePath),
                 )
-                return resolveRealAppPath(appBundle.absolutePath)
+                return resolveRealAppPath(appBundle.file.absolutePath)
             }
 
             // Method 3: Check if running from Applications folder
-            val applicationsPath = "$MACOS_APPLICATIONS_DIRECTORY/$BOSS_MACOS_APP_BUNDLE_NAME"
-            if (File(applicationsPath).exists()) {
+            if (appBundle != null) {
                 logger.debug(LogCategory.SYSTEM, "Found BOSS in Applications folder", mapOf("path" to applicationsPath))
                 return applicationsPath
             }
