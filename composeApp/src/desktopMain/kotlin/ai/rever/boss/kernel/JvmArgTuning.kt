@@ -21,6 +21,14 @@ internal fun mergeTunedJvmArgs(
             result += arg
         }
     }
+    // A tuned -Xms may not end up above the final -Xmx: the JVM refuses to launch with
+    // Xms > Xmx, which would turn the remedy into the crash loop it is meant to break.
+    // Raise -Xmx to match - never lower either value; upward-only applies to both flags.
+    val xmsIdx = result.indexOfFirst { heapFlagKey(it) == "-Xms" }
+    val xmxIdx = result.indexOfFirst { heapFlagKey(it) == "-Xmx" }
+    if (xmsIdx >= 0 && xmxIdx >= 0 && heapMegabytes(result[xmsIdx]) > heapMegabytes(result[xmxIdx])) {
+        result[xmxIdx] = "-Xmx" + result[xmsIdx].removePrefix("-Xms")
+    }
     return result
 }
 
@@ -32,15 +40,26 @@ private fun heapFlagKey(arg: String): String? =
         else -> null
     }
 
-/** Heap size of an `-Xmx`/`-Xms` arg in megabytes; an unparsable value counts as zero. */
+/**
+ * Heap size of an `-Xmx`/`-Xms` arg in megabytes; an unparsable value counts as zero.
+ *
+ * JVM syntax treats a unitless value as bytes, so the unit letter is only consumed after the
+ * all-digits case is handled: peeling the last character first would silently drop the last
+ * digit of a byte value (`-Xmx8589934592` read as ~819 MB instead of 8192) and the
+ * upward-only merge could then swap a larger existing heap for a smaller tuned one. An
+ * unrecognised suffix is unparsable rather than "bytes": reading junk as bytes would shrink a
+ * heap the operator set deliberately.
+ */
 private fun heapMegabytes(arg: String): Long {
     val raw = arg.removePrefix("-Xmx").removePrefix("-Xms")
-    val unit = raw.lastOrNull()?.lowercaseChar()
-    val number = raw.dropLast(1).toLongOrNull() ?: raw.toLongOrNull() ?: return 0
-    return when (unit) {
+    if (raw.isNotEmpty() && raw.all { it.isDigit() }) {
+        return (raw.toLongOrNull() ?: return 0) / (1024 * 1024)
+    }
+    val number = raw.dropLast(1).toLongOrNull() ?: return 0
+    return when (raw.lastOrNull()?.lowercaseChar()) {
         'g' -> number * 1024
         'm' -> number
         'k' -> number / 1024
-        else -> number / (1024 * 1024)
+        else -> 0
     }
 }
