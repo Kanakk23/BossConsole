@@ -421,7 +421,7 @@ actual object GitService {
 
             try {
                 // Use porcelain v1 format for stable parsing
-                val result = runGitCommand(projectPath, "status", "--porcelain=v1")
+                val result = runGitCommand(projectPath, "status", "--porcelain=v1", "--untracked-files=all")
                 if (result.exitCode != 0) {
                     _lastError.value = result.error.ifEmpty { result.output }
                     return@withContext emptyList()

@@ -69,9 +69,13 @@ class CommitDialogRepositoryTest {
         val other = repo(temp, "other")
         val dialog = CommitDialogRepository(own.absolutePath, null) { own.absolutePath }
         own.resolve("only-own.txt").writeText("own")
+        own.resolve("new-directory/nested.txt").apply {
+            parentFile.mkdirs()
+            writeText("nested")
+        }
         other.resolve("only-other.txt").writeText("other")
         withOtherRepo(other) {
-            assertEquals(setOf("file.txt", "only-own.txt"), dialog.status().map { it.path }.toSet())
+            assertEquals(setOf("file.txt", "only-own.txt", "new-directory/nested.txt"), dialog.status().map { it.path }.toSet())
             assertTrue(dialog.stage("file.txt") is GitOperationResult.Success)
             assertEquals("file.txt", git(own, "diff", "--cached", "--name-only"))
             assertEquals("", git(other, "diff", "--cached", "--name-only"))
