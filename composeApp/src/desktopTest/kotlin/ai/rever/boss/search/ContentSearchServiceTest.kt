@@ -1,5 +1,6 @@
 package ai.rever.boss.search
 
+import ai.rever.boss.plugin.api.BufferSnapshot
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -349,6 +350,31 @@ class ContentSearchServiceTest {
         }
 
     @Test
+    fun `a hostile replacement regex reports a per-file error`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        File(dir, "long.txt").writeText("a".repeat(40_000) + "b")
+        val summary =
+            withTimeout(5_000) {
+                ContentSearchService(projectPathProvider = { dir.absolutePath }).replaceInProject(
+                    query = "(a+)+$",
+                    replacement = "pin",
+                    files = listOf("long.txt"),
+                    isRegex = true,
+                )
+            }
+
+        assertEquals(0, summary.totalReplacements)
+        assertTrue(
+            summary.files
+                .single()
+                .error
+                .orEmpty()
+                .contains("time budget"),
+        )
+    }
+
+    @Test
     fun `a file stream that grows beyond the read limit is rejected while reading`() {
         val result = readUtf8AtMost(GrowingInputStream(initialSize = 1_024, finalSize = 1_025), 1_024)
 
@@ -356,14 +382,30 @@ class ContentSearchServiceTest {
     }
 
     @Test
-    fun `cache does not confuse distinct text with the same String hash code`(
+    fun `search excludes undecodable UTF8 instead of matching replacement text`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        File(dir, "invalid.txt").writeBytes(byteArrayOf(0xff.toByte()) + "needle".toByteArray())
+        File(dir, "valid.txt").writeText("needle")
+
+        val paths =
+            ContentSearchService(projectPathProvider = { dir.absolutePath })
+                .searchInProject(query = "needle")
+                .map { it.path }
+        assertEquals(listOf("valid.txt"), paths)
+    }
+
+    @Test
+    fun `disk rewrite invalidates a cached match when the mtime is unchanged`(
         @TempDir dir: File,
     ) = runBlocking {
         val file = File(dir, "a.txt").apply { writeText("Aa") }
         val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
 
         assertEquals(listOf("a.txt"), service.searchInProject(query = "Aa").map { it.path })
-        file.writeText("BB") // "Aa" and "BB" have the same String.hashCode().
+        val mtime = Files.getLastModifiedTime(file.toPath())
+        file.writeText("BB")
+        Files.setLastModifiedTime(file.toPath(), mtime)
         assertTrue(service.searchInProject(query = "Aa").isEmpty())
     }
 
@@ -672,11 +714,36 @@ class ContentSearchServiceTest {
     }
 
     @Test
+    fun `buffer byte limit counts an unpaired surrogate as its UTF8 replacement byte`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        val file = File(dir, "open.kt").apply { writeText("disk") }
+        val content = "x".repeat(1_048_569) + '\uD800' + "needle"
+        val bridge =
+            object : EditorBufferBridge {
+                override suspend fun readBuffer(path: String) = BufferSnapshot(path, content, 1L, true)
+
+                override suspend fun applyEdit(
+                    path: String,
+                    startLine: Int,
+                    startCol: Int,
+                    endLine: Int,
+                    endCol: Int,
+                    newText: String,
+                    expectedVersion: Long,
+                ): ai.rever.boss.plugin.api.EditResult? = null
+            }
+        val service = ContentSearchService({ dir.absolutePath }, bridge, { setOf(file.absolutePath) })
+
+        assertEquals(listOf("open.kt"), service.searchInProject(query = "needle").map { it.path })
+    }
+
+    @Test
     fun `a cancelling caller unwinds a catastrophic-backtracking regex instead of pinning the thread`(
         @TempDir dir: File,
     ) {
         // The security control this class exists for: [InterruptibleText] re-checks
-        // the CALLER'S job on every character read, so `(a+)+$` against a long line
+        // the CALLER'S job during matching, so `(a+)+$` against a long line
         // - catastrophic backtracking in the non-interruptible Java matcher - must
         // unwind on cancel rather than pinning a Dispatchers.IO thread (and with it
         // every git/search behind the shared pools). Pinned the same way the

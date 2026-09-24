@@ -30,8 +30,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * Design notes:
  * - [ProjectFileDiscovery] is shared with [FileIndexer], so names and contents observe
  *   the same ignore rules, default exclusions, and link confinement. The scan is on demand:
- *   files are read at search time, so a fresh checkout needs no reindex. An mtime-keyed
- *   result cache makes a repeat search with the same query and options cheap.
+ *   files are read at search time, so a fresh checkout needs no reindex. A content-keyed
+ *   result cache skips repeat matching for unchanged files.
  * - Files containing a NUL byte (binary) or larger than [MAX_FILE_SIZE] are
  *   skipped, so a search over a repo with binaries stays fast and sane.
  * - `wholeWord` wraps the pattern in `\b...\b`, which for regex queries
@@ -493,6 +493,10 @@ class ContentSearchService(
                         4
                     }
 
+                    c.isHighSurrogate() || c.isLowSurrogate() -> {
+                        1
+                    }
+
                     else -> {
                         3
                     }
@@ -511,7 +515,7 @@ class ContentSearchService(
         isCancelled: () -> Boolean,
     ): List<FileMatch>? {
         return try {
-            if ('\u0000' in text) return null
+            if ('\u0000' in text || '\uFFFD' in text) return null
             val lineMap = LineMap(text)
             val matches = mutableListOf<FileMatch>()
             // The matcher reads through [InterruptibleText] rather than the raw
@@ -1149,8 +1153,8 @@ object GlobalEditorBufferBridge : EditorBufferBridge {
  * The check reads the CALLER's job, not `Thread.interrupted()`: structured
  * concurrency does not interrupt a thread running a CPU-bound loop, so the
  * flag would stay clear for the whole wedged run. The matcher re-reads
- * characters on every backtrack step, so each read is the check, and a
- * cancel lands mid-pattern rather than at the next suspension point.
+ * characters on every backtrack step, so checking every 1024 accesses
+ * still catches cancellation inside the pattern.
  *
  * Cancellation throws [CancellationException], which callers rethrow. Deadline expiry throws
  * [RegexMatchTimeoutException], which callers report as a skipped file or per-file replacement
@@ -1162,6 +1166,8 @@ internal class InterruptibleText(
     private val deadlineNanos: Long = Long.MAX_VALUE,
     private val onCharacterAccess: (() -> Unit)? = null,
 ) : CharSequence {
+    private var accesses = 0
+
     override val length: Int
         get() = text.length
 
@@ -1181,6 +1187,7 @@ internal class InterruptibleText(
     override fun toString(): String = text
 
     private fun checkBudget() {
+        if (accesses++ and 1023 != 0) return
         onCharacterAccess?.invoke()
         if (isCancelled()) throw CancellationException("search cancelled")
         if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() - deadlineNanos >= 0) {

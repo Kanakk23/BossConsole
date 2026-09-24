@@ -223,15 +223,17 @@ internal object ProjectFileDiscovery {
                 val rules = mutableListOf<IgnoreRule>()
                 val line = StringBuilder()
                 var chars = 0
+                var processed = 0
+                val context = currentCoroutineContext()
                 while (true) {
-                    currentCoroutineContext().ensureActive()
+                    if (processed++ and 1023 == 0) context.ensureActive()
                     val next = reader.read()
+                    if (next != -1 && ++chars > MAX_IGNORE_CHARS) return IgnoreRead(rules, incomplete = true)
                     if (next == -1 || next == '\n'.code) {
                         IgnoreRule.parse(line.toString(), basePath)?.let(rules::add)
                         line.clear()
                         if (next == -1) break
                     } else {
-                        if (++chars > MAX_IGNORE_CHARS) return IgnoreRead(rules, incomplete = true)
                         line.append(next.toChar())
                     }
                 }
@@ -397,6 +399,8 @@ internal object ProjectFileDiscovery {
              * directly. `[` and `]` are valid Git class members (`[[]`, `[]]`) but need escaping
              * in Java, where copying them can create an invalid pattern and abort discovery.
              */
+            // Git class delimiters and escapes share one cursor.
+            @Suppress("CyclomaticComplexMethod", "LoopWithTooManyJumpStatements")
             private fun gitCharacterClass(
                 pattern: String,
                 start: Int,
@@ -406,6 +410,13 @@ internal object ProjectFileDiscovery {
                 if (end < pattern.length && pattern[end] == ']') end++
                 var escaped = false
                 while (end < pattern.length) {
+                    if (!escaped && pattern.startsWith("[:", end)) {
+                        val posixEnd = pattern.indexOf(":]", end + 2)
+                        if (posixEnd >= 0) {
+                            end = posixEnd + 2
+                            continue
+                        }
+                    }
                     val character = pattern[end]
                     if (!escaped && character == ']') break
                     escaped = !escaped && character == '\\'
@@ -427,6 +438,22 @@ internal object ProjectFileDiscovery {
                 val regex = StringBuilder()
                 var index = 0
                 while (index < members.length) {
+                    if (members.startsWith("[:", index)) {
+                        val end = members.indexOf(":]", index + 2)
+                        if (end >= 0) {
+                            val name = members.substring(index + 2, end)
+                            val javaName =
+                                posixClasses[name]
+                                    ?: throw java.util.regex.PatternSyntaxException(
+                                        "Unsupported POSIX character class",
+                                        members,
+                                        index,
+                                    )
+                            regex.append("\\p{").append(javaName).append('}')
+                            index = end + 2
+                            continue
+                        }
+                    }
                     val character = members[index]
                     if (character == '\\' && index + 1 < members.length) {
                         regex.append("\\Q").append(members[index + 1]).append("\\E")
@@ -439,6 +466,23 @@ internal object ProjectFileDiscovery {
                 }
                 return regex.toString()
             }
+
+            private val posixClasses =
+                mapOf(
+                    "alnum" to "Alnum",
+                    "alpha" to "Alpha",
+                    "ascii" to "ASCII",
+                    "blank" to "Blank",
+                    "cntrl" to "Cntrl",
+                    "digit" to "Digit",
+                    "graph" to "Graph",
+                    "lower" to "Lower",
+                    "print" to "Print",
+                    "punct" to "Punct",
+                    "space" to "Space",
+                    "upper" to "Upper",
+                    "xdigit" to "XDigit",
+                )
 
             private data class CharacterClass(
                 val regex: String,

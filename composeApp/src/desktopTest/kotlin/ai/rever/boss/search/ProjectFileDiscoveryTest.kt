@@ -25,6 +25,15 @@ class ProjectFileDiscoveryTest {
     }
 
     @Test
+    fun `directory budget reports incomplete discovery`(
+        @TempDir root: File,
+    ) = runBlocking {
+        File(root, "nested").mkdir()
+        val limited = ProjectFileDiscovery.discover(root.absolutePath, maxDirectories = 1)
+        assertTrue(limited.incompleteReason?.contains("directory budget") == true)
+    }
+
+    @Test
     fun `failed reindex clears stale files and exposes the reason`(
         @TempDir root: File,
     ) = runBlocking {
@@ -36,6 +45,10 @@ class ProjectFileDiscoveryTest {
         indexer.indexProject(File(root, "missing").absolutePath)
         assertTrue(indexer.indexedFiles.value.isEmpty())
         assertTrue(indexer.indexError.value?.contains("cannot be resolved") == true)
+
+        indexer.indexProject(root.absolutePath)
+        assertTrue(indexer.indexError.value == null)
+        assertEquals(1, indexer.indexedFiles.value.size)
     }
 
     @Test
@@ -45,6 +58,34 @@ class ProjectFileDiscoveryTest {
         File(root, ".gitignore").writeBytes(byteArrayOf(0xff.toByte()))
         File(root, "visible.txt").writeText("needle")
         assertTrue(ProjectFileDiscovery.discover(root.absolutePath).incompleteReason != null)
+    }
+
+    @Test
+    fun `oversized gitignore fails closed`(
+        @TempDir root: File,
+    ) = runBlocking {
+        File(root, ".gitignore").writeText("\n".repeat(1_048_577))
+        assertTrue(ProjectFileDiscovery.discover(root.absolutePath).incompleteReason != null)
+    }
+
+    @Test
+    fun `invalid bracket range fails closed without escaping discovery`(
+        @TempDir root: File,
+    ) = runBlocking {
+        File(root, ".gitignore").writeText("[z-a].txt\n")
+        assertTrue(ProjectFileDiscovery.discover(root.absolutePath).incompleteReason != null)
+    }
+
+    @Test
+    fun `POSIX gitignore class excludes matching files in both search modes`(
+        @TempDir root: File,
+    ) {
+        File(root, ".gitignore").writeText("[[:alpha:]].txt\n")
+        File(root, "a.txt").writeText("needle")
+        File(root, "1.txt").writeText("needle")
+
+        assertEquals(setOf("1.txt"), content(root))
+        assertEquals(setOf("1.txt"), index(root).filter { it.endsWith(".txt") }.toSet())
     }
 
     @Test
