@@ -75,7 +75,10 @@ class CommitDialogRepositoryTest {
         }
         other.resolve("only-other.txt").writeText("other")
         withOtherRepo(other) {
-            assertEquals(setOf("file.txt", "only-own.txt", "new-directory/nested.txt"), dialog.status().map { it.path }.toSet())
+            assertEquals(
+                setOf("file.txt", "only-own.txt", "new-directory/nested.txt"),
+                dialog.status().map { it.path }.toSet(),
+            )
             assertTrue(dialog.stage("file.txt") is GitOperationResult.Success)
             assertEquals("file.txt", git(own, "diff", "--cached", "--name-only"))
             assertEquals("", git(other, "diff", "--cached", "--name-only"))
