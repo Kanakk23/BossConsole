@@ -60,6 +60,10 @@ class LastSessionCoordinator internal constructor(
     private val liveWindows = ConcurrentHashMap<String, LiveWindow>()
     private val writtenThisSession = AtomicBoolean(false)
 
+    // A refused startup restore protects the recovery files for this process, even if the
+    // primary window closes before a secondary one. Opening another window cannot clear it.
+    private val recoveryProtected = AtomicBoolean(false)
+
     /** Number of windows currently registered. */
     val liveWindowCount: Int
         get() = liveWindows.size
@@ -97,6 +101,8 @@ class LastSessionCoordinator internal constructor(
         // A window we don't know (or a double dispose) never writes on its behalf,
         // and neither does one closing while others are still open - that was the
         // bug.
+        val pending = liveWindows[windowId]
+        if (pending != null && !pending.canSave()) recoveryProtected.set(true)
         val window = liveWindows.remove(windowId)
         return if (window == null || liveWindows.isNotEmpty()) {
             logger.debug(
@@ -140,8 +146,10 @@ class LastSessionCoordinator internal constructor(
         window: LiveWindow,
         trigger: String,
     ): Boolean {
-        // A refused restore must leave both recovery records untouched, including on shutdown.
-        if (!window.canSave()) return false
+        // Check every live window before selecting a writer: the primary may have refused
+        // restoration while a secondary is the last disposer or the shutdown-hook candidate.
+        if (!window.canSave() || liveWindows.values.any { !it.canSave() }) recoveryProtected.set(true)
+        if (recoveryProtected.get()) return false
         // Claim the write before doing it: the dispose path and the shutdown hook
         // can run concurrently (a hook fires while Compose is still tearing down).
         if (!writtenThisSession.compareAndSet(false, true)) return false
