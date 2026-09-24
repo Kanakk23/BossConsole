@@ -235,4 +235,22 @@ class WorkspaceApplyFailClosedTest {
         )
         assertEquals("incoming", state.currentWorkspaceId)
     }
+
+    @Test
+    fun `closing a preserved outgoing Space leaves incoming tabs intact`() =
+        runBlocking {
+            val (state, project) = newState()
+            val layout = SinglePanel(PanelConfig("main", listOf(TabConfig(type = "terminal", title = "Term"))))
+            assertTrue(applyWorkspace(workspace(layout).copy(id = "outgoing"), state, project))
+            state.preserveCurrentState("outgoing", "Outgoing")
+            assertTrue(applyWorkspace(workspace(layout), state, project))
+            val incomingIds = tabsOnScreen(state).map { it.id }
+
+            assertTrue(state.closeWorkspace("outgoing"))
+
+            assertEquals("incoming", state.currentWorkspaceId)
+            assertEquals(incomingIds, tabsOnScreen(state).map { it.id })
+            assertEquals(1, incomingIds.size)
+            assertFalse(state.hasPreservedState("outgoing"))
+        }
 }
