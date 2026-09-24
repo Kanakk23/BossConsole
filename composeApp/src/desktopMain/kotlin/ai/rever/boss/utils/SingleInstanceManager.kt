@@ -302,6 +302,7 @@ internal fun descriptorTrust(descriptor: InstanceDescriptor): DescriptorTrust {
     // pid the attacker does not own but did record cannot satisfy.
     val owners = SocketPeerLookup.ownerPidsOf(descriptor)
     if (owners != null && pid !in owners) return DescriptorTrust.FORGED
+    if (owners != null) return DescriptorTrust.VERIFIED
 
     val ours =
         runCatching {
@@ -315,9 +316,8 @@ internal fun descriptorTrust(descriptor: InstanceDescriptor): DescriptorTrust {
     return when {
         ours != null && theirs != null && ours != theirs -> DescriptorTrust.FORGED
 
-        // Either the endpoint named its owner, or both executables compared
-        // equal — enough to trust the peer with anything.
-        owners != null || (ours != null && theirs != null) -> DescriptorTrust.VERIFIED
+        // When owner lookup cannot answer, matching executables is the fallback.
+        ours != null && theirs != null -> DescriptorTrust.VERIFIED
 
         // The OS cannot show executables nor the endpoint's owner, so the pid's
         // liveness is all that is established — better than nothing, not enough
@@ -1292,17 +1292,18 @@ object SingleInstanceManager {
             // alone proves nothing (pids are reused); the ping still decides.
             val isDeadPid = existing.pid != null && !isProcessAlive(existing.pid)
             if (!isDeadPid && SingleInstanceWire.respondsToPing(existing)) {
-                if (descriptorTrust(existing) == DescriptorTrust.FORGED) {
+                val forged = descriptorTrust(existing) == DescriptorTrust.FORGED
+                if (forged) {
                     logger.warn(
                         LogCategory.SYSTEM,
                         "The single-instance channel answers, but its recorded owner is a different " +
-                            "program — the descriptor may have been planted; refusing to hand over",
+                            "program - reclaiming a descriptor that may have been planted",
                         mapOf("endpoint" to existing.endpoint, "pid" to existing.pid),
                     )
                 } else {
                     logger.info(LogCategory.SYSTEM, "Another instance is answering on the single-instance channel")
                 }
-                return false
+                return if (forged) startServer() else false
             }
             if (isDeadPid) {
                 logger.debug(

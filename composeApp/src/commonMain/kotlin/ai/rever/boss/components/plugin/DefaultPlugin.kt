@@ -124,6 +124,7 @@ import androidx.compose.material.icons.outlined.Tab
 import androidx.compose.material.icons.outlined.Terminal
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -1313,7 +1314,7 @@ class DefaultPlugin(
     internal fun dispose(timeoutMillis: Long): Job {
         teardownJobRef.get()?.let { return it }
         val launched =
-            disposeScope.launch {
+            disposeScope.launch(start = CoroutineStart.LAZY) {
                 try {
                     // Bounds the coroutine only: a teardown stuck inside a genuinely
                     // blocking (non-suspending) call keeps its IO thread past the bound -
@@ -1369,6 +1370,7 @@ class DefaultPlugin(
                     // duplicate dispose mid-teardown; on completion it cannot.
                     disposeScope.cancel()
                 }
+                launched.start()
                 launched
             } else {
                 // A concurrent dispose won: teardown is idempotent, but callers must join

@@ -27,7 +27,8 @@ internal object SocketPeerLookup {
 
     /**
      * The pids holding [descriptor]'s endpoint as a listener, or null when this
-     * platform cannot say. An empty set is a definitive "nobody owns it".
+     * platform cannot say. Missing table rows and unreadable process directories
+     * are inconclusive, not proof that the recorded process forged the endpoint.
      */
     fun ownerPidsOf(descriptor: InstanceDescriptor): Set<Long>? =
         when {
@@ -60,7 +61,7 @@ internal object SocketPeerLookup {
     private fun unixOwnerPidsViaProc(path: String): Set<Long>? {
         val table = File("/proc/net/unix")
         if (!table.isFile) return null
-        return unixSocketInode(table, path)?.let { pidsHoldingSocketInode(it) } ?: emptySet()
+        return unixSocketInode(table, path)?.let { pidsHoldingSocketInode(it) }
     }
 
     private fun tcpOwnerPidsViaProc(endpoint: String): Set<Long>? {
@@ -68,7 +69,7 @@ internal object SocketPeerLookup {
         val tables = listOf(File("/proc/net/tcp"), File("/proc/net/tcp6")).filter { it.isFile }
         return when {
             port == null -> {
-                emptySet()
+                null
             }
 
             tables.isEmpty() -> {
@@ -79,7 +80,6 @@ internal object SocketPeerLookup {
                 tables
                     .firstNotNullOfOrNull { tcpListenerInode(it, port) }
                     ?.let { pidsHoldingSocketInode(it) }
-                    ?: emptySet()
             }
         }
     }
@@ -115,19 +115,23 @@ internal object SocketPeerLookup {
         }
 
     /** Every pid whose fd table holds `socket:[inode]` — same-uid processes only. */
-    private fun pidsHoldingSocketInode(inode: Long): Set<Long> {
+    private fun pidsHoldingSocketInode(inode: Long): Set<Long>? {
         val target = "socket:[$inode]"
         val pidDirs =
             File("/proc").listFiles { file -> file.isDirectory && file.name.all { it.isDigit() } }
-                ?: return emptySet()
-        return pidDirs
+                ?: return null
+        var unreadable = false
+        val owners = pidDirs
             .mapNotNull { pidDir ->
+                val fds = File(pidDir, "fd").listFiles()
+                if (fds == null) unreadable = true
                 val holdsInode =
-                    File(pidDir, "fd").listFiles()?.any { fd ->
+                    fds?.any { fd ->
                         runCatching { Files.readSymbolicLink(fd.toPath()).toString() }.getOrNull() == target
                     }
                 if (holdsInode == true) pidDir.name.toLongOrNull() else null
             }.toSet()
+        return owners.takeIf { it.isNotEmpty() || !unreadable }
     }
 
     // ---------- macOS: lsof ----------

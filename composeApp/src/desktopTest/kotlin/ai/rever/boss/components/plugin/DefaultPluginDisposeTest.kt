@@ -8,11 +8,13 @@ import ai.rever.boss.plugin.sandbox.PluginSandboxManager
 import ai.rever.boss.plugin.sandbox.SandboxConfig
 import ai.rever.boss.plugin.sandbox.health.PluginHealthSummary
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertFalse
@@ -155,5 +157,38 @@ class DefaultPluginDisposeTest {
 
             assertSame(first, second)
             withTimeout(5_000) { first.join() }
+        }
+
+    @Test
+    fun `concurrent dispose calls start one teardown`() =
+        runBlocking {
+            val entered = AtomicInteger(0)
+            val release = CompletableDeferred<Unit>()
+            val plugin =
+                windowPlugin(
+                    RecordingSandboxManager {
+                        entered.incrementAndGet()
+                        release.await()
+                    },
+                )
+            val start = CountDownLatch(1)
+            val jobs = arrayOfNulls<Job>(8)
+            val callers =
+                jobs.indices.map { index ->
+                    Thread {
+                        start.await()
+                        jobs[index] = plugin.dispose(timeoutMillis = 5_000)
+                    }.also { it.start() }
+                }
+
+            start.countDown()
+            callers.forEach { it.join() }
+            withTimeout(5_000) {
+                while (entered.get() == 0) delay(10)
+            }
+            assertTrue(jobs.all { it === jobs[0] })
+            assertTrue(entered.get() == 1, "only the canonical teardown may run")
+            release.complete(Unit)
+            withTimeout(5_000) { jobs[0]!!.join() }
         }
 }
