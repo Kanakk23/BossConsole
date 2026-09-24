@@ -43,6 +43,7 @@ Set with `supabase secrets set --project-ref pcnwqamqdnsadranufjv …`. `SUPABAS
 | `GOOGLE_WEB_CLIENT_ID`     | yes      | The Google OAuth client of type **Web application**                                                               |
 | `GOOGLE_WEB_CLIENT_SECRET` | yes      | Its client secret. This function is the only holder; the plugin never sees it                                     |
 | `FLUCK_STATE_KEY`          | yes      | 32 random bytes, base64url encoded. Must equal the BOSS secret `fluck-state-key`                                  |
+| `FLUCK_USER_ID`            | yes      | BOSS user UUID authorized for this signing key. Other signed user IDs are refused before any side effects.        |
 | `PUBLIC_BASE_URL`          | no       | Defaults to `https://pcnwqamqdnsadranufjv.functions.supabase.co/fluck-oauth`. Set it when the custom domain lands |
 
 ### `FLUCK_STATE_KEY`
@@ -55,6 +56,11 @@ function that could read every secret in the vault.
 To read it, open Secret Manager in BOSS, find `fluck-state-key`, and set the same value here. If the
 two ever disagree, every callback answers "That sign in link is no longer valid" and nothing else
 breaks, which is the failure mode this was chosen for.
+
+This deployment serves one BOSS user. Set `FLUCK_USER_ID` to that user's UUID alongside the key. The
+desktop holds the signing key and can mint arbitrary claims; the server-side user binding prevents
+that key from overwriting another user's connector secrets. Serving multiple users requires separate
+key-to-user bindings, not sharing one key among them.
 
 ### `PUBLIC_BASE_URL`
 
@@ -104,6 +110,7 @@ use and short lived.
      GOOGLE_WEB_CLIENT_ID=294223497390-6ndgin5tjc8oqkqn7gc16n28rmkjvjp5.apps.googleusercontent.com
    supabase secrets set --project-ref pcnwqamqdnsadranufjv GOOGLE_WEB_CLIENT_SECRET='…'
    supabase secrets set --project-ref pcnwqamqdnsadranufjv FLUCK_STATE_KEY='…'
+   supabase secrets set --project-ref pcnwqamqdnsadranufjv FLUCK_USER_ID='<boss-user-uuid>'
    ```
 
 3. Deploy:

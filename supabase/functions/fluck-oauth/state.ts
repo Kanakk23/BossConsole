@@ -161,7 +161,7 @@ export async function verifyState(
   }
   // Pinned, not read: accepting the token's own `alg` is the classic JWT confusion bug, and
   // `none` would make every one of these checks decorative.
-  if (header.alg !== "HS256") return null
+  if (!header || typeof header !== "object" || header.alg !== "HS256") return null
 
   const expected = new Uint8Array(
     await crypto.subtle.sign(
@@ -178,12 +178,14 @@ export async function verifyState(
   } catch {
     return null
   }
+  if (!claims || typeof claims !== "object") return null
   if (typeof claims.ws !== "string" || claims.ws.length === 0) return null
   if (typeof claims.uid !== "string" || claims.uid.length === 0) return null
   if (typeof claims.cid !== "string" || claims.cid.length === 0) return null
   if (typeof claims.n !== "string" || claims.n.length === 0) return null
   if (typeof claims.iat !== "number" || typeof claims.exp !== "number") return null
-  if (!Number.isFinite(claims.iat) || !Number.isFinite(claims.exp)) return null
+  if (!Number.isSafeInteger(claims.iat) || !Number.isSafeInteger(claims.exp)) return null
+  if (claims.iat > nowSeconds || claims.exp <= claims.iat) return null
   if (claims.exp <= nowSeconds) return null
   // A token whose own lifetime is longer than the policy is refused even though it verifies,
   // so a minting bug cannot hand out a state that is good for a week.

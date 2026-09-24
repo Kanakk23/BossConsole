@@ -70,6 +70,25 @@ Deno.test("a token with the wrong number of segments is refused", async () => {
   assertEquals(await verifyState(key, fixture.token + ".x", 0), null)
 })
 
+Deno.test("future issuance and nonpositive lifetimes are refused", async () => {
+  const now = fixture.claims.iat
+  for (
+    const claims of [
+      { ...fixture.claims, iat: now + 1 },
+      { ...fixture.claims, iat: now + 10, exp: now + 10 },
+      { ...fixture.claims, iat: now + 20, exp: now + 10 },
+    ]
+  ) {
+    assertEquals(await verifyState(key, await mintState(key, claims), now), null)
+  }
+})
+
+Deno.test("a null JSON header is refused without throwing", async () => {
+  const parts = fixture.token.split(".")
+  parts[0] = btoa("null").replaceAll("=", "")
+  assertEquals(await verifyState(key, parts.join("."), fixture.claims.iat), null)
+})
+
 Deno.test("an alg the token chose for itself is refused", async () => {
   const b64 = (value: string) =>
     btoa(value).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "")

@@ -140,8 +140,10 @@ function health(deps: Dependencies): Response {
     clientId: Boolean(deps.env("GOOGLE_WEB_CLIENT_ID")),
     clientSecret: Boolean(deps.env("GOOGLE_WEB_CLIENT_SECRET")),
     stateKey: Boolean(deps.env("FLUCK_STATE_KEY")),
+    userId: Boolean(deps.env("FLUCK_USER_ID")),
   }
-  const ok = configured.clientId && configured.clientSecret && configured.stateKey
+  const ok = configured.clientId && configured.clientSecret && configured.stateKey &&
+    configured.userId
   return new Response(JSON.stringify({ ok, configured }), {
     status: ok ? 200 : 503,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
@@ -169,20 +171,23 @@ async function callback(request: Request, deps: Dependencies): Promise<Response>
   let secret: Uint8Array
   const clientId = deps.env("GOOGLE_WEB_CLIENT_ID")
   const clientSecret = deps.env("GOOGLE_WEB_CLIENT_SECRET")
+  const allowedUserId = deps.env("FLUCK_USER_ID")
   try {
     secret = keyBytes(deps.env("FLUCK_STATE_KEY"))
   } catch {
     deps.log("callback unconfigured: state key")
     return page(503, "Sign in problem", PAGE_UNCONFIGURED)
   }
-  if (!clientId || !clientSecret) {
+  if (!clientId || !clientSecret || !allowedUserId) {
     deps.log("callback unconfigured: client")
     return page(503, "Sign in problem", PAGE_UNCONFIGURED)
   }
 
   const nowSeconds = Math.floor(deps.now() / 1000)
   const claims: StateClaims | null = state ? await verifyState(secret, state, nowSeconds) : null
-  if (!claims || claims.cid !== GOOGLE_CONNECTOR_ID || !code) {
+  // The signing key lives on the desktop. Its holder may mint arbitrary claims,
+  // so a valid signature alone must not authorize writes for every BOSS user.
+  if (!claims || claims.uid !== allowedUserId || claims.cid !== GOOGLE_CONNECTOR_ID || !code) {
     deps.log("callback refused: state")
     return page(400, "Sign in problem", PAGE_STALE)
   }

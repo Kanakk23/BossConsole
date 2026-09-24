@@ -67,6 +67,7 @@ function harness(options: {
     GOOGLE_WEB_CLIENT_ID: "294223497390-test.apps.googleusercontent.com",
     GOOGLE_WEB_CLIENT_SECRET: "not-a-real-secret",
     FLUCK_STATE_KEY: KEY_TEXT,
+    FLUCK_USER_ID: USER_ID,
     ...(options.env ?? {}),
   }
   const deps: Dependencies = {
@@ -127,7 +128,7 @@ Deno.test("health reports readiness as booleans and never a value", async () => 
   const body = await response.json()
   assertEquals(body, {
     ok: true,
-    configured: { clientId: true, clientSecret: true, stateKey: true },
+    configured: { clientId: true, clientSecret: true, stateKey: true, userId: true },
   })
   assertEquals(JSON.stringify(body).includes("secret"), false)
 })
@@ -143,6 +144,24 @@ Deno.test("an unknown route is a 404 page", async () => {
   const response = await h.handler(new Request("https://example.test/fluck-oauth/start"))
   assertEquals(response.status, 404)
   assertStringIncludes(await response.text(), PAGES.notFound)
+})
+
+Deno.test("a signed state cannot write as a different BOSS user", async () => {
+  const h = harness()
+  const response = await callback(h, `code=code&state=${await state({ uid: "another-user" })}`)
+  assertEquals(response.status, 400)
+  assertEquals(h.claimed, [])
+  assertEquals(h.requests, [])
+  assertEquals(h.stored, [])
+})
+
+Deno.test("an unbound signing key fails closed", async () => {
+  const h = harness({ env: { FLUCK_USER_ID: "" } })
+  const response = await callback(h, `code=code&state=${await state()}`)
+  assertEquals(response.status, 503)
+  assertEquals(h.claimed, [])
+  assertEquals(h.requests, [])
+  assertEquals(h.stored, [])
 })
 
 Deno.test("a good callback exchanges, stores, and says one sentence", async () => {
