@@ -75,6 +75,10 @@ class WorkspaceUnrestorableSideRestoreTest {
                         projectPath = PROJECT,
                     ),
                 splitViewState = splitViewState,
+                // No engine boot from a test: a layout that mentions a browser tab here
+                // does it to prove that tab is NOT restored, and the desktop warm would
+                // create the real browser profile directory for a tab that never lands.
+                warmEngine = {},
             )
         }
         return splitViewState
@@ -94,6 +98,19 @@ class WorkspaceUnrestorableSideRestoreTest {
         TabConfig(
             type = "unknown-plugin",
             title = "ghost",
+        )
+
+    /**
+     * A saved browser tab. Restore builds a `FluckTabInfo` for it unconditionally - it is
+     * the registry, not the builder, that decides whether the tab can live in a panel, so
+     * with no browser factory registered this config still produces a TabInfo whose type
+     * has no factory. Exactly the case [firstRestorableTab] must judge on the tab it built.
+     */
+    private fun browserTab(name: String) =
+        TabConfig(
+            type = "browser",
+            title = name,
+            url = "https://$name.example.com/",
         )
 
     @Test
@@ -121,6 +138,23 @@ class WorkspaceUnrestorableSideRestoreTest {
             SplitConfig.VerticalSplit(
                 left = panel(editorTab("Left.kt")),
                 right = panel(unknownTab(), unknownTab()),
+            )
+
+        assertEquals(listOf(listOf("Left.kt")), restoredTitles(layout))
+    }
+
+    @Test
+    fun `a saved tab whose built type has no registered factory opens no ghost panel`() {
+        // The saved browser tab still BUILDS a FluckTabInfo (the builder has no registry
+        // check), but with no browser factory registered addTab drops it. Judged on the
+        // saved config alone the side looks restorable, so splitPanel opened a second
+        // panel whose only tab was then dropped - a ghost empty panel. The gate must
+        // require a factory for the tab it actually built, so the side counts as
+        // unrestorable and no split happens at all.
+        val layout =
+            SplitConfig.VerticalSplit(
+                left = panel(editorTab("Left.kt")),
+                right = panel(browserTab("Ghost")),
             )
 
         assertEquals(listOf(listOf("Left.kt")), restoredTitles(layout))

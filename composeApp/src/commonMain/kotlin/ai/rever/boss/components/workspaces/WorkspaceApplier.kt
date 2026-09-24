@@ -427,7 +427,14 @@ private suspend fun applyWorkspaceNode(
 /**
  * The first saved tab in the subtree that still restores to a live tab, in restore order
  * (left/top before right/bottom, tabs in panel order), paired with the [TabInfo] built for
- * it. The split pre-creation passes that exact instance to `splitPanel`, so a SinglePanel
+ * it. "Restores to a live tab" is judged on the tab that was BUILT, not on
+ * `tabTypeIdFor(config)`: the pre-created instance goes through `addTab`, which drops a
+ * tab whose type has no registered factory, so a built-but-unregistered tab must not
+ * count as restorable either (it would open a panel that then loses its only tab - a
+ * ghost panel), and the jupyter-to-editor fallback is weighed as the editor tab it
+ * produced, not as the jupyter type it was saved as.
+ *
+ * The split pre-creation passes that exact instance to `splitPanel`, so a SinglePanel
  * side materializes each tab exactly once; a nested subtree only needs the null check,
  * because the recursion materializes its tabs itself - a pre-created copy there would be
  * materialized twice (#1210).
@@ -446,6 +453,10 @@ private suspend fun firstRestorableTab(
             node.panel.tabs
                 .firstNotNullOfOrNull { tabConfig ->
                     createTabFromWorkspaceConfig(tabConfig, resolvedProjectPath, splitViewState)
+                        // Judge the BUILT tab, not tabTypeIdFor(config): addTab drops a
+                        // tab whose type has no registered factory, and the jupyter
+                        // fallback must count as the editor tab it produced.
+                        ?.takeIf { splitViewState.tabRegistry.isRegistered(it.typeId) }
                         ?.let { tabConfig to it }
                 }
         }
