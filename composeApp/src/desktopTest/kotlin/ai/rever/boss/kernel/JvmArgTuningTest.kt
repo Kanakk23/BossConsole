@@ -32,12 +32,20 @@ class JvmArgTuningTest {
     }
 
     @Test
-    fun `an unrecognised suffix counts as unparsable, not as bytes`() {
-        // '-Xmx4t' is not valid JVM syntax; reading it as 4 bytes would let any tuned
-        // value replace it, so it must behave as unparsable (zero, tuned wins upward)
-        // rather than as a mis-scaled byte count.
+    fun `an unparsable original heap is left alone`() {
+        // '-Xmx4t' is not valid JVM syntax. Its real size is unknown, so replacing it
+        // could shrink it: the merge keeps the operator's value.
         val merged = mergeTunedJvmArgs(listOf("-Xmx4t"), listOf("-Xmx2048m"))
-        assertEquals(listOf("-Xmx2048m"), merged)
+        assertEquals(listOf("-Xmx4t"), merged)
+    }
+
+    @Test
+    fun `a tuned Xmx is not appended when the original sets no Xmx`() {
+        // The JVM default max heap (or -XX:MaxRAMPercentage) is usually above 512m, so
+        // appending the tuned value could shrink it.
+        assertEquals(emptyList<String>(), mergeTunedJvmArgs(emptyList(), listOf("-Xmx512m")))
+        val gcOnly = listOf("-XX:+UseG1GC", "-XX:MaxRAMPercentage=75")
+        assertEquals(gcOnly, mergeTunedJvmArgs(gcOnly, listOf("-Xmx512m")))
     }
 
     @Test
