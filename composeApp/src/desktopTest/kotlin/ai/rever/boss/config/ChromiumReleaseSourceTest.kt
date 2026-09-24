@@ -185,10 +185,9 @@ class ChromiumReleaseSourceTest {
                     listOf(
                         release(
                             "v9.1.2",
-                            // A row published before the hash column has
-                            // nothing to verify either source against, so the
-                            // backup stays unverified — current behavior, pinned
-                            // here.
+                            // A row published before the hash column has no
+                            // integrity anchor. Candidates remain hashless,
+                            // and the installer refuses them before download.
                             asset("boss-chromium-linux-x64.zip", "https://cdn/linux-x64.zip"),
                         ),
                     ),
@@ -218,10 +217,8 @@ class ChromiumReleaseSourceTest {
                 assertEquals(1, candidates.size)
                 assertEquals("github", candidates[0].sourceName)
                 assertEquals(expectUrl, candidates[0].url)
-                // With no catalog row there is no hash to verify the backup
-                // against, so it stays unverified — current behavior, pinned
-                // (refusing would leave no way to install an engine the
-                // catalog cannot describe).
+                // Without a catalog row this candidate has no hash. The
+                // installer refuses it before downloading the archive.
                 assertNull(candidates[0].sha256)
             }
         }

@@ -8,7 +8,8 @@ import java.io.File
 /**
  * Integrity gate for a downloaded engine archive, run before it is extracted:
  * the archive's bytes must match the catalog sha256 pinned on its candidate
- * (the engine counterpart of the plugin update jar identity vet).
+ * This detects transfer corruption. The catalog hash and the primary URL come
+ * from the same source, so it does not authenticate a compromised catalog.
  *
  * The gate fails CLOSED on both failure modes:
  *
@@ -31,15 +32,29 @@ import java.io.File
 internal object EngineArchiveIntegrityVet {
     private val logger = BossLogger.forComponent("EngineArchiveIntegrityVet")
 
+    fun requirePinnedHash(candidate: EngineDownloadCandidate): Result<Unit> =
+        if (candidate.sha256.isNullOrBlank()) {
+            Result.failure(
+                IllegalStateException(
+                    "Engine archive from ${candidate.sourceName} refused: no catalog checksum pins it, " +
+                        "so its integrity cannot be verified. The engine was not installed.",
+                ),
+            )
+        } else {
+            Result.success(Unit)
+        }
+
     /**
      * Accept [archive] only when [candidate] pins a catalog sha256 and the
      * downloaded bytes match it. Every other outcome is a refusal, so a
      * partial or corrupted download can never be extracted.
      */
+    @Suppress("ReturnCount")
     fun vet(
         candidate: EngineDownloadCandidate,
         archive: File,
     ): Result<Unit> {
+        requirePinnedHash(candidate).onFailure { return Result.failure(it) }
         val actualSha = runCatching { sha256Of(archive) }
         val refusal = refusalReason(candidate, actualSha)
         if (refusal == null) {
@@ -71,14 +86,9 @@ internal object EngineArchiveIntegrityVet {
         candidate: EngineDownloadCandidate,
         actualSha: Result<String>,
     ): String? {
-        val expected = candidate.sha256
+        val expected = candidate.sha256?.trim()
         val actual = actualSha.getOrNull()
         return when {
-            expected.isNullOrBlank() -> {
-                "Engine archive from ${candidate.sourceName} refused: no catalog checksum pins it, " +
-                    "so its integrity cannot be verified. The engine was not installed."
-            }
-
             actual == null -> {
                 "Engine archive from ${candidate.sourceName} refused: its checksum could not be " +
                     "computed. The engine was not installed."

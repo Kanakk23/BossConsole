@@ -167,7 +167,7 @@ class ChromiumAutoDownloaderTest {
                 ChromiumAutoDownloader.installFromCandidates(
                     candidates =
                         listOf(
-                            candidate("supabase", "https://supabase/a.zip"),
+                            candidate("supabase", "https://supabase/a.zip", sha = zipSha),
                             candidate("github", "https://github/a.zip", sha = zipSha),
                         ),
                     version = "9.2.0",
@@ -269,10 +269,15 @@ class ChromiumAutoDownloaderTest {
     fun `all candidates failing returns failure and reports the error`() =
         runBlocking {
             var reportedError: String? = null
+            val goodSha = sha256Of(File(root, "sha-src-error").apply { writeText("zip-bytes") })
 
             val result =
                 ChromiumAutoDownloader.installFromCandidates(
-                    candidates = listOf(candidate("supabase", "https://supabase/a.zip"), candidate("github", "https://github/a.zip")),
+                    candidates =
+                        listOf(
+                            candidate("supabase", "https://supabase/a.zip", sha = goodSha),
+                            candidate("github", "https://github/a.zip", sha = goodSha),
+                        ),
                     version = "9.2.0",
                     targetDir = target.toPath(),
                     staged = false,

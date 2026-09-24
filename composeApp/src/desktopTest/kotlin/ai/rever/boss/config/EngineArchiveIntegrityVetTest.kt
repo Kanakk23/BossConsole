@@ -155,6 +155,7 @@ class EngineArchiveIntegrityVetTest {
     fun `an unverifiable candidate is refused and the previous engine survives`() =
         runBlocking {
             makePreviousEngine()
+            var fetched = false
 
             val result =
                 ChromiumAutoDownloader.installFromCandidates(
@@ -163,7 +164,7 @@ class EngineArchiveIntegrityVetTest {
                     targetDir = engineDir.toPath(),
                     staged = false,
                     onProgress = {},
-                    fetch = { _, dest -> dest.toFile().writeBytes(goodBytes) },
+                    fetch = { _, _ -> fetched = true },
                     extract = { _, _ -> error("a refused archive must never be extracted") },
                 )
 
@@ -173,6 +174,29 @@ class EngineArchiveIntegrityVetTest {
                 "got: ${result.exceptionOrNull()?.message}",
             )
             assertPreviousEngineIntact()
+            assertTrue(!fetched, "a hashless archive must be refused before download")
+        }
+
+    @Test
+    fun `hashless staged candidate leaves no pending marker or download`() =
+        runBlocking {
+            val pending = File(tempDir.toFile(), "boss-chromium-pending")
+            var fetched = false
+
+            val result =
+                ChromiumAutoDownloader.installFromCandidates(
+                    candidates = listOf(hashlessCandidate()),
+                    version = VERSION,
+                    targetDir = pending.toPath(),
+                    staged = true,
+                    onProgress = {},
+                    fetch = { _, _ -> fetched = true },
+                    extract = { _, _ -> error("a refused archive must never be extracted") },
+                )
+
+            assertTrue(result.isFailure)
+            assertTrue(!fetched)
+            assertTrue(!pending.exists())
         }
 
     @Test

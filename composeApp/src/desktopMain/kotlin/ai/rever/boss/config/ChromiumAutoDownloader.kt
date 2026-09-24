@@ -449,6 +449,10 @@ object ChromiumAutoDownloader {
             )
 
             try {
+                // A hashless archive cannot pass the integrity gate. Refuse it
+                // before creating a temp file or fetching hundreds of MB.
+                EngineArchiveIntegrityVet.requirePinnedHash(candidate).getOrThrow()
+
                 // Create parent directories
                 Files.createDirectories(targetDir.parent)
 
