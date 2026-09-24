@@ -196,7 +196,7 @@ object McpArgumentSanitizer {
      */
     private val basicAuthFlag =
         Regex(
-            """(?<![A-Za-z0-9_-])(-u|--user)(?:[ \t]+|=)""" +
+            """(?<![A-Za-z0-9_-])(-u|--user)([ \t]+|=)""" +
                 """(?!["']?[A-Za-z][A-Za-z0-9+.-]*://)(?!["']?$uidGidValue)""" +
                 """(?:"[^"]*:[^"]*"|'[^']*:[^']*'|[^\s&,;}"']+:[^\s&,;}"']*)""",
         )
@@ -252,7 +252,7 @@ object McpArgumentSanitizer {
             .redactUrlUserInfo(text)
             .replace(pemPrivateKey, "[REDACTED]")
             .replace(awsAccessKeyId, "[REDACTED]")
-            .replace(basicAuthFlag, "$1 [REDACTED]")
+            .replace(basicAuthFlag, "$1$2[REDACTED]")
             .replace(cookieShortFlag, "$1 [REDACTED]")
             .replace(cookieLongFlag, "$1 [REDACTED]")
             .replace(credentialShapePattern, "[REDACTED]")
