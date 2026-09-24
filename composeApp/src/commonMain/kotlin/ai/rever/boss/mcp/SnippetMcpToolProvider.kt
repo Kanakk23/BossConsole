@@ -85,7 +85,10 @@ object SnippetMcpToolProvider : McpToolProvider {
     private fun createGetTool(name: String): McpToolDefinition =
         McpToolDefinition(
             name = name,
-            description = "Get one snippet, including its full body, by id.",
+            description =
+                "Get one snippet, including its full body, by id. Snippets are shared with local agents " +
+                    "without an approval prompt by default. Store credentials in Secret Manager and use " +
+                    "secret references in snippets instead of plaintext credentials.",
             inputSchema =
                 """
                 {
@@ -105,7 +108,8 @@ object SnippetMcpToolProvider : McpToolProvider {
             name = name,
             description =
                 "Create a snippet, or update an existing one when 'id' is supplied. 'tags' is a " +
-                    "comma-separated list.",
+                    "comma-separated list. Saved bodies are readable by local agents without approval by default; " +
+                    "use Secret Manager references instead of plaintext credentials.",
             inputSchema =
                 """
                 {
