@@ -83,7 +83,7 @@ class TabDragSessionTest {
             component.startDragging(Tab(), "source", 0, Offset.Zero)
             val original = component.draggingTab
             component.withDragSession { session ->
-                session.start(Tab("other"), "other", 0, Offset.Zero)
+                assertFalse(session.start(Tab("other"), "other", 0, Offset.Zero))
                 session.cancel()
             }
             assertSame(original, component.draggingTab)

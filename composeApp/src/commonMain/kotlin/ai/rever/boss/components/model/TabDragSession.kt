@@ -9,7 +9,7 @@ internal class TabDragSession(
 ) {
     private var owned: DraggingTabInfo? = null
 
-    private val isOwner: Boolean
+    val isOwner: Boolean
         get() = owned != null && component.draggingTab === owned
 
     fun start(
@@ -17,25 +17,34 @@ internal class TabDragSession(
         panelId: String,
         index: Int,
         position: Offset,
-    ) {
-        if (component.isDragging) return
-        component.startDragging(tab, panelId, index, position)
-        owned = component.draggingTab
+    ): Boolean = start { component.startDragging(tab, panelId, index, position) }
+
+    fun start(onStart: () -> Unit): Boolean {
+        if (component.isDragging) return false
+        try {
+            onStart()
+        } finally {
+            owned = component.draggingTab
+        }
+        return isOwner
     }
 
     fun update(delta: Offset) {
         if (isOwner) component.updateDrag(delta)
     }
 
-    fun end(): TabDropResult? {
+    fun end(sourceIndex: Int? = null): TabDropResult? {
         if (!isOwner) return null
+        val result = component.endDrag(sourceIndex)
         owned = null
-        return component.endDrag()
+        return result
     }
 
-    fun cancel() {
-        if (isOwner) component.cancelDrag()
+    fun cancel(): Boolean {
+        val cancelled = isOwner
+        if (cancelled) component.cancelDrag()
         owned = null
+        return cancelled
     }
 }
 
