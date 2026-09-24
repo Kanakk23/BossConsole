@@ -61,6 +61,7 @@ object PluginJarReconciler {
     )
 
     /** Load-time-equivalent signature check. Injectable because the pinned key is unavailable to tests. */
+    @Volatile
     internal var signatureVerifier: PluginSignatureVerifier =
         PluginSignatureVerifier(PluginStoreTrust.TRUSTED_KEYS)
 
@@ -71,7 +72,7 @@ object PluginJarReconciler {
         val trust: CandidateTrust by lazy { candidateTrust(file, manifest) }
     }
 
-    private enum class CandidateTrust { INVALID, UNSIGNED, TRUSTED }
+    private enum class CandidateTrust { INVALID, UNKNOWN, UNSIGNED, TRUSTED }
 
     /**
      * Scan [pluginDir] and remove stale duplicate plugin JARs. Does NOT load
@@ -118,6 +119,12 @@ object PluginJarReconciler {
             }
             val unordered = group.any { Version.parse(it.manifest.version) == null }
             val persistedCandidate = group.firstOrNull { it.file.absolutePath == installedPath }
+            // A failed sidecar read or JAR hash is not proof of an invalid signature.
+            // Leave the whole group untouched until a later scan can classify it.
+            if (group.any { it.trust == CandidateTrust.UNKNOWN }) {
+                winners.add((persistedCandidate ?: group.first()).file)
+                return@forEach
+            }
             val winner =
                 if (unordered && persistedCandidate != null) persistedCandidate else pickWinner(group, installedPath)
             winners.add(winner.file)
@@ -163,6 +170,7 @@ object PluginJarReconciler {
         deleted: MutableList<String>,
         deferred: MutableList<String>,
     ) {
+        if (loser.trust == CandidateTrust.UNKNOWN) return
         val loserVersion = Version.parse(loser.manifest.version)
         val winnerVersion = Version.parse(winner.manifest.version)
         // During the warn-only signature rollout, a newer unsigned store update can
@@ -234,7 +242,7 @@ object PluginJarReconciler {
      * marker bound to them. A present-but-invalid signature is NOT trust -
      * it is exactly the artifact this check exists to demote. Mirrors the
      * loader: bundled trust only exempts a MISSING sidecar, never an invalid
-     * one. Any read failure fails closed (invalid).
+     * one. An I/O failure leaves the group untouched because it cannot justify deletion.
      */
     private fun candidateTrust(
         file: File,
@@ -242,7 +250,7 @@ object PluginJarReconciler {
     ): CandidateTrust {
         // A sidecar that exists but cannot be read is not "missing" - the load
         // path propagates that failure, so it must not fall through to the
-        // bundled-trust exemption here either. Fails closed: untrusted.
+        // bundled-trust exemption here either.
         val signature =
             runCatching { PluginSignatureSidecar.read(file.absolutePath) }
                 .onFailure { e ->
@@ -255,19 +263,19 @@ object PluginJarReconciler {
         val sidecar = signature.getOrNull()
         return when {
             signature.isFailure -> {
-                CandidateTrust.INVALID
+                CandidateTrust.UNKNOWN
             }
 
             sidecar == null -> {
                 if (PluginBundledTrust.isTrusted(file.absolutePath)) CandidateTrust.TRUSTED else CandidateTrust.UNSIGNED
             }
 
-            verifiesAnchor(file, manifest, sidecar) -> {
-                CandidateTrust.TRUSTED
-            }
-
             else -> {
-                CandidateTrust.INVALID
+                when (verifiesAnchor(file, manifest, sidecar)) {
+                    true -> CandidateTrust.TRUSTED
+                    false -> CandidateTrust.INVALID
+                    null -> CandidateTrust.UNKNOWN
+                }
             }
         }
     }
@@ -280,8 +288,8 @@ object PluginJarReconciler {
         file: File,
         manifest: PluginManifest,
         signature: String,
-    ): Boolean {
-        val sha256 = runCatching { FileHashing.sha256(file) }.getOrNull() ?: return false
+    ): Boolean? {
+        val sha256 = runCatching { FileHashing.sha256(file) }.getOrNull() ?: return null
         val anchor = PluginStoreTrust.versionAnchor(manifest.pluginId, manifest.version, sha256)
         return signatureVerifier.verifySignedMessage(anchor, signature).isVerified
     }

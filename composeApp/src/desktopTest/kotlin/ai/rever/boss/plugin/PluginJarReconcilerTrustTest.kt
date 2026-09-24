@@ -7,6 +7,7 @@ import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.plugin.loader.PluginSignatureVerifier
 import ai.rever.boss.plugin.loader.PluginStoreTrust
 import java.io.File
+import java.nio.file.Files
 import java.security.KeyPairGenerator
 import java.security.Signature
 import java.util.Base64
@@ -25,7 +26,9 @@ import kotlin.test.assertTrue
  */
 class PluginJarReconcilerTrustTest {
     private val temps = mutableListOf<File>()
+    private val installedIds = mutableListOf<String>()
     private var previousEnforcement: String? = null
+    private lateinit var previousVerifier: PluginSignatureVerifier
 
     private val keyPair =
         KeyPairGenerator
@@ -46,6 +49,7 @@ class PluginJarReconcilerTrustTest {
 
     @BeforeTest
     fun injectVerifier() {
+        previousVerifier = PluginJarReconciler.signatureVerifier
         PluginJarReconciler.signatureVerifier = testVerifier
         previousEnforcement = System.getProperty(PluginSignatureEnforcement.PROPERTY)
         System.setProperty(PluginSignatureEnforcement.PROPERTY, "true")
@@ -53,22 +57,25 @@ class PluginJarReconcilerTrustTest {
 
     @AfterTest
     fun cleanup() {
-        PluginJarReconciler.signatureVerifier = PluginSignatureVerifier(PluginStoreTrust.TRUSTED_KEYS)
+        PluginJarReconciler.signatureVerifier = previousVerifier
         if (previousEnforcement == null) {
             System.clearProperty(PluginSignatureEnforcement.PROPERTY)
         } else {
             System.setProperty(PluginSignatureEnforcement.PROPERTY, previousEnforcement!!)
         }
+        installedIds.forEach(PluginPersistence::removeInstalledPlugin)
         temps.forEach { it.deleteRecursively() }
     }
 
-    private fun tempPluginDir(): File =
-        File.createTempFile("reconcile-trust", "").let {
-            it.delete()
-            it.mkdirs()
-            temps.add(it)
-            it
-        }
+    private fun tempPluginDir(): File = Files.createTempDirectory("reconcile-trust").toFile().also { temps.add(it) }
+
+    private fun recordInstalled(
+        pluginId: String,
+        jar: File,
+    ) {
+        installedIds.add(pluginId)
+        PluginPersistence.addInstalledPlugin(pluginId, jar.absolutePath, enabled = true)
+    }
 
     private fun manifestJar(
         dir: File,
@@ -120,7 +127,7 @@ class PluginJarReconcilerTrustTest {
 
         // The signed jar is what installed.json knows about; the unsigned
         // drop-in is the attacker artifact.
-        PluginPersistence.addInstalledPlugin(pluginId, signed.absolutePath, enabled = true)
+        recordInstalled(pluginId, signed)
 
         val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
 
@@ -146,7 +153,7 @@ class PluginJarReconcilerTrustTest {
         val signed = manifestJar(dir, "rollout-1.0.0.jar", pluginId, "1.0.0")
         val unsigned = manifestJar(dir, "rollout-2.0.0.jar", pluginId, "2.0.0")
         signWithTestKey(signed, pluginId, "1.0.0")
-        PluginPersistence.addInstalledPlugin(pluginId, signed.absolutePath, enabled = true)
+        recordInstalled(pluginId, signed)
 
         repeat(2) {
             val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
@@ -202,5 +209,88 @@ class PluginJarReconcilerTrustTest {
 
         assertEquals(listOf(newer), result.winners)
         assertFalse(File(dir, "plain-1.0.0.jar").exists())
+    }
+
+    @Test
+    fun `unreadable sidecar leaves duplicate group and persisted path untouched`() {
+        val dir = tempPluginDir()
+        val pluginId = "ai.rever.boss.plugin.test.unreadable"
+        val old = manifestJar(dir, "unreadable-1.0.0.jar", pluginId, "1.0.0")
+        val newer = manifestJar(dir, "unreadable-2.0.0.jar", pluginId, "2.0.0")
+        recordInstalled(pluginId, old)
+        assertTrue(File(PluginSignatureSidecar.pathFor(old.absolutePath)).mkdir())
+
+        val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
+
+        assertEquals(listOf(old), result.winners)
+        assertTrue(result.deleted.isEmpty())
+        assertTrue(old.exists())
+        assertTrue(newer.exists())
+        assertEquals(old.absolutePath, PluginPersistence.getInstalledPlugin(pluginId)?.jarPath)
+    }
+
+    @Test
+    fun `two signed jars select the newer version`() {
+        val dir = tempPluginDir()
+        val pluginId = "ai.rever.boss.plugin.test.signed-versions"
+        val old = manifestJar(dir, "signed-1.0.0.jar", pluginId, "1.0.0")
+        val newer = manifestJar(dir, "signed-2.0.0.jar", pluginId, "2.0.0")
+        signWithTestKey(old, pluginId, "1.0.0")
+        signWithTestKey(newer, pluginId, "2.0.0")
+
+        val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
+
+        assertEquals(listOf(newer), result.winners)
+        assertFalse(old.exists())
+        assertTrue(newer.exists())
+    }
+
+    @Test
+    fun `trusted jar wins a same-version tie despite newer unsigned mtime`() {
+        val dir = tempPluginDir()
+        val pluginId = "ai.rever.boss.plugin.test.same-version"
+        val signed = manifestJar(dir, "signed.jar", pluginId, "1.0.0")
+        val unsigned = manifestJar(dir, "unsigned.jar", pluginId, "1.0.0")
+        signWithTestKey(signed, pluginId, "1.0.0")
+        assertTrue(unsigned.setLastModified(signed.lastModified() + 5_000))
+
+        val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
+
+        assertEquals(listOf(signed), result.winners)
+        assertTrue(signed.exists())
+        assertFalse(unsigned.exists())
+    }
+
+    @Test
+    fun `signature for a different version cannot outrank a valid signed jar`() {
+        val dir = tempPluginDir()
+        val pluginId = "ai.rever.boss.plugin.test.wrong-anchor"
+        val signed = manifestJar(dir, "signed-1.0.0.jar", pluginId, "1.0.0")
+        val wrongAnchor = manifestJar(dir, "wrong-anchor-2.0.0.jar", pluginId, "2.0.0")
+        signWithTestKey(signed, pluginId, "1.0.0")
+        signWithTestKey(wrongAnchor, pluginId, "1.0.0")
+
+        val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
+
+        assertEquals(listOf(signed), result.winners)
+        assertTrue(signed.exists())
+        assertFalse(wrongAnchor.exists())
+    }
+
+    @Test
+    fun `invalid sidecar overrides a bundled trust marker`() {
+        val dir = tempPluginDir()
+        val pluginId = "ai.rever.boss.plugin.test.invalid-bundle"
+        val bundled = manifestJar(dir, "bundled-2.0.0.jar", pluginId, "2.0.0")
+        val signed = manifestJar(dir, "signed-1.0.0.jar", pluginId, "1.0.0")
+        PluginBundledTrust.bindToBundle(bundled.absolutePath, bundled)
+        PluginSignatureSidecar.write(bundled.absolutePath, "bm90LWEtc2lnbmF0dXJl")
+        signWithTestKey(signed, pluginId, "1.0.0")
+
+        val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
+
+        assertEquals(listOf(signed), result.winners)
+        assertFalse(bundled.exists())
+        assertTrue(signed.exists())
     }
 }
