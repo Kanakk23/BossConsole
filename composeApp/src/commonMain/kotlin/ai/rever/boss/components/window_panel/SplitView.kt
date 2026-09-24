@@ -410,6 +410,16 @@ class SplitViewState(
     val currentWorkspaceId: String? get() = _currentWorkspaceId
 
     /**
+     * Rebind the displayed tree after it is saved under [workspaceId].
+     *
+     * This changes only the window-local Space identity. It deliberately does not preserve,
+     * restore, or replace any layout tree.
+     */
+    fun rebindCurrentWorkspace(workspaceId: String) {
+        _currentWorkspaceId = workspaceId
+    }
+
+    /**
      * Every workspace this window is actually running, displayed or not.
      *
      * Switching workspaces does not tear the old one down: `preserveCurrentState` keeps its whole
@@ -1760,6 +1770,17 @@ class SplitViewState(
     }
 
     fun clearAllPanels() {
+        // The outgoing tree becomes unreachable the moment _rootNode is reassigned, so
+        // its tabs are disposed HERE: destroy() is what releases a browser or terminal
+        // tab's native process, and closeCurrentWorkspace clears tabs through the same
+        // clearAllTabs path for that reason. A tree still held by preserveCurrentState is
+        // exempt - it must survive to be restored on switch-back, and its live tabs keep
+        // moving through moveTabToWorkspace and collectAllActiveTabs while preserved.
+        val outgoingRoot = _rootNode.value
+        val stillPreserved = preservedWorkspaceStates.values.any { it.rootNode === outgoingRoot }
+        if (!stillPreserved) {
+            getAllPanels().forEach { panel -> panel.tabsComponent.clearAllTabs() }
+        }
         // Reset to single main panel
         val mainComponent = BossTabsComponent(createBossAppContext, tabRegistry, windowId)
         _rootNode.value =
