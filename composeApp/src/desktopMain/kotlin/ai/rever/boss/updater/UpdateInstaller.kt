@@ -3,6 +3,7 @@ package ai.rever.boss.updater
 import ai.rever.boss.utils.AppVersion
 import ai.rever.boss.utils.BOSS_MACOS_APP_BUNDLE_NAME
 import ai.rever.boss.utils.BOSS_MACOS_BUNDLE_ID
+import ai.rever.boss.utils.CodeSourceLocation
 import ai.rever.boss.utils.Version
 import ai.rever.boss.utils.WindowsProtocolCleanup
 import ai.rever.boss.utils.logging.BossLogger
@@ -833,9 +834,18 @@ object UpdateInstaller {
      * The validation is swallowed here rather than left to the script generator on
      * purpose. The generator throws, and a throw on this argument would abort an
      * update that is otherwise fine - trading "installs but does not relaunch" for
-     * "does not install", which is strictly worse. In practice it cannot trigger: the
-     * MSI path passed alongside it lives under the same user profile and so carries
-     * the same account name, and the filename component is the constant `BOSS.exe`.
+     * "does not install", which is strictly worse. For a local install it cannot
+     * trigger: the MSI path passed alongside it lives under the same user profile and
+     * so carries the same account name, and the filename component is the constant
+     * `BOSS.exe`.
+     *
+     * It does trigger for an install on a hidden network share, whose name ends in `$`
+     * (`\\nas01\apps$\BOSS\BOSS.exe`): the validator refuses `$` anywhere in a path.
+     * Such an install updates but does not relaunch. That was already the outcome
+     * through `jpackage.app-path`, which names the same share and is tried first; the
+     * code-source fallback reaching the share too does not change it. Allowing `$` in
+     * the directory component would mean relaxing a rule every platform's update
+     * script shares, which is a decision for [UpdatePathValidator], not for this path.
      */
     internal fun getWindowsLauncherPath(): String? {
         val launcher =
@@ -872,25 +882,11 @@ object UpdateInstaller {
 
     /**
      * The jar or classes directory this code is running from, or null if the location
-     * is unavailable. Goes through [java.net.URI] rather than `location.path`: that is
-     * URL-encoded, so a Windows install under a profile with a space in it yields a
-     * `%20` no filesystem call resolves.
+     * is unavailable. [CodeSourceLocation] explains why this is neither `location.path`
+     * (URL-encoded) nor `File(URI)` (which rejects a network share's authority), and
+     * logs the reason when it answers null; it does not throw.
      */
-    private fun currentCodeSourceFile(): File? =
-        try {
-            UpdateInstaller::class.java.protectionDomain
-                ?.codeSource
-                ?.location
-                ?.toURI()
-                ?.let(::File)
-        } catch (e: Exception) {
-            logger.debug(
-                LogCategory.SYSTEM,
-                "Could not resolve the current code source",
-                mapOf("error" to (e.message ?: "unknown")),
-            )
-            null
-        }
+    private fun currentCodeSourceFile(): File? = CodeSourceLocation.fileFor(UpdateInstaller::class.java)
 
     /**
      * Get current application path for macOS .app bundle
@@ -1108,12 +1104,11 @@ object UpdateInstaller {
      */
     private fun getCurrentJarPath(): File? =
         try {
-            val jarPath =
-                UpdateInstaller::class.java.protectionDomain.codeSource.location
-                    .toURI()
-                    .path
-            val jarFile = File(jarPath)
-            if (jarFile.exists() && jarFile.name.endsWith(".jar")) {
+            // Resolved through CodeSourceLocation, not URI.path: on a network-share
+            // install the path component has already lost the server name, so the
+            // existence check below failed and the JAR update silently never ran.
+            val jarFile = CodeSourceLocation.fileFor(UpdateInstaller::class.java)
+            if (jarFile != null && jarFile.exists() && jarFile.name.endsWith(".jar")) {
                 jarFile
             } else {
                 null
@@ -1121,7 +1116,7 @@ object UpdateInstaller {
         } catch (e: Exception) {
             logger.debug(
                 LogCategory.SYSTEM,
-                "Could not determine current JAR path - not running from a JAR",
+                "Could not check the current JAR path",
                 mapOf("error" to e.toString()),
             )
             null
