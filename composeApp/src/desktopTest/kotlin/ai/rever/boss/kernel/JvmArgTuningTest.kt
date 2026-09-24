@@ -27,16 +27,21 @@ class JvmArgTuningTest {
 
     @Test
     fun `g m and k suffixes compare across units`() {
+        assertEquals(listOf("-Xmx512m"), mergeTunedJvmArgs(listOf("-Xmx256m"), listOf("-Xmx512m")))
         assertEquals(listOf("-Xmx4096m"), mergeTunedJvmArgs(listOf("-Xmx2g"), listOf("-Xmx4096m")))
         assertEquals(listOf("-Xmx2g"), mergeTunedJvmArgs(listOf("-Xmx2g"), listOf("-Xmx1048576k")))
     }
 
     @Test
     fun `an unparsable original heap is left alone`() {
-        // '-Xmx4t' is not valid JVM syntax. Its real size is unknown, so replacing it
-        // could shrink it: the merge keeps the operator's value.
-        val merged = mergeTunedJvmArgs(listOf("-Xmx4t"), listOf("-Xmx2048m"))
-        assertEquals(listOf("-Xmx4t"), merged)
+        val merged = mergeTunedJvmArgs(listOf("-Xmx4q"), listOf("-Xmx2048m"))
+        assertEquals(listOf("-Xmx4q"), merged)
+    }
+
+    @Test
+    fun `terabyte suffixes compare across case`() {
+        assertEquals(listOf("-Xmx4t"), mergeTunedJvmArgs(listOf("-Xmx4t"), listOf("-Xmx2048m")))
+        assertEquals(listOf("-Xmx3T"), mergeTunedJvmArgs(listOf("-Xmx2t"), listOf("-Xmx3T")))
     }
 
     @Test
@@ -60,6 +65,32 @@ class JvmArgTuningTest {
     fun `a tuned Xms below the final Xmx leaves Xmx alone`() {
         val merged = mergeTunedJvmArgs(listOf("-Xmx4096m"), listOf("-Xms1024m"))
         assertEquals(listOf("-Xmx4096m", "-Xms1024m"), merged)
+    }
+
+    @Test
+    fun `a tuned Xms is dropped without an explicit Xmx`() {
+        assertEquals(emptyList<String>(), mergeTunedJvmArgs(emptyList(), listOf("-Xms4g")))
+        assertEquals(listOf("-Xms1g"), mergeTunedJvmArgs(listOf("-Xms1g"), listOf("-Xms4g")))
+        assertEquals(listOf("-Xmx4q"), mergeTunedJvmArgs(listOf("-Xmx4q"), listOf("-Xms4g")))
+    }
+
+    @Test
+    fun `effective last heap flags are raised together`() {
+        val merged = mergeTunedJvmArgs(listOf("-Xmx8g", "-Xmx2g"), listOf("-Xms4g"))
+        assertEquals(listOf("-Xmx8g", "-Xmx4g", "-Xms4g"), merged)
+    }
+
+    @Test
+    fun `sub megabyte raises compare exactly and overflowing sizes do not replace`() {
+        assertEquals(listOf("-Xmx900k"), mergeTunedJvmArgs(listOf("-Xmx700k"), listOf("-Xmx900k")))
+        assertEquals(
+            listOf("-Xmx1073741825"),
+            mergeTunedJvmArgs(listOf("-Xmx1024m"), listOf("-Xmx1073741825")),
+        )
+        assertEquals(
+            listOf("-Xmx9000000000000000g"),
+            mergeTunedJvmArgs(listOf("-Xmx9000000000000000g"), listOf("-Xmx2048m")),
+        )
     }
 
     @Test

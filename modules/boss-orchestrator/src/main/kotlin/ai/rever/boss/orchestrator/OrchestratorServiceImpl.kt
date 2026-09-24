@@ -286,7 +286,6 @@ class OrchestratorServiceImpl(
                         RestartAction
                             .newBuilder()
                             .addAllJvmArgsOverride(outcome.jvmArgs)
-                            .putAllEnvOverride(outcome.env)
                             .build(),
                     )
             }

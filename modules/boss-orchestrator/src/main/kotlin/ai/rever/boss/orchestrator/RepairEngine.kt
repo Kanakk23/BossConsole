@@ -321,7 +321,6 @@ sealed class RepairOutcome {
     data class Restarted(
         val processId: String,
         val jvmArgs: List<String> = emptyList(),
-        val env: Map<String, String> = emptyMap(),
     ) : RepairOutcome()
 
     data class StateReset(

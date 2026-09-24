@@ -642,7 +642,7 @@ class KernelBootstrap(
             processId,
             restartCount + 1,
             process.config.maxRestarts,
-            if (jvmArgsOverride != null) ", tuned: $jvmArgsOverride" else "",
+            if (jvmArgsOverride != null) ", JVM tuning applied: ${config.jvmArgs != process.config.jvmArgs}" else "",
         )
         try {
             // spawn() registers the replacement itself. The manifest survives because a respawn
