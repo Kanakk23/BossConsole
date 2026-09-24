@@ -126,10 +126,9 @@ object WorkspaceFileManagerCommon {
      * gives two ids and one file, and a name typed into "Save Space..." bypasses
      * `uniqueWorkspaceName` altogether.
      *
-     * An id is already unique by construction (`LayoutWorkspace.generateId()`), so this makes the
-     * collision impossible rather than improbable, and it frees the name to be whatever the user
-     * wants. Copied from `WorkspaceServiceImpl.persistToDisk`, which has written `<id>.json` all
-     * along.
+     * [LayoutWorkspace.generateId] adds entropy to make accidental id collisions very unlikely.
+     * Deriving the path from that id lets Spaces share a display name without sharing a file.
+     * Copied from `WorkspaceServiceImpl.persistToDisk`, which has written `<id>.json` all along.
      *
      * It also closes a reserved-path collision as a class: `generateFileName("Last Session Set")`
      * resolved to `Last_Session_Set.json`, so a Space with that name overwrote the session record

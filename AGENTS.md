@@ -953,7 +953,9 @@ is now gated - packaging relies on those.
 `implementation(projects.pluginPlatform.pluginWorkspaceTypes)`, so its POM pins the sibling at the
 current project version. `publish-maven-central.yml` takes a free-form `packages` input, and
 dispatching bookmark-types alone would ship a POM requiring a `plugin-workspace-types` version that
-does not exist on Central. `all` is safe - workspace-types publishes first. BossConsole#81 tracks the
+does not exist on Central. Bookmark id generation also calls `UniqueIdsKt` at runtime, so an older
+workspace-types jar cannot substitute for the sibling version. `all` is safe - workspace-types
+publishes first. BossConsole#81 tracks the
 durable guard: diffing public members against the api jar `plugin-api-core` already downloads,
 covering all eight duplicated packages rather than this one field.
 
@@ -1600,8 +1602,8 @@ into "Save Space..." bypassed `uniqueWorkspaceName` entirely.
 ### The path is the id
 
 `WorkspaceFileManagerCommon.fileNameForId` - copied from `WorkspaceServiceImpl.persistToDisk`, which
-has written `<id>.json` all along. An id is unique by construction, so the collision is impossible
-rather than improbable, and the name is free to be whatever the user wants.
+has written `<id>.json` all along. A generated id has entropy, so accidental collisions are very
+unlikely, and the name is free to be whatever the user wants.
 
 - **Nothing is rewritten or renamed on disk by an upgrade.** `loadAllWorkspaces` already read every
   file's id out of its contents, so it now records an `id -> fileName` map as it scans and

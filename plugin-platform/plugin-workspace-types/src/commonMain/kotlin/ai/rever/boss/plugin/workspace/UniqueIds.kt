@@ -16,6 +16,7 @@ private const val ENTROPY_HEX_DIGITS = 16
  * one unaddressable or overwriting the other. The suffix carries 64 bits of entropy, so
  * same-millisecond mints stay distinct with the margin a UUID relies on; where the id is
  * about to key a map the caller can still check-and-regenerate against the keys present.
+ * These ids are for collision avoidance, not authorization or unguessable handles.
  */
 fun uniqueId(
     prefix: String,

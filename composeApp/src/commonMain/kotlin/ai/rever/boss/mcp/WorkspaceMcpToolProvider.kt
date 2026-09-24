@@ -976,7 +976,7 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         DashboardStatsManager.recordTerminalSession()
 
         val tabId = mountedTab.id
-        // openTerminalInActivePanelNow mints ids as "terminal-<timestamp>" (the only path this
+        // openTerminalInActivePanelNow mints ids as "terminal-<millis>-<entropy>" (the only path this
         // tool uses in production); the terminal's addressing keys on the part after the prefix.
         val terminalId = tabId.removePrefix("terminal-")
 
