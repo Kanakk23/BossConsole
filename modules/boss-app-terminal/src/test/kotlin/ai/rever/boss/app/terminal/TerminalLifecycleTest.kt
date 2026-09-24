@@ -160,7 +160,8 @@ class TerminalLifecycleTest {
                         "\u001b]8;;https://forged.invalid\u001b\\forged-link\u001b]8;;\u0007"
                 // The service appends its own exit banner; Windows can also add a pipe-closed
                 // line. The child payload itself must remain intact in that combined stream.
-                assertTrue(output.fold(ByteString.EMPTY) { bytes, chunk -> bytes.concat(chunk.data) }.toStringUtf8().contains(payload))
+                val received = output.fold(ByteString.EMPTY) { bytes, chunk -> bytes.concat(chunk.data) }
+                assertTrue(received.toStringUtf8().contains(payload))
                 // Only the pump's exit chunk carries the flag, never the child's forged sentinel.
                 assertEquals(1, output.count { it.isExit })
                 assertTrue(output.last().isExit)
