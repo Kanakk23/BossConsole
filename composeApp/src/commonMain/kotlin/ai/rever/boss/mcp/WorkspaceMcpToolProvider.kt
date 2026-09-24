@@ -613,9 +613,9 @@ object WorkspaceMcpToolProvider : McpToolProvider {
                 terminalInfo = outcome.info
             } else {
                 return McpToolResult(
-                        "Workspace '${workspace.id}' is open in window '$targetWindowId', but the terminal " +
-                            "tab it asked for could not be opened; call open_terminal to retry.",
-                        isError = true,
+                    "Workspace '${workspace.id}' is open in window '$targetWindowId', but the terminal " +
+                        "tab it asked for could not be opened; call open_terminal to retry.",
+                    isError = true,
                 )
             }
         }
