@@ -930,7 +930,8 @@ internal class McpToolRegistryCore(
                 }
             }
 
-    @Suppress("LongMethod") // Keep authorization and execution inside the same cancellation audit boundary.
+    // One boundary must cover denial, approval, execution, and the ledger write.
+    @Suppress("LongMethod", "CyclomaticComplexMethod")
     suspend fun invoke(
         toolName: String,
         arguments: String,

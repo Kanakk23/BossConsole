@@ -689,7 +689,7 @@ object WorkspaceMcpToolProvider : McpToolProvider, McpToolAliasProvider {
      * (`run_in_panel` and friends). Re-opening a path that is already running re-enters the
      * Space instead of minting a duplicate (see [matchExistingSpace]).
      */
-    @Suppress("ReturnCount")
+    @Suppress("ReturnCount", "LongMethod") // Keep target-window and Space apply decisions in one path.
     private suspend fun openWorkspaceByPath(
         rawPath: String,
         requestedWindowId: String?,
