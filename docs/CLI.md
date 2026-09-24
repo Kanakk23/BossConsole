@@ -307,6 +307,8 @@ $ echo $?
 
 PowerShell: use `--stdin` for JSON on Windows PowerShell 5.1 or legacy native argument passing, which can strip embedded quotes from `--args`. PowerShell 7.3+ uses Standard argument passing in this launcher. Packaged Windows console I/O still requires platform verification.
 
+cmd: `boss.bat` refuses an argument with a double quote inside it, because cmd would run what follows the quote (#1617). Quote whole arguments only. The arguments after `status`, `doctor`, `mcp` and `completion` are passed on untouched, so `boss mcp invoke search_workspace --args {"query":"x"}` works. For a `terminal -c` command that needs a quote, use `boss.ps1`.
+
 Registry access before sign-in follows the existing host policy: tools without required permissions or an admin requirement remain available. For an admin operator, the per-tool disabled switch is the remaining registry access control.
 
 4. **Secret references**: an argument may carry `{{secret:<id>}}` (or `.username` / `.notes`). `boss mcp invoke` takes the same governed path as an attached agent: the running BOSS window prompts, naming the secret and the tool, and the value is substituted host-side after approval. The CLI output is the tool's result with resolved values scrubbed; the reference, never the value, is what the ledger records. See [MCP_SECRET_REFERENCES.md](MCP_SECRET_REFERENCES.md).

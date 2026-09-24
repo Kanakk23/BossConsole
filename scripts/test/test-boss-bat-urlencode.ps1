@@ -96,6 +96,26 @@ Assert-True ($urlencodeCmd -match '\[string\]') `
 Assert-True ($urlencodeCmd -match "if\s*\(\s*-not\s+\`$v\s*\)\s*\{\s*''\s*\}") `
     ':urlencode guards an empty value before calling [System.Uri]::EscapeDataString'
 
+# A quote inside an argument must be refused before anything reads one
+# (#1617). Every read wraps the argument in quotes - if "%~1"=="" - so a
+# quote in the value closed that quote early and ran the rest as a command.
+# The raw text is captured on an echoed REM line and checked first; any read
+# of %1, %~1 or %* above that check would be a way around it.
+$argReadRegex = '%~?[0-9*]|%~[a-z]+[0-9]'
+$captureIdx = -1
+$checkIdx = -1
+$firstReadIdx = -1
+for ($i = 0; $i -lt $batLines.Count; $i++) {
+    $line = $batLines[$i]
+    if ($captureIdx -lt 0 -and $line -match '^\s*for %%b in \(1\) do rem \* #%\*#\s*$') { $captureIdx = $i; continue }
+    if ($checkIdx -lt 0 -and $line -match '^\s*call :check_arg_quotes \|\| exit /b 1\s*$') { $checkIdx = $i }
+    if ($firstReadIdx -lt 0 -and $line -notmatch '^\s*REM\b' -and $line -match $argReadRegex) { $firstReadIdx = $i }
+}
+Assert-True ($captureIdx -ge 0) 'the raw arguments are captured on an echoed REM line (#1617)'
+Assert-True ($checkIdx -gt $captureIdx) 'call :check_arg_quotes runs after the capture (#1617)'
+Assert-True ($firstReadIdx -gt $checkIdx) `
+    "no argument is read before :check_arg_quotes runs (first read: line $($firstReadIdx + 1): $(if ($firstReadIdx -ge 0) { $batLines[$firstReadIdx].Trim() }))"
+
 # --- Live behavior checks (need cmd.exe; skipped elsewhere) --------------
 
 if ($env:OS -ne 'Windows_NT' -or -not (Get-Command cmd.exe -ErrorAction SilentlyContinue)) {
@@ -411,6 +431,189 @@ try {
     }
 } finally {
     Remove-Item $oldFileProbe -ErrorAction SilentlyContinue
+}
+
+# --- A quote inside an argument (#1617) ------------------------------------
+# Runs the whole boss.bat (start "" swapped for echo, so nothing opens) the
+# way a caller's command line reaches it. Each payload keeps its & quoted as
+# far as the caller's own parse goes - an empty .bat given the same line runs
+# nothing - but boss.bat's first read turned `if "%~1"==""` into
+# `if "x"=="x" echo ... & rem ""==""` and ran the echo.
+$quoteDir = Join-Path $env:TEMP ("boss-quote-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $quoteDir | Out-Null
+$quoteMarker = Join-Path $quoteDir 'quote-marker.txt'
+# Capture directories that were here before this section, so the leftover
+# check at the end only judges the ones these calls made.
+$argsDirsBefore = @(Get-ChildItem $env:TEMP -Directory -Filter 'boss-args-*' -Name -ErrorAction SilentlyContinue)
+$neutralBat = (Get-Content $batPath -Raw) -replace "`r?`n", "`r`n" -replace 'start "" ', 'echo '
+$quoteBat = Join-Path $quoteDir 'boss.bat'
+Set-Content -Path $quoteBat -Value $neutralBat -Encoding Ascii -NoNewline
+# The same script without the check, to show the payloads do fire on it.
+$uncheckedBat = Join-Path $quoteDir 'boss-unchecked.bat'
+Set-Content -Path $uncheckedBat -Encoding Ascii -NoNewline `
+    -Value ($neutralBat -replace '(?m)^call :check_arg_quotes \|\| exit /b 1(?=\r?$)', 'REM check removed')
+
+function Invoke-BossLine {
+    param([string]$Bat, [string]$ArgLine)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new('cmd.exe')
+    # /s: cmd drops the outer quotes and runs `"<bat>" <ArgLine>` as typed.
+    $psi.Arguments = '/d /s /c ""' + $Bat + '" ' + $ArgLine + '"'
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.WorkingDirectory = $quoteDir
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $out = $p.StandardOutput.ReadToEndAsync()
+    $err = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit(30000)) { $p.Kill(); return 'TIMEOUT' }
+    return ($out.Result + $err.Result)
+}
+
+$quotePayloads = @(
+    'x"=="x" echo side-effect>quote-marker.txt & rem "',
+    'url x"=="x" echo side-effect>quote-marker.txt & rem "',
+    'file x"=="x" echo side-effect>quote-marker.txt & rem "',
+    'ab" == "ab" echo side-effect>quote-marker.txt & rem "'
+)
+try {
+    foreach ($payload in $quotePayloads) {
+        Remove-Item $quoteMarker -ErrorAction SilentlyContinue
+        $quoteOut = Invoke-BossLine $quoteBat $payload
+        Assert-True (-not (Test-Path $quoteMarker)) "a quote inside the argument runs nothing: boss $payload"
+        Assert-True ($quoteOut -match 'an argument has a double quote inside it') `
+            "boss.bat refuses the argument with a reason (got: $($quoteOut.Trim()))"
+
+        Remove-Item $quoteMarker -ErrorAction SilentlyContinue
+        Invoke-BossLine $uncheckedBat $payload | Out-Null
+        Assert-True (Test-Path $quoteMarker) "mutation check: without :check_arg_quotes the payload runs: boss $payload"
+    }
+
+    # Whole-argument quotes, and characters that only look dangerous, still route.
+    $plainUrl = Invoke-BossLine $quoteBat 'url "https://example.com/a?b=1&c=2"'
+    Assert-True ($plainUrl -match [regex]::Escape('"boss://url?url=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1%26c%3D2"')) `
+        "a quoted URL with & still routes (got: $($plainUrl.Trim()))"
+    $plainTerm = Invoke-BossLine $quoteBat 'terminal -c "dir /b"'
+    Assert-True ($plainTerm -match [regex]::Escape('"boss://terminal?command=dir%20%2Fb"')) `
+        "two arguments, one quoted, still route (got: $($plainTerm.Trim()))"
+    $plainBang = Invoke-BossLine $quoteBat 'url "https://a.com/x!y#frag"'
+    Assert-True ($plainBang -match [regex]::Escape('"boss://url?url=https%3A%2F%2Fa.com%2Fx!y%23frag"')) `
+        "! and # survive the quote check (got: $($plainBang.Trim()))"
+    $noArgs = Invoke-BossLine $quoteBat ''
+    Assert-True ($noArgs -match 'Error: No command specified') "no arguments still reports a missing command (got: $($noArgs.Trim()))"
+
+    # status, doctor, mcp and completion hand the rest to BOSS.exe as a bare
+    # %*, never through %~N, so a JSON argument keeps its quotes
+    # (docs/CLI.md: boss mcp invoke <tool> --args '{...}'). A stub stands in
+    # for BOSS.exe and prints what it was given.
+    $stubExe = Join-Path $quoteDir 'fake-boss.cmd'
+    Set-Content -Path $stubExe -Value "@echo FORWARDED:%*`r`n" -Encoding Ascii -NoNewline
+    $env:BOSS_EXE = $stubExe
+    try {
+        foreach ($line in @(
+            'mcp invoke search_workspace --args {"query":"x"}',
+            '"mcp" invoke search_workspace --args {"query":"x"}',
+            'status --format "json"',
+            'completion "powershell"'
+        )) {
+            $forwarded = Invoke-BossLine $quoteBat $line
+            Assert-True ($forwarded.Trim() -ceq "FORWARDED:$line") "a forwarded command keeps its quoted arguments: boss $line (got: $($forwarded.Trim()))"
+        }
+        # cmd drops spaces in front of the first argument from %*, so they
+        # cannot hide the command name from the check.
+        $spaced = Invoke-BossLine $quoteBat '  mcp invoke search_workspace --args {"query":"x"}'
+        Assert-True ($spaced -match [regex]::Escape('FORWARDED:mcp invoke search_workspace --args {"query":"x"}')) `
+            "a forwarded command after leading spaces keeps its quoted arguments (got: $($spaced.Trim()))"
+        # What makes skipping arguments 2..N safe: they reach BOSS.exe only
+        # through %*, so a payload there is data. If a forwarded command ever
+        # reads %~2, this fails.
+        Remove-Item $quoteMarker -ErrorAction SilentlyContinue
+        $fwdPayload = 'mcp x"=="x" echo side-effect>quote-marker.txt & rem "'
+        $fwdOut = Invoke-BossLine $quoteBat $fwdPayload
+        Assert-True (-not (Test-Path $quoteMarker)) "a payload in a forwarded argument is data, not a command: boss $fwdPayload"
+        Assert-True ($fwdOut -match 'FORWARDED:') "it reaches the stub rather than being refused (got: $($fwdOut.Trim()))"
+        # The first argument is read through %~1 whatever the command, and
+        # plugin reads %~2 and %~3 before it forwards, so both stay strict.
+        foreach ($payload in @(
+            'mcp"=="mcp" echo side-effect>quote-marker.txt & rem "',
+            'plugin x"=="x" echo side-effect>quote-marker.txt & rem "'
+        )) {
+            Remove-Item $quoteMarker -ErrorAction SilentlyContinue
+            $strictOut = Invoke-BossLine $quoteBat $payload
+            Assert-True (-not (Test-Path $quoteMarker)) "still refused: boss $payload"
+            Assert-True ($strictOut -match 'an argument has a double quote inside it') "still refused with a reason: boss $payload"
+        }
+    } finally {
+        Remove-Item Env:\BOSS_EXE -ErrorAction SilentlyContinue
+    }
+
+    # The capture writes %* onto an echoed REM line. An escaped redirection,
+    # pipe or & reaches boss.bat unquoted; none of them may act there.
+    foreach ($line in @(
+        'a^>capture-gt.txt',
+        'a^>^>capture-gt.txt',
+        'a^|echo side-effect^>quote-marker.txt',
+        'a^&echo side-effect^>quote-marker.txt',
+        'a^<capture-lt.txt'
+    )) {
+        Remove-Item $quoteMarker -ErrorAction SilentlyContinue
+        $metaOut = Invoke-BossLine $quoteBat $line
+        $stray = @(Get-ChildItem $quoteDir -Name | Where-Object { $_ -notin @('boss.bat', 'boss-unchecked.bat', 'fake-boss.cmd') })
+        Assert-True ($stray.Count -eq 0) "the capture line does not act on: boss $line (created: $($stray -join ', '))"
+        Assert-True ($metaOut -match 'Error: Could not determine type for:') "boss $line still reaches detection (got: $($metaOut.Trim()))"
+    }
+
+    # Calls started together each check their own arguments: each claims its
+    # own capture directory, so none can read another's.
+    $batch = @(0..7 | ForEach-Object {
+        $line = if ($_ % 2) { "url `"https://example.com/n$_`"" } else { "x`"==`"x`" echo side-effect>quote-marker-$_.txt & rem `"" }
+        $psi = [System.Diagnostics.ProcessStartInfo]::new('cmd.exe')
+        $psi.Arguments = '/d /s /c ""' + $quoteBat + '" ' + $line + '"'
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.WorkingDirectory = $quoteDir
+        $p = [System.Diagnostics.Process]::Start($psi)
+        [pscustomobject]@{ N = $_; Proc = $p; Out = $p.StandardOutput.ReadToEndAsync() }
+    })
+    foreach ($b in $batch) {
+        [void]$b.Proc.WaitForExit(60000)
+        $got = $b.Out.Result
+        if ($b.N % 2) {
+            Assert-True ($got -match [regex]::Escape("boss://url?url=https%3A%2F%2Fexample.com%2Fn$($b.N)")) `
+                "parallel call $($b.N) routed its own URL (got: $($got.Trim()))"
+        } else {
+            Assert-True (-not (Test-Path (Join-Path $quoteDir "quote-marker-$($b.N).txt"))) "parallel call $($b.N) ran nothing"
+            Assert-True ($got -match 'an argument has a double quote inside it') "parallel call $($b.N) was refused (got: $($got.Trim()))"
+        }
+    }
+    # A capture directory that is already there is never read. A copy that
+    # draws the same name every time stands in for two calls that drew the
+    # same %RANDOM% values: it finds the name taken by a directory holding
+    # someone else's arguments, and refuses rather than check those.
+    $fixedName = 'boss-args-1617fixed'
+    $fixedBat = Join-Path $quoteDir 'boss-fixed-name.bat'
+    Assert-True ($neutralBat.Contains('boss-args-%RANDOM%%RANDOM%%RANDOM%')) 'the capture directory name is where the collision check expects it'
+    Set-Content -Path $fixedBat -Encoding Ascii -NoNewline `
+        -Value ($neutralBat.Replace('boss-args-%RANDOM%%RANDOM%%RANDOM%', $fixedName))
+    $takenDir = Join-Path $env:TEMP $fixedName
+    New-Item -ItemType Directory -Path $takenDir -Force | Out-Null
+    try {
+        Set-Content -Path (Join-Path $takenDir 'args.txt') -Encoding Ascii -Value 'rem * #url "https://example.com/other-call"# '
+        Remove-Item $quoteMarker -ErrorAction SilentlyContinue
+        $takenOut = Invoke-BossLine $fixedBat 'x"=="x" echo side-effect>quote-marker.txt & rem "'
+        Assert-True (-not (Test-Path $quoteMarker)) 'a taken capture directory does not let a payload through'
+        Assert-True ($takenOut -match 'could not read the command-line arguments') `
+            "a taken capture directory is refused, not read (got: $($takenOut.Trim()))"
+        Assert-True ($takenOut -notmatch 'other-call') 'the other call''s arguments are never used'
+    } finally {
+        Remove-Item $takenDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $leftover = @(Get-ChildItem $env:TEMP -Directory -Filter 'boss-args-*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notin $argsDirsBefore })
+    Assert-True ($leftover.Count -eq 0) "every call removed its capture directory (left: $(($leftover | ForEach-Object Name) -join ', '))"
+} finally {
+    Remove-Item $quoteDir -Recurse -ErrorAction SilentlyContinue
 }
 
 Write-Output 'ALL URLencode tests passed'

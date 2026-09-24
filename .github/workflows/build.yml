@@ -234,6 +234,15 @@ jobs:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v7
 
+      - name: 🧪 boss.bat live cmd.exe probes (Windows)
+        # The script-tests job runs this script on Ubuntu, where only its
+        # source-shape checks can run. Here the live probes and their mutation
+        # checks run on the real cmd.exe (#1617). A few seconds, and it
+        # runs before JDK and Gradle setup so a failure reports first.
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/test/test-boss-bat-urlencode.ps1
+
       - name: ☕ Setup JDK
         uses: actions/setup-java@v6.0.0
         with:
