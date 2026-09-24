@@ -45,27 +45,18 @@ internal fun shouldApplyOnFreshStart(
 internal suspend fun applyDefaultWorkspaceOnFreshStart(
     splitViewState: SplitViewState,
     windowProjectState: WindowProjectState,
+    workspace: LayoutWorkspace? = WorkspaceSettingsManager.getDefaultWorkspace(),
 ): LayoutWorkspace? {
     val selectedProject = windowProjectState.selectedProject.value
     val hasProject = selectedProject.path.isNotEmpty()
-    val workspace = WorkspaceSettingsManager.getDefaultWorkspace()
     if (workspace == null || !shouldApplyOnFreshStart(workspace, hasProject)) return null
-
-    // loadWorkspace FIRST, exactly as the Last Session path does and for the same reason:
-    // it sets currentWorkspace, which is what makes the fresh-install fallback timeout
-    // stand down. applyWorkspace can outlast that timeout (it waits for plugin tab types
-    // to register, and the timeout defaults to 1000ms), and a timeout firing mid-apply
-    // would clearAllPanels over the tabs this apply is still creating and mark handlers
-    // ready early - the very failure the Last Session ordering comment guards against.
-    workspaceManager.loadWorkspace(workspace)
 
     // restoreProject = false: the workspace carries no project and there is none to
     // restore, so nothing should touch the window's project selection here.
-    //
-    // A refusal is a failed apply, not an applied one: the load above stands either way -
-    // the manager must still claim SOMETHING so the fallback timeout stays stood down -
-    // but the caller is told nothing was applied.
+    // The caller marks restoration as started before this suspends, so the timeout cannot
+    // start another apply. Claim the Space only after its layout has actually landed.
     return if (applyWorkspace(workspace, splitViewState, windowProjectState, restoreProject = false)) {
+        workspaceManager.loadWorkspace(workspace)
         workspace
     } else {
         null
