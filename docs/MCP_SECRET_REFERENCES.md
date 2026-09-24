@@ -52,7 +52,7 @@ secret's use visible at the approval site rather than hidden behind an earlier `
 
 - `<uuid>` is the id `secrets_list` or `secret_search` returns. Upper or lower case hex.
 - References are recognised inside JSON **string values** at any depth, including inside arrays
-  and nested objects. They are never recognised in keys.
+  and nested objects. A reference marker in a JSON key refuses the call; keys are never substituted.
 - Anything else of the shape `{{secret:...}}` is malformed and refuses the whole call. A tool is
   never handed placeholder text it might mistake for a value.
 - One call may carry several references. They resolve all or nothing.
