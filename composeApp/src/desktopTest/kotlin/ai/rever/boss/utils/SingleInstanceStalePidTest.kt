@@ -121,6 +121,9 @@ class SingleInstanceStalePidTest {
 
         val deadPid = getTerminatedPid()
         assertFalse(isProcessAlive(deadPid), "Terminated process PID should not be alive")
+
+        assertTrue(isProcessAlive(0), "Non-positive PID 0 must return true to prevent false dead verdict")
+        assertTrue(isProcessAlive(-1), "Negative PID -1 must return true to prevent false dead verdict")
     }
 
     @Test
@@ -316,6 +319,43 @@ class SingleInstanceStalePidTest {
             // Verify that no socket connection or exchange was attempted against the endpoint
             assertThrows<SocketTimeoutException> {
                 serverSocket.accept()
+            }
+        }
+    }
+
+    @Test
+    fun `symlink descriptor falls back to ping and is not reclaimed when answering`() {
+        val currentPid = ProcessHandle.current().pid()
+        val token = "j".repeat(TOKEN_HEX_LENGTH)
+        ServerSocket(0, 10, InetAddress.getLoopbackAddress()).use { serverSocket ->
+            val liveDescriptor =
+                InstanceDescriptor(
+                    transport = SingleInstanceTransport.TCP,
+                    endpoint = serverSocket.localPort.toString(),
+                    token = token,
+                    pid = currentPid,
+                )
+
+            val realTarget = File(tempDir.toFile(), "other-instance").toPath()
+            Files.writeString(realTarget, liveDescriptor.encode())
+            Files.createDirectories(runtimeDirPath())
+            Files.deleteIfExists(descriptorPath())
+
+            try {
+                Files.createSymbolicLink(descriptorPath(), realTarget)
+            } catch (_: Exception) {
+                // Symlink creation may require elevation on Windows; skip if not supported
+                return
+            }
+
+            val serverThread = startFakePingServer(serverSocket)
+            try {
+                // Symlink means isOwnedByCurrentUser returns false, preventing dead-PID assumption
+                val acquired = SingleInstanceManager.acquireLock()
+                assertFalse(acquired, "acquireLock must not reclaim when descriptor is symlinked and answering")
+            } finally {
+                serverSocket.close()
+                serverThread.join(1000)
             }
         }
     }

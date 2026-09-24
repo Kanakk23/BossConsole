@@ -30,6 +30,7 @@ import java.nio.channels.ServerSocketChannel
 import java.nio.channels.SocketChannel
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermission
@@ -254,10 +255,12 @@ internal fun parseInstanceDescriptor(text: String): InstanceDescriptor? {
  * Across containers, VMs, or network filesystems (e.g. NFS ~/.boss), a foreign PID may appear
  * nonexistent locally, causing fallback to ping when the safe default (true) is used on error.
  */
-internal fun isProcessAlive(pid: Long): Boolean =
-    runCatching {
+internal fun isProcessAlive(pid: Long): Boolean {
+    if (pid <= 0) return true
+    return runCatching {
         ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
     }.getOrDefault(true)
+}
 
 /**
  * One request read off the channel.
@@ -574,6 +577,29 @@ private object SingleInstanceFiles {
             null
         }
     }
+
+    /**
+     * Checks whether [descriptorFile] is owned by the current user.
+     * Returns false if the file is a symlink, cannot be inspected, or is owned by another user,
+     * ensuring we never infer a dead-PID verdict across user or privilege boundaries.
+     */
+    fun isOwnedByCurrentUser(): Boolean =
+        runCatching {
+            val path = descriptorFile.toPath()
+            if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+                true
+            } else if (Files.isSymbolicLink(path)) {
+                false
+            } else {
+                val expectedOwner = System.getProperty("user.name")
+                val actualOwner = Files.getOwner(path, LinkOption.NOFOLLOW_LINKS)?.name
+                if (expectedOwner == null || actualOwner == null) {
+                    false
+                } else {
+                    actualOwner == expectedOwner || actualOwner.endsWith("\\$expectedOwner")
+                }
+            }
+        }.getOrDefault(false)
 
     /**
      * Withdraws the descriptor, then the socket file. That order matters: a
@@ -1193,8 +1219,10 @@ object SingleInstanceManager {
      */
     fun isAnotherInstanceRunning(): Boolean =
         SingleInstanceFiles.read()?.let { existing ->
-            (existing.pid == null || isProcessAlive(existing.pid)) &&
-                SingleInstanceWire.respondsToPing(existing)
+            val isDeadPid = existing.pid != null &&
+                SingleInstanceFiles.isOwnedByCurrentUser() &&
+                !isProcessAlive(existing.pid)
+            !isDeadPid && SingleInstanceWire.respondsToPing(existing)
         } ?: false
 
     /**
@@ -1212,7 +1240,11 @@ object SingleInstanceManager {
             // A dead PID proves the descriptor is stale, so skip the potentially slow ping.
             // A live PID does not prove this is the BossConsole instance because PIDs can be
             // reused; the channel-token ping remains the authoritative ownership check.
-            val isDeadPid = existing.pid != null && !isProcessAlive(existing.pid)
+            // If the descriptor is not owned by the current user, fall back to the ping check
+            // rather than assuming the PID is dead across user boundaries.
+            val isDeadPid = existing.pid != null &&
+                SingleInstanceFiles.isOwnedByCurrentUser() &&
+                !isProcessAlive(existing.pid)
             if (!isDeadPid && SingleInstanceWire.respondsToPing(existing)) {
                 logger.info(LogCategory.SYSTEM, "Another instance is answering on the single-instance channel")
                 return false
@@ -1683,7 +1715,10 @@ object SingleInstanceManager {
         val target =
             SingleInstanceFiles.read()
                 ?: return ReloadResult.HostOffline("BossConsole is not running.")
-        if (target.pid != null && !isProcessAlive(target.pid)) {
+        val isDeadPid = target.pid != null &&
+            SingleInstanceFiles.isOwnedByCurrentUser() &&
+            !isProcessAlive(target.pid)
+        if (isDeadPid) {
             return ReloadResult.HostOffline("BossConsole is offline (instance process is not running)")
         }
         val message = "$PROTOCOL_VERSION ${target.token} $VERB_PLUGIN_DEV_RELOAD $pluginId"
@@ -1694,7 +1729,7 @@ object SingleInstanceManager {
                     message,
                     timeoutMs = timeoutMs.toLong(),
                     maxResponseBytes = MAX_RESPONSE_BYTES,
-                ) ?: return if (target.pid != null && !isProcessAlive(target.pid)) {
+                ) ?: return if (isDeadPid) {
                     ReloadResult.HostOffline("BossConsole is offline (instance process is not running)")
                 } else if (SingleInstanceWire.respondsToPing(target)) {
                     ReloadResult.TimedOut(
