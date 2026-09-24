@@ -40,7 +40,7 @@ class McpArgumentSanitizerUriCredentialTest {
             "curl -u [REDACTED] https://api.example.invalid/health",
             command("curl -u admin:hunter2 https://api.example.invalid/health"),
         )
-        assertEquals("curl --user [REDACTED] https://x", command("curl --user=admin:hunter2 https://x"))
+        assertEquals("curl --user=[REDACTED] https://x", command("curl --user=admin:hunter2 https://x"))
         assertEquals("curl -u [REDACTED] https://x", command("curl -u 'admin:hunter two' https://x"))
     }
 

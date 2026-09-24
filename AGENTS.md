@@ -2309,8 +2309,8 @@ later change is most likely to want to undo are recorded here so they are undone
   prompt. A handler must never receive placeholder text it might mistake for a value; that is
   also why `secretReferencesEnabled = false` refuses rather than passes through.
 - **Substitution rewrites the JSON tree and rebuilds `McpToolArgs` through `parseMcpToolArgs`**,
-  so the scalar map and the raw JSON a handler may parse itself cannot disagree. Keys are never
-  scanned or substituted.
+  so the scalar map and the raw JSON a handler may parse itself cannot disagree. Reference markers
+  in keys refuse the call; keys are never substituted.
 - **The scrubber is defense in depth and is switchable** (`resultScrubbingEnabled`). It replaces
   exact, JSON-escaped and percent-encoded forms of values of 8+ characters; it cannot see a hash,
   a base64 encoding or a case change, and the docs table says so. The invariant tests run with it
