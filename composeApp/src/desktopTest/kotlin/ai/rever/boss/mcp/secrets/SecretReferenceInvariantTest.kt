@@ -497,7 +497,7 @@ class SecretReferenceInvariantTest {
         }
 
     @Test
-    fun `INV7 - a deeply nested payload still leaves its ledger record`() =
+    fun `INV7 - a deeply nested payload is refused and still leaves its ledger record`() =
         runBlocking {
             val h = Harness(CountingVault(listOf(record)))
             var called = false
@@ -512,6 +512,12 @@ class SecretReferenceInvariantTest {
             assertTrue(result.isError, result.text)
             assertFalse(called)
             assertEquals(1, h.ledger.recentOperations.value.size)
+            assertEquals(
+                McpApprovalDisposition.INVALID_ARGUMENTS,
+                h.ledger.recentOperations.value
+                    .single()
+                    .approvalDisposition,
+            )
         }
 
     @Test
