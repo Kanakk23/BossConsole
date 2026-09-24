@@ -126,7 +126,11 @@ class ContentSearchService(
             val openPaths = openBufferLookupSet(projectPath, rawOpenPaths)
             val discovery = ProjectFileDiscovery.discover(projectPath, acceptsPath)
             if (discovery.incompleteReason != null) {
-                throw ProjectDiscoveryIncompleteException(discovery.incompleteReason)
+                logger.warn(
+                    LogCategory.FILE,
+                    "Project file discovery was incomplete",
+                    mapOf("path" to projectPath, "reason" to discovery.incompleteReason),
+                )
             }
             for (projectFile in discovery.files) {
                 ensureActive()
@@ -158,8 +162,9 @@ class ContentSearchService(
                         file.absolutePath,
                     )
                 val key = cacheKeyArg + if (buffer != null) "|buf" else "|disk"
+                if (buffer == null && file.length() > MAX_FILE_SIZE) continue
                 val text = buffer?.content ?: readTextAtMost(file).textOrNull() ?: continue
-                if (!isWithinContentLimit(text)) continue
+                if (buffer != null && !isWithinContentLimit(text)) continue
                 // The content fingerprint covers unsaved buffer edits, close/reopen, and disk
                 // rewrites even where mtimes have coarse resolution. Do not use hashCode here:
                 // its ordinary collisions (for example, "Aa" and "BB") can serve stale hits.
@@ -510,17 +515,34 @@ class ContentSearchService(
         isCancelled: () -> Boolean,
     ): List<FileMatch>? {
         return try {
-            if ('\u0000' in text) return null
+            if ('\u0000' in text || '\uFFFD' in text) return null
             val lineMap = LineMap(text)
             val matches = mutableListOf<FileMatch>()
             // The matcher reads through [InterruptibleText] rather than the raw
             // string, so a cancel lands inside a wedged pattern instead of at the
             // next suspension point.
-            val searchable =
-                InterruptibleText(text, isCancelled, System.nanoTime() + MAX_REGEX_MATCH_NANOS)
+            val searchable = InterruptibleText(text, isCancelled)
             var searchFrom = 0
             while (searchFrom <= text.length && matches.size < MAX_MATCHES_PER_FILE) {
-                val m = regex.find(searchable, searchFrom) ?: break
+                searchable.resetDeadline(MAX_REGEX_MATCH_NANOS)
+                val m =
+                    try {
+                        regex.find(searchable, searchFrom) ?: break
+                    } catch (
+                        @Suppress("SwallowedException")
+                        e: RegexMatchTimeoutException,
+                    ) {
+                        logger.warn(
+                            LogCategory.FILE,
+                            "Skipping further matches in file whose regex match exceeded time budget",
+                            mapOf(
+                                "path" to file.path,
+                                "budgetMs" to MAX_REGEX_MATCH_MILLIS,
+                                "matchesFound" to matches.size,
+                            ),
+                        )
+                        break
+                    }
                 matches.add(
                     FileMatch(
                         path = relativePath,
@@ -541,18 +563,6 @@ class ContentSearchService(
             // search, not a scan error: rethrow so the withContext unwinds
             // instead of the loop quietly moving on to the next file.
             throw e
-        } catch (
-            // A partial result must never look complete. The provider API has no incomplete
-            // result type, so deadline expiry fails the request explicitly.
-            @Suppress("SwallowedException")
-            e: RegexMatchTimeoutException,
-        ) {
-            logger.warn(
-                LogCategory.FILE,
-                "Skipping file whose regex match exceeded its time budget",
-                mapOf("path" to file.path, "budgetMs" to MAX_REGEX_MATCH_MILLIS),
-            )
-            throw ProjectSearchIncompleteException("Regex matching exceeded its per-file time budget: ${file.path}")
         } catch (e: Exception) {
             null
         }
@@ -1156,11 +1166,23 @@ object GlobalEditorBufferBridge : EditorBufferBridge {
 internal class InterruptibleText(
     private val text: String,
     private val isCancelled: () -> Boolean,
-    private val deadlineNanos: Long = Long.MAX_VALUE,
+    deadlineNanos: Long? = null,
     private val onCharacterAccess: (() -> Unit)? = null,
 ) : CharSequence {
     override val length: Int
         get() = text.length
+
+    private var accessCount = 0
+    private var currentDeadlineNanos: Long? =
+        if (deadlineNanos == null || deadlineNanos == 0L || deadlineNanos == Long.MAX_VALUE) {
+            null
+        } else {
+            deadlineNanos
+        }
+
+    fun resetDeadline(budgetNanos: Long) {
+        currentDeadlineNanos = System.nanoTime() + budgetNanos
+    }
 
     override fun get(index: Int): Char {
         checkBudget()
@@ -1179,8 +1201,18 @@ internal class InterruptibleText(
 
     private fun checkBudget() {
         onCharacterAccess?.invoke()
-        if (isCancelled()) throw CancellationException("search cancelled")
-        if (System.nanoTime() - deadlineNanos >= 0) throw RegexMatchTimeoutException()
+        if (accessCount == 0 || (accessCount and ACCESS_CHECK_MASK) == 0) {
+            if (isCancelled()) throw CancellationException("search cancelled")
+            val deadline = currentDeadlineNanos
+            if (deadline != null && System.nanoTime() - deadline >= 0) {
+                throw RegexMatchTimeoutException()
+            }
+        }
+        accessCount++
+    }
+
+    companion object {
+        private const val ACCESS_CHECK_MASK = 0x3FF
     }
 }
 

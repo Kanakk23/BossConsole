@@ -334,19 +334,40 @@ class ContentSearchServiceTest {
     }
 
     @Test
-    fun `a hostile regex reports an incomplete search instead of an empty result`(
+    fun `a hostile regex skips the timed-out file and preserves results from other files`(
         @TempDir dir: File,
     ): Unit =
         runBlocking {
-            File(dir, "long.txt").writeText("a".repeat(40_000) + "b")
+            File(dir, "long.txt").writeText("a".repeat(40_000) + "b\n")
+            File(dir, "good.txt").writeText("needle\n")
             val service = ContentSearchService(projectPathProvider = { dir.absolutePath })
 
-            assertFailsWith<ProjectSearchIncompleteException> {
+            val results =
                 withTimeout(5_000) {
-                    service.searchInProject(query = "(a+)+$", isRegex = true)
+                    service.searchInProject(query = "needle|(a+)+$", isRegex = true)
                 }
-            }
+
+            assertEquals(listOf("good.txt"), results.map { it.path })
         }
+
+    @Test
+    fun `hostile regex in replace is returned as a per-file timeout error`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        File(dir, "long.txt").writeText("a".repeat(40_000) + "b\n")
+        val summary =
+            ContentSearchService(projectPathProvider = { dir.absolutePath }).replaceInProject(
+                query = "(a+)+$",
+                replacement = "x",
+                files = listOf("long.txt"),
+                isRegex = true,
+                dryRun = true,
+            )
+
+        assertEquals(0, summary.totalReplacements)
+        val fileResult = summary.files.single()
+        assertTrue(fileResult.error.orEmpty().contains("time budget"))
+    }
 
     @Test
     fun `a file stream that grows beyond the read limit is rejected while reading`() {

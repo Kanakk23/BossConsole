@@ -170,6 +170,7 @@ fun GlobalSearchDialog(
     val dialogState = remember(projectPath) { SpotlightDialogState() }
     val indexedFiles by fileIndexer.indexedFiles.collectAsState()
     val isIndexing by fileIndexer.isIndexing.collectAsState()
+    val indexError by fileIndexer.indexError.collectAsState()
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val searchFieldFocusRequester = remember { FocusRequester() }
@@ -412,6 +413,7 @@ fun GlobalSearchDialog(
                     SearchDialogHeader(
                         fileCount = indexedFiles.size,
                         isIndexing = isIndexing,
+                        indexError = indexError,
                         onClose = onDismiss,
                     )
                 }
@@ -513,6 +515,7 @@ fun GlobalSearchDialog(
 private fun SearchDialogHeader(
     fileCount: Int,
     isIndexing: Boolean,
+    indexError: String?,
     onClose: () -> Unit,
 ) {
     Row(
@@ -567,10 +570,18 @@ private fun SearchDialogHeader(
                         )
                     }
                 }
+                val indexStatusText =
+                    when {
+                        isIndexing -> "Indexing files..."
+                        indexError != null -> "Index error: $indexError"
+                        else -> "$fileCount files indexed"
+                    }
                 Text(
-                    text = if (isIndexing) "Indexing files..." else "$fileCount files indexed",
-                    color = BossTheme.colors.textSecondary,
+                    text = indexStatusText,
+                    color = if (indexError != null) BossTheme.colors.warn else BossTheme.colors.textSecondary,
                     fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
