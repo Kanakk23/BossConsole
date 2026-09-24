@@ -4,6 +4,7 @@ import ai.rever.boss.components.common.rememberFaviconLoader
 import ai.rever.boss.components.model.DraggingTabInfo
 import ai.rever.boss.components.model.TabDraggableComponent
 import ai.rever.boss.components.model.TabDropResult
+import ai.rever.boss.components.model.detectTabDragGestures
 import ai.rever.boss.components.overlays.ContextMenuItem
 import ai.rever.boss.components.overlays.HoverTooltipBox
 import ai.rever.boss.components.overlays.TooltipPlacement
@@ -14,7 +15,6 @@ import ai.rever.boss.plugin.ui.BossTheme
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -264,50 +264,19 @@ private fun Modifier.tabChipDrag(
     onDragEnd: (TabDropResult?) -> Unit,
 ): Modifier =
     pointerInput(tabId, panelId, tabDragComponent) {
-        var ownedDrag: DraggingTabInfo? = null
-        try {
-            detectDragGestures(
-                onDragStart = { offset ->
-                    tabDragComponent.startDragging(
-                        tabInfo = tab(),
-                        panelId = panelId,
-                        index = tabIndex(),
-                        startPosition = windowPosition() + offset,
-                    )
-                    ownedDrag = tabDragComponent.draggingTab
-                },
-                onDrag = { change, dragAmount ->
-                    change.consume()
-                    if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
-                        tabDragComponent.updateDrag(dragAmount)
-                    }
-                },
-                // Cleaned up first either way: a result that throws must not leave a ghost stuck to
-                // the pointer.
-                onDragEnd = {
-                    if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
-                        val result = tabDragComponent.endDrag(tabIndex())
-                        ownedDrag = null
-                        onDragEnd(result)
-                    }
-                },
-                onDragCancel = {
-                    if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
-                        tabDragComponent.cancelDrag()
-                        ownedDrag = null
-                        onDragEnd(null)
-                    }
-                },
-            )
-        } finally {
-            // Plain state writes, so this is safe to run while the coroutine is being cancelled.
-            // Scoped to THIS tab's drag so the common path - endDrag above, then the drop
-            // reshuffles the panel and resets us - is left alone.
-            if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
-                tabDragComponent.cancelDrag()
-                onDragEnd(null)
-            }
-        }
+        detectTabDragGestures(
+            component = tabDragComponent,
+            sourceIndex = tabIndex,
+            onStart = { offset ->
+                tabDragComponent.startDragging(
+                    tabInfo = tab(),
+                    panelId = panelId,
+                    index = tabIndex(),
+                    startPosition = windowPosition() + offset,
+                )
+            },
+            onEnd = onDragEnd,
+        )
     }
 
 /**

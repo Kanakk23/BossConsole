@@ -2,6 +2,7 @@ package ai.rever.boss.app
 
 import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.components.dialogs.TabType
+import ai.rever.boss.components.home.goHome
 import ai.rever.boss.components.plugin.AvailablePluginUpdate
 import ai.rever.boss.components.plugin.DynamicPluginManager
 import ai.rever.boss.components.plugin.InstalledPluginRef
@@ -12,6 +13,7 @@ import ai.rever.boss.components.plugin.PluginUpdateBridge
 import ai.rever.boss.components.plugin.StoreVersionLookup
 import ai.rever.boss.components.plugin.StoreVersionPrompt
 import ai.rever.boss.components.plugin.UpdateCheckOutcome
+import ai.rever.boss.components.plugin.openTopOfMindQuickSwitcher
 import ai.rever.boss.components.sidebar.SidebarVisibilitySettings
 import ai.rever.boss.components.sidebar.SidebarVisibilitySettingsManager
 import ai.rever.boss.components.window_panel.NavigationDirection
@@ -25,7 +27,6 @@ import ai.rever.boss.plugin.browser.ActiveBrowserRegistry
 import ai.rever.boss.plugin.tab.terminal.TerminalTabInfo
 import ai.rever.boss.plugin.tab.terminal.TerminalTabType
 import ai.rever.boss.project.DefaultWorkingDirectory
-import ai.rever.boss.topofmind.TabTreeState
 import ai.rever.boss.window.MenuActionsHandler
 import ai.rever.boss.window.WindowAppearanceSettings
 import ai.rever.boss.window.WindowAppearanceSettingsManager
@@ -112,6 +113,26 @@ internal fun BossAppMenuActionEffects(
         }
     }
 
+    LaunchedEffect(windowId) {
+        MenuActionsHandler.goHomeEvents
+            .onEach { eventWindowId ->
+                if (eventWindowId == windowId) {
+                    val panelId = goHome(splitViewState, state.tabRegistry)
+                    if (panelId == null) {
+                        StatusMessageManager.showMessage(
+                            "Home needs the browser tool. Enable or install Fluck Browser from Tools.",
+                        )
+                    } else {
+                        androidx.compose.runtime.withFrameNanos { }
+                        if (splitViewState.activePanelId == panelId && splitViewState.getPanel(panelId) != null) {
+                            // A pane can close or unmount during the frame boundary.
+                            runCatching { splitViewState.focusRequesterFor(panelId).requestFocus() }
+                        }
+                    }
+                }
+            }.launchIn(this)
+    }
+
     // Listen for menu actions from MenuBar (File > New Tab, etc.)
     LaunchedEffect(windowId) {
         MenuActionsHandler.newTabEvents
@@ -196,6 +217,16 @@ internal fun BossAppMenuActionEffects(
                     MenuActionsHandler.TabSwitchAction.PREVIOUS_POSITIONAL -> {
                         comp?.switchToPreviousTabPositional()
                     }
+                }
+            }.launchIn(this)
+    }
+
+    LaunchedEffect(windowId) {
+        MenuActionsHandler.printBrowserEvents
+            .onEach { eventWindowId ->
+                if (eventWindowId == windowId) {
+                    ai.rever.boss.plugin.browser
+                        .printActiveBrowser(windowId)
                 }
             }.launchIn(this)
     }
@@ -288,7 +319,9 @@ internal fun BossAppMenuActionEffects(
         MenuActionsHandler.selectWorkspaceEvents
             .onEach { eventWindowId ->
                 if (eventWindowId == windowId) {
-                    state.showTopOfMindDialog = true
+                    // The switcher is the Top of Mind plugin's, not this window's: the host asks
+                    // for it and says why when nothing answers. See openTopOfMindQuickSwitcher.
+                    openTopOfMindQuickSwitcher(windowId, coroutineScope)
                 }
             }.launchIn(this)
     }
@@ -524,8 +557,11 @@ internal fun BossAppMenuActionEffects(
                             )
                         workspaceManager.updateCurrentWorkspace(updatedConfig)
                         workspaceManager.saveCurrentWorkspace()
-                        TabTreeState.markWorkspaceAsSaved(currentConfig.id)
-                        StatusMessageManager.showMessage("Workspace Saved")
+                        // Nothing marks it saved here. The unsaved flag is DERIVED, from the live
+                        // layout against the copy in `workspaceManager.workspaces` - which this
+                        // write replaces - so the affordance turns itself off when the bytes land
+                        // rather than when the button was pressed. See BossAppStartupEffects.
+                        StatusMessageManager.showMessage("Space Saved")
                     } else {
                         val currentLayout = extractCurrentWorkspace(splitViewState, windowProjectState.selectedProject.value.path)
                         val newConfig =
@@ -535,7 +571,7 @@ internal fun BossAppMenuActionEffects(
                             )
                         workspaceManager.updateCurrentWorkspace(newConfig)
                         workspaceManager.saveCurrentWorkspace()
-                        StatusMessageManager.showMessage("Workspace Saved")
+                        StatusMessageManager.showMessage("Space Saved")
                     }
                 }
             }.launchIn(this)
@@ -589,6 +625,17 @@ internal fun BossAppMenuActionEffects(
             .onEach { eventWindowId ->
                 if (eventWindowId == windowId) {
                     state.showShortcutHelpDialog = true
+                }
+            }.launchIn(this)
+    }
+
+    // Handle Show Plugin Wizard menu events
+    LaunchedEffect(windowId) {
+        MenuActionsHandler.showTerminalOnboardingEvents
+            .onEach { eventWindowId ->
+                if (eventWindowId == windowId) {
+                    state.terminalOnboardingOwnerStarted = true
+                    state.terminalOnboardingRequestGeneration++
                 }
             }.launchIn(this)
     }

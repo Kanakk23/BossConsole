@@ -3,6 +3,7 @@ package ai.rever.boss.components.buttons
 import ai.rever.boss.components.model.DraggingTabInfo
 import ai.rever.boss.components.model.TabDraggableComponent
 import ai.rever.boss.components.model.TabDropResult
+import ai.rever.boss.components.model.detectTabDragGestures
 import ai.rever.boss.components.overlays.ContextMenu
 import ai.rever.boss.components.overlays.ContextMenuItem
 import ai.rever.boss.components.overlays.OverlayConfig
@@ -15,7 +16,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -197,8 +197,12 @@ fun BossTabButton(
             // browser's heavyweight surface, so a tab tooltip over a browser tab would
             // be hidden by the page. Show it in a small native window instead.
             // OFF_SCREEN keeps the Compose path below unchanged.
-            DisposableEffect(fileName) {
+            // A terminal's activity indicator can change its title while the pointer stays
+            // still. Refresh the existing native window without hiding it between titles.
+            LaunchedEffect(fileName, heavyweightTooltip) {
                 heavyweightTooltip(fileName)
+            }
+            DisposableEffect(Unit) {
                 onDispose { OverlayConfig.hideHeavyweightTooltip?.invoke() }
             }
         } else {
@@ -402,53 +406,22 @@ fun BossTabButton(
                     }
                 }.then(
                     if (isDragEnabled) {
-                        // Stable identity survives title/index updates; a new owner cancels the gesture.
                         Modifier.pointerInput(tabInfo.id, panelId, tabDragComponent) {
-                            var ownedDrag: DraggingTabInfo? = null
-                            try {
-                                detectDragGestures(
-                                    onDragStart = { offset ->
-                                        val info = currentTabInfo ?: return@detectDragGestures
-                                        // Calculate absolute position for drag start
-                                        val absolutePosition = windowPosition + offset
-                                        tabDragComponent.startDragging(
-                                            tabInfo = info,
-                                            panelId = panelId,
-                                            index = currentTabIndex,
-                                            startPosition = absolutePosition,
-                                        )
-                                        ownedDrag = tabDragComponent.draggingTab
-                                        currentOnDragStart()
-                                    },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
-                                            tabDragComponent.updateDrag(dragAmount)
-                                        }
-                                    },
-                                    onDragEnd = {
-                                        // Always clean up drag state first to prevent stuck ghost
-                                        if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
-                                            val result = tabDragComponent.endDrag(currentTabIndex)
-                                            ownedDrag = null
-                                            currentOnDragEnd(result)
-                                        }
-                                    },
-                                    onDragCancel = {
-                                        if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
-                                            tabDragComponent.cancelDrag()
-                                            ownedDrag = null
-                                            currentOnDragEnd(null)
-                                        }
-                                    },
-                                )
-                            } finally {
-                                // Only the gesture that picked this tab up owns its cleanup.
-                                if (ownedDrag != null && tabDragComponent.draggingTab === ownedDrag) {
-                                    tabDragComponent.cancelDrag()
-                                    currentOnDragEnd(null)
-                                }
-                            }
+                            detectTabDragGestures(
+                                component = tabDragComponent,
+                                sourceIndex = { currentTabIndex },
+                                onStart = { offset ->
+                                    val info = currentTabInfo ?: return@detectTabDragGestures
+                                    tabDragComponent.startDragging(
+                                        tabInfo = info,
+                                        panelId = panelId,
+                                        index = currentTabIndex,
+                                        startPosition = windowPosition + offset,
+                                    )
+                                    currentOnDragStart()
+                                },
+                                onEnd = { currentOnDragEnd(it) },
+                            )
                         }
                     } else {
                         Modifier

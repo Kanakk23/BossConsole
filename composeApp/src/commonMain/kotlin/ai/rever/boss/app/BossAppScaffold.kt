@@ -3,6 +3,7 @@ package ai.rever.boss.app
 import ai.rever.boss.components.bars.horizontal.BossBottomBar
 import ai.rever.boss.components.bars.horizontal.BossTitleBar
 import ai.rever.boss.components.bars.horizontal.BossTopBar
+import ai.rever.boss.components.bars.horizontal.setupKeepsBottomBarVisible
 import ai.rever.boss.components.bars.isBarVisible
 import ai.rever.boss.components.bars.vertical.BossLeftSideBar
 import ai.rever.boss.components.bars.vertical.BossRightSideBar
@@ -19,6 +20,7 @@ import ai.rever.boss.components.overlays.TabDraggingOverlay
 import ai.rever.boss.components.plugin.LocalPanelPluginIdResolver
 import ai.rever.boss.components.plugin.LocalPluginUninstallable
 import ai.rever.boss.components.plugin.PanelIds
+import ai.rever.boss.components.plugin.openTopOfMindQuickSwitcher
 import ai.rever.boss.components.plugin.panels.left_bottom.TopOfMind.LocalSplitViewState
 import ai.rever.boss.components.plugin.panels.left_bottom.TopOfMind.LocalWorkspaceManager
 import ai.rever.boss.components.plugin.providers.TopOfMindDataProvider
@@ -59,6 +61,7 @@ import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
 import ai.rever.boss.updater.UpdateAvailableDialog
 import ai.rever.boss.updater.UpdateBanner
+import ai.rever.boss.updater.UpdateDialogGate
 import ai.rever.boss.updater.UpdateState
 import ai.rever.boss.updater.drawsBanner
 import ai.rever.boss.updater.rememberUpdateDialogOwnership
@@ -67,6 +70,7 @@ import ai.rever.boss.window.LocalWindowGitState
 import ai.rever.boss.window.LocalWindowId
 import ai.rever.boss.window.LocalWindowProjectState
 import ai.rever.boss.window.LocalWindowRunnerState
+import ai.rever.boss.window.MenuActionsHandler
 import ai.rever.boss.window.TabBarPosition
 import ai.rever.boss.window.WindowAppearanceSettings
 import androidx.compose.animation.AnimatedVisibility
@@ -261,6 +265,7 @@ internal fun BossAppScaffold(
     appearance: WindowAppearanceSettings,
     onToggleMaximize: (() -> Unit)?,
 ) {
+    val setupNeedsBottomBar = setupKeepsBottomBarVisible()
     val coroutineScope = state.coroutineScope
     val splitViewState = state.splitViewState
     val selectedProject by state.windowProjectState.selectedProject.collectAsState()
@@ -569,7 +574,13 @@ internal fun BossAppScaffold(
                 val showUpdateDialog by updateHandle.showUpdateDialog.collectAsState()
                 val isUpdateDialogOwner = rememberUpdateDialogOwnership(state.windowId)
                 val updateStateForDialog = updateState
-                if (showUpdateDialog && isUpdateDialogOwner && updateStateForDialog is UpdateState.UpdateAvailable) {
+                UpdateDialogGate(
+                    wantDialog = showUpdateDialog,
+                    isOwner = isUpdateDialogOwner,
+                    updateAvailable = updateStateForDialog is UpdateState.UpdateAvailable,
+                ) {
+                    // Re-test for the smart cast inside the gated content.
+                    if (updateStateForDialog !is UpdateState.UpdateAvailable) return@UpdateDialogGate
                     UpdateAvailableDialog(
                         updateInfo = updateStateForDialog.updateInfo,
                         onUpdateNow = {
@@ -630,7 +641,7 @@ internal fun BossAppScaffold(
                                 extractCurrentWorkspace(splitViewState, selectedProject.path)
                             },
                             onShowTopOfMind = {
-                                state.showTopOfMindDialog = true
+                                openTopOfMindQuickSwitcher(state.windowId, state.coroutineScope)
                             },
                             onShowSettings = {
                                 state.settingsWindow.open()
@@ -794,6 +805,9 @@ internal fun BossAppScaffold(
                                     // cleared is not on screen, and the project and workspace
                                     // pickers live nowhere else.
                                     topBarHidden = !drawn.showTopBar,
+                                    // Only so the workspace button can open Top of Mind HERE: a
+                                    // panel open event is broadcast and filtered by window.
+                                    windowId = state.windowId,
                                     project = selectedProject,
                                     onOpenProject = { state.showProjectDialog = true },
                                     workspaceManager = workspaceManager,
@@ -801,7 +815,12 @@ internal fun BossAppScaffold(
                                     getCurrentWorkspace = {
                                         extractCurrentWorkspace(splitViewState, selectedProject.path)
                                     },
-                                    onShowTopOfMind = { state.showTopOfMindDialog = true },
+                                    onShowTopOfMind = {
+                                        openTopOfMindQuickSwitcher(state.windowId, state.coroutineScope)
+                                    },
+                                    // The File menu's own Save Space, not a second copy of it:
+                                    // one path extracts the live layout, writes it and reports.
+                                    onSaveWorkspace = { MenuActionsHandler.triggerSaveWorkspace(state.windowId) },
                                 )
                             },
                         )
@@ -887,9 +906,9 @@ internal fun BossAppScaffold(
                     }
                 }
 
-                // Bottom bar - hidden in focus mode with smooth expand/shrink animation
+                // Setup retains a visible home and its reopened dialog, including in focus mode.
                 AnimatedVisibility(
-                    visible = appearance.showBottomBar && reveal.showBottomBar,
+                    visible = shouldShowBottomBar(setupNeedsBottomBar, appearance.showBottomBar, reveal.showBottomBar),
                     enter =
                         expandVertically(
                             expandFrom = Alignment.Bottom,
@@ -939,6 +958,12 @@ internal fun BossAppScaffold(
         }
     }
 }
+
+private fun shouldShowBottomBar(
+    setupNeedsBottomBar: Boolean,
+    configuredVisible: Boolean,
+    focusModeRevealed: Boolean,
+): Boolean = setupNeedsBottomBar || (configuredVisible && focusModeRevealed)
 
 /**
  * Which plugin panel column takes the host's actions, or null when the right one is shut.

@@ -384,9 +384,10 @@ private fun runnerEntries() =
 
 private fun workspaceEntries() =
     section(SettingsSection.WORKSPACE) {
-        group("Default Workspace")
-        group("When Switching Workspaces")
-        group("About Workspaces")
+        group("Default Space", "workspace", "workspaces")
+        group("When Switching Spaces", "workspace", "workspaces")
+        group("About Spaces", "workspace", "workspaces")
+        sectionLevel("workspace", "workspaces", "layout", "template")
     }
 
 private fun securityEntries() =
@@ -435,6 +436,8 @@ private fun windowAppearanceEntries() =
         setting("Expand on Hover", "Tab Bar", "vertical tabs", "rail", "collapse", "drawer")
         setting("Pane Tab Strip", "Tab Bar", "vertical tabs", "split", "favicon", "pane", "tabs")
         setting("Only in Split Windows", "Tab Bar", "vertical tabs", "split", "favicon", "pane", "strip")
+        group("Browser Zoom")
+        setting("Show Browser Zoom Badge", "Browser Zoom", "percentage", "reset", "browser", "top bar")
         group("Bars")
         setting("Show Top Bar", "Bars", "chrome", "window")
         setting("Show Bottom Bar", "Bars", "chrome", "window", "status")
@@ -480,9 +483,9 @@ private fun performanceEntries() =
 
 private fun startupEntries() =
     section(SettingsSection.STARTUP) {
-        group("Workspace Loading")
-        setting("Workspace Load Timeout", "Workspace Loading", "startup", "boot")
-        setting("Reset Timeout", "Workspace Loading")
+        group("Space Loading", "workspace", "workspaces")
+        setting("Space Load Timeout", "Space Loading", "startup", "boot", "workspace")
+        setting("Reset Timeout", "Space Loading")
         group("About")
     }
 
