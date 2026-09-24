@@ -20,6 +20,7 @@ data class RushHourSnapshot(
     val board: RushHourBoard,
     val level: Int,
     val stepsTaken: Int,
+    val initialOptimalDistance: Int?,
     val optimalDistanceRemaining: Int?,
     val isSolved: Boolean,
     val isDeadlocked: Boolean,
@@ -48,6 +49,7 @@ object RushHourGameState {
                     board = initialBoard,
                     level = initialLevel,
                     stepsTaken = 0,
+                    initialOptimalDistance = initialOptimal,
                     optimalDistanceRemaining = initialOptimal,
                     isSolved = initialBoard.isSolved(),
                     isDeadlocked = initialOptimal == null,
@@ -76,6 +78,7 @@ object RushHourGameState {
                     board = board,
                     level = level,
                     stepsTaken = 0,
+                    initialOptimalDistance = optimal,
                     optimalDistanceRemaining = optimal,
                     isSolved = board.isSolved(),
                     isDeadlocked = optimal == null,
@@ -121,7 +124,7 @@ object RushHourGameState {
                 action = "$vehicleId:$steps",
                 board = newBoard,
                 latencyMs = latency,
-                optimalRemaining = newOptimal ?: -1,
+                optimalRemaining = newOptimal,
             )
 
             val summary = if (isSolved) logger.computeSummary() else null
@@ -131,6 +134,7 @@ object RushHourGameState {
                     board = newBoard,
                     level = current.level,
                     stepsTaken = newStepsTaken,
+                    initialOptimalDistance = current.initialOptimalDistance,
                     optimalDistanceRemaining = newOptimal,
                     isSolved = isSolved,
                     isDeadlocked = isDeadlocked,

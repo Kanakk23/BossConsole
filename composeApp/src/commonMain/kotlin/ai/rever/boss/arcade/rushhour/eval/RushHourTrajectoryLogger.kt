@@ -1,6 +1,8 @@
 package ai.rever.boss.arcade.rushhour.eval
 
 import ai.rever.boss.arcade.rushhour.model.RushHourBoard
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.Serializable
 
 /**
@@ -12,7 +14,7 @@ data class StepTrajectory(
     val action: String,
     val boardHash: String,
     val latencyMs: Long,
-    val optimalRemaining: Int,
+    val optimalRemaining: Int?,
 )
 
 /**
@@ -30,10 +32,15 @@ data class TrajectorySummary(
  * Records step-by-step evaluation metrics and evaluates planning efficiency and cycle count.
  */
 class RushHourTrajectoryLogger(
-    private var initialOptimalMoves: Int = 0,
+    initialOptimalMoves: Int = 0,
 ) {
-    private val steps = mutableListOf<StepTrajectory>()
-    private val visitedHashes = mutableListOf<String>()
+    private data class LogState(
+        val steps: List<StepTrajectory>,
+        val visitedHashes: List<String>,
+        val initialOptimalMoves: Int,
+    )
+
+    private val state = MutableStateFlow(LogState(emptyList(), emptyList(), initialOptimalMoves))
 
     /**
      * Initializes or resets the trajectory logger with the initial board state.
@@ -42,10 +49,8 @@ class RushHourTrajectoryLogger(
         initialBoard: RushHourBoard,
         initialOptimalDistance: Int,
     ) {
-        steps.clear()
-        visitedHashes.clear()
-        initialOptimalMoves = initialOptimalDistance
-        visitedHashes.add(initialBoard.canonicalHash())
+        val initialHash = initialBoard.canonicalHash()
+        state.update { LogState(emptyList(), listOf(initialHash), initialOptimalDistance) }
     }
 
     /**
@@ -55,32 +60,34 @@ class RushHourTrajectoryLogger(
         action: String,
         board: RushHourBoard,
         latencyMs: Long,
-        optimalRemaining: Int,
+        optimalRemaining: Int?,
     ) {
         val hash = board.canonicalHash()
-        val entry =
-            StepTrajectory(
-                stepIndex = steps.size + 1,
-                action = action,
-                boardHash = hash,
-                latencyMs = latencyMs,
-                optimalRemaining = optimalRemaining,
-            )
-        steps.add(entry)
-        visitedHashes.add(hash)
+        state.update { current ->
+            val entry =
+                StepTrajectory(
+                    stepIndex = current.steps.size + 1,
+                    action = action,
+                    boardHash = hash,
+                    latencyMs = latencyMs,
+                    optimalRemaining = optimalRemaining,
+                )
+            current.copy(steps = current.steps + entry, visitedHashes = current.visitedHashes + hash)
+        }
     }
 
     /**
      * Returns an unmodifiable snapshot of logged steps.
      */
-    fun getTrajectories(): List<StepTrajectory> = steps.toList()
+    fun getTrajectories(): List<StepTrajectory> = state.value.steps.toList()
 
     /**
      * Computes the final evaluation summary.
      */
     fun computeSummary(): TrajectorySummary {
-        val totalMoves = steps.size
-        val optimalNeeded = initialOptimalMoves
+        val current = state.value
+        val totalMoves = current.steps.size
+        val optimalNeeded = current.initialOptimalMoves
 
         // Efficiency = (optimal / total) * 100%
         val efficiency =
@@ -93,7 +100,7 @@ class RushHourTrajectoryLogger(
             }
 
         // Cycle count: count how many times a board state is revisited
-        val counts = visitedHashes.groupingBy { it }.eachCount()
+        val counts = current.visitedHashes.groupingBy { it }.eachCount()
         val cycleCount = counts.values.sumOf { if (it > 1) it - 1 else 0 }
 
         return TrajectorySummary(

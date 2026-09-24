@@ -28,11 +28,11 @@ The engine follows a modular, reactive architecture across Compose Multiplatform
 composeApp/src/
 ├── commonMain/kotlin/ai/rever/boss/arcade/rushhour/
 │   ├── model/  # Board, vehicle, engine, solver, drag math, serialized game state
-│   ├── eval/   # Trajectory logger and efficiency metrics
+│   ├── eval/   # Thread-safe trajectory logger and efficiency metrics
 │   ├── mcp/    # Production-registered state, move, and reset tools
 │   └── ui/     # Screen, theme, help sheet, and tab type
 └── desktopTest/kotlin/ai/rever/boss/arcade/rushhour/
-    └── *Test.kt # Engine, interaction, solver, MCP, and tab tests
+    └── *Test.kt # Engine, interaction, solver, MCP, tab, and trajectory tests
 ```
 
 ---
@@ -163,7 +163,7 @@ Resets the board to a chosen level (1 to 4) and wipes the trajectory evaluation 
 - `action`: Vehicle and directional displacement (e.g., `X:+1`, `B:-2`).
 - `boardHash`: Canonical state representation string.
 - `latencyMs`: Elapsed local move validation time; it does not measure agent decision latency.
-- `optimalRemaining`: Ground truth $d^*$ calculated via BFS at that exact state.
+- `optimalRemaining`: Ground truth $d^*$ calculated via BFS at that exact state, or null if no solution exists.
 
 ### Aggregate Evaluation Summary
 Upon reaching the exit condition, the logger computes:
@@ -212,9 +212,10 @@ Run the focused test suite with:
 ./gradlew :composeApp:desktopTest --tests "ai.rever.boss.arcade.rushhour.*"
 ```
 
-### Test Coverage (29 tests):
+### Test Coverage (32 tests):
 - **`RushHourInteractionTest` (7)**: Drag constraints, snap thresholds, and concurrent move accounting.
 - **`RushHourEngineTest` (7)**: Boundaries, collisions, invalid steps, and win detection.
 - **`RushHourSolverTest` (6)**: BFS paths, optimal distances, and deadlock detection.
-- **`RushHourMcpTest` (6)**: Tool registration, move dispatch, errors, and resets.
+- **`RushHourMcpTest` (7)**: Tool registration, move dispatch, errors, resets, and victory scoring.
 - **`RushHourTabTest` (3)**: Tab descriptor and registry wiring.
+- **`RushHourTrajectoryLoggerTest` (2)**: Concurrent logging, trajectory summaries, and resets.

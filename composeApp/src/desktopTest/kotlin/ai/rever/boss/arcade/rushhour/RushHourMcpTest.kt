@@ -149,4 +149,46 @@ class RushHourMcpTest {
             val res = registryCore.invoke(RushHourMcpTools.TOOL_RESET, """{"level": 99}""")
             assertTrue(res.isError)
         }
+
+    @Test
+    fun `perfect solve reports the same efficiency in state and victory summary`() =
+        runBlocking {
+            val solution =
+                listOf(
+                    "A" to -2,
+                    "D" to 2,
+                    "B" to 2,
+                    "E" to -4,
+                    "D" to -1,
+                    "F" to -1,
+                    "O" to 3,
+                    "X" to 4,
+                )
+            var victory = registryCore.invoke(RushHourMcpTools.TOOL_STATE, "{}")
+            for ((vehicleId, steps) in solution) {
+                victory =
+                    registryCore.invoke(
+                        RushHourMcpTools.TOOL_MOVE,
+                        """{"vehicleId":"$vehicleId","steps":$steps}""",
+                    )
+                assertFalse(victory.isError, victory.text)
+            }
+
+            val victoryJson = json.parseToJsonElement(victory.text).jsonObject
+            assertTrue(victoryJson["isSolved"]?.jsonPrimitive?.boolean == true)
+            assertEquals(100.0, victoryJson["optimalityScore"]?.jsonPrimitive?.content?.toDouble())
+            assertEquals(
+                100.0,
+                victoryJson["summary"]
+                    ?.jsonObject
+                    ?.get("efficiencyPercentage")
+                    ?.jsonPrimitive
+                    ?.content
+                    ?.toDouble(),
+            )
+
+            val state = registryCore.invoke(RushHourMcpTools.TOOL_STATE, "{}")
+            val stateJson = json.parseToJsonElement(state.text).jsonObject
+            assertEquals(100.0, stateJson["optimalityScore"]?.jsonPrimitive?.content?.toDouble())
+        }
 }

@@ -87,19 +87,19 @@ class RushHourSolverTest {
     @Test
     fun `planning optimality score calculation`() {
         // 0 steps taken on solvable board
-        val score0 = RushHourSolver.calculateOptimalityScore(optimalRemaining = 8, stepsTaken = 0)
+        val score0 = RushHourSolver.calculateOptimalityScore(initialOptimalDistance = 8, stepsTaken = 0)
         assertEquals(100.0, score0)
 
-        // 8 steps taken with 8 optimal remaining = 100%
-        val score1 = RushHourSolver.calculateOptimalityScore(optimalRemaining = 8, stepsTaken = 8)
+        // 8 steps taken with an initial optimal distance of 8 = 100%, including on victory.
+        val score1 = RushHourSolver.calculateOptimalityScore(initialOptimalDistance = 8, stepsTaken = 8)
         assertEquals(100.0, score1)
 
-        // 16 steps taken with 8 optimal remaining = 50%
-        val score2 = RushHourSolver.calculateOptimalityScore(optimalRemaining = 8, stepsTaken = 16)
+        // 16 steps taken with an initial optimal distance of 8 = 50%.
+        val score2 = RushHourSolver.calculateOptimalityScore(initialOptimalDistance = 8, stepsTaken = 16)
         assertEquals(50.0, score2)
 
         // Deadlocked board
-        val scoreDeadlock = RushHourSolver.calculateOptimalityScore(optimalRemaining = null, stepsTaken = 5)
+        val scoreDeadlock = RushHourSolver.calculateOptimalityScore(initialOptimalDistance = null, stepsTaken = 5)
         assertEquals(0.0, scoreDeadlock)
     }
 }

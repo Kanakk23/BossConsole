@@ -116,17 +116,17 @@ object RushHourSolver {
 
     /**
      * Calculates the real-time Planning Optimality Score:
-     * $$\text{Optimality } \eta = \left(\frac{d^*}{\text{Steps Taken}}\right) \times 100\%$$
+     * $$\text{Optimality } \eta = \left(\frac{d^*_0}{\text{Steps Taken}}\right) \times 100\%$$
      *
      * If steps taken is 0, returns 100.0% if solvable, or 0.0% if deadlocked.
      */
     fun calculateOptimalityScore(
-        optimalRemaining: Int?,
+        initialOptimalDistance: Int?,
         stepsTaken: Int,
     ): Double {
-        if (optimalRemaining == null) return 0.0
+        if (initialOptimalDistance == null) return 0.0
         if (stepsTaken == 0) return 100.0
-        val score = (optimalRemaining.toDouble() / stepsTaken.toDouble()) * 100.0
+        val score = (initialOptimalDistance.toDouble() / stepsTaken.toDouble()) * 100.0
         return score.coerceIn(0.0, 100.0)
     }
 }

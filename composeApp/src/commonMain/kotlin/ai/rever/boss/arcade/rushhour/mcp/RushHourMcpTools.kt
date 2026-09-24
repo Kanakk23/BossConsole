@@ -105,7 +105,7 @@ object RushHourMcpTools : McpToolProvider {
         val score =
             snapshot.trajectorySummary?.efficiencyPercentage
                 ?: RushHourSolver.calculateOptimalityScore(
-                    optimalRemaining = snapshot.optimalDistanceRemaining,
+                    initialOptimalDistance = snapshot.initialOptimalDistance,
                     stepsTaken = snapshot.stepsTaken,
                 )
 
@@ -200,7 +200,7 @@ object RushHourMcpTools : McpToolProvider {
         val score =
             snapshot.trajectorySummary?.efficiencyPercentage
                 ?: RushHourSolver.calculateOptimalityScore(
-                    optimalRemaining = snapshot.optimalDistanceRemaining,
+                    initialOptimalDistance = snapshot.initialOptimalDistance,
                     stepsTaken = snapshot.stepsTaken,
                 )
 
