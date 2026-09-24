@@ -407,8 +407,14 @@ object ChromiumAutoDownloader {
     ): Result<Path> =
         withContext(Dispatchers.IO) {
             val archiveName = "boss-chromium-${detectPlatform()}.zip"
+            val candidates = ChromiumReleaseSource.downloadCandidates(version, archiveName)
+            if (candidates.none { !it.sha256.isNullOrBlank() }) {
+                return@withContext Result.failure(
+                    IllegalStateException("No catalog checksum is available for engine $version on this platform"),
+                )
+            }
             installFromCandidates(
-                candidates = ChromiumReleaseSource.downloadCandidates(version, archiveName),
+                candidates = candidates,
                 version = version,
                 targetDir = if (staged) getPendingChromiumDir() else getChromiumDir(),
                 staged = staged,
