@@ -8,6 +8,11 @@ import java.nio.charset.StandardCharsets;
 public final class TerminalTestProcess {
     public static void main(String[] args) throws Exception {
         switch (args[0]) {
+            case "ignore-stdin" -> {
+                System.out.println("ready");
+                System.out.flush();
+                Thread.sleep(30000);
+            }
             case "background" -> {
                 new ProcessBuilder(
                     System.getProperty("java.home") + "/bin/java", "-cp", System.getProperty("java.class.path"),
@@ -31,6 +36,28 @@ public final class TerminalTestProcess {
                 System.out.println("ready");
                 System.out.flush();
                 System.in.read();
+            }
+            case "drain-stdin" -> {
+                // Mirrors sort/grep/cat: reads until EOF rather than until a newline, so it
+                // can only exit once stdin is actually closed - never on input content alone.
+                System.out.println("ready");
+                System.out.flush();
+                java.io.ByteArrayOutputStream collected = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[4096];
+                int n;
+                while ((n = System.in.read(buf)) != -1) collected.write(buf, 0, n);
+                System.out.print("drained:" + collected.size());
+            }
+            case "drain-stdin-hold" -> {
+                // Same as drain-stdin, but stays alive after EOF so a caller can observe the
+                // closed-stdin state of a process that has not exited.
+                byte[] buf = new byte[4096];
+                int total = 0;
+                int n;
+                while ((n = System.in.read(buf)) != -1) total += n;
+                System.out.print("drained:" + total);
+                System.out.flush();
+                Thread.sleep(30000);
             }
             case "flood" -> {
                 String chunk = "x".repeat(4096);
