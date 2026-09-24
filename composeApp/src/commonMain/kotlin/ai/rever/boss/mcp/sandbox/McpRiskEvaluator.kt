@@ -104,19 +104,75 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
     }
 
     // Wording heuristic only: both HIGH and CRITICAL must require approval. This is not a shell parser.
+    // CRITICAL is also what makes a saved "Always Allow" on a shell tool ask again (#1577), so the
+    // matcher reads each command of a chain for the flag shapes a destructive call really takes,
+    // not only the one spelling of each: `rm -fr`, `rm -r -f`, `/bin/rm -R`, `git push origin
+    // main --force`, `Remove-Item -Recurse`. [cmd] arrives lowercased and trimmed.
     private fun isDestructiveShellCommand(cmd: String): Boolean {
         if (cmd.isEmpty()) return false
-        return cmd.contains("rm -rf") ||
-            cmd.contains("del /s") ||
-            cmd.contains("format ") ||
-            cmd.contains("mkfs") ||
-            cmd.contains("git push --force") ||
-            cmd.contains("git push -f") ||
-            cmd.contains("dd if=") ||
-            cmd.contains("chmod -r 777")
+        val normalized = cmd.replace(WHITESPACE, " ")
+        // Split the raw command, not [normalized]: collapsing whitespace first turns a newline
+        // into a space, and the next command would hide inside the previous one's tokens.
+        return DESTRUCTIVE_WORDING.any { it in normalized } ||
+            cmd.split(COMMAND_SEPARATOR).any { segment ->
+                val tokens =
+                    segment
+                        .split(WHITESPACE)
+                        .map { token -> token.trim { it in TOKEN_QUOTES } }
+                        .filter { it.isNotEmpty() }
+                isRecursiveRm(tokens) || isRecursiveWindowsDelete(tokens) || isForcePush(tokens)
+            }
+    }
+
+    /**
+     * `rm` (by any path, after `sudo` or not) with a recursive flag in any spelling or order.
+     * GNU rm also takes options after operands (`rm build -r`), so every token up to `--` counts,
+     * and every `rm` in the segment is checked, not only the first.
+     */
+    private fun isRecursiveRm(tokens: List<String>): Boolean {
+        val rms = tokens.indices.filter { tokens[it] == "rm" || tokens[it].endsWith("/rm") }
+        return rms.any { rm ->
+            tokens.drop(rm + 1).takeWhile { it != "--" }.any { flag ->
+                flag.startsWith("--recursive") || (flag.startsWith("-") && !flag.startsWith("--") && 'r' in flag)
+            }
+        }
+    }
+
+    /** cmd's `del`/`erase`/`rd`/`rmdir /s`, and PowerShell's `Remove-Item` (or `del`) `-Recurse`. */
+    private fun isRecursiveWindowsDelete(tokens: List<String>): Boolean =
+        tokens.any { it in WINDOWS_DELETE_COMMANDS } &&
+            tokens.any { it == "/s" || it.startsWith("-recurse") }
+
+    /** `git push` with a force flag anywhere after `push`, including `--force-with-lease` and `-uf`. */
+    private fun isForcePush(tokens: List<String>): Boolean {
+        val push = tokens.indexOf("push")
+        if (push < 1 || "git" !in tokens.subList(0, push)) return false
+        return tokens.drop(push + 1).any { flag ->
+            flag.startsWith("--force") || (flag.startsWith("-") && !flag.startsWith("--") && 'f' in flag)
+        }
     }
 
     companion object {
+        /**
+         * Whether [toolName] is one of the shell tools, read with the same `mcp__boss__`
+         * normalization [evaluateRisk] applies - so a caller deciding "is this a shell call"
+         * and the evaluator rating it can never disagree about the name.
+         */
+        fun isShellTool(toolName: String): Boolean = toolName.removePrefix("mcp__boss__") in SHELL_TOOLS
+
+        private val DESTRUCTIVE_WORDING =
+            listOf("rm -rf", "del /s", "format ", "mkfs", "git push --force", "git push -f", "dd if=", "chmod -r 777")
+
+        private val WHITESPACE = Regex("""\s+""")
+
+        /** Where one command of a chain ends: `;`, `&`/`&&`, `|`/`||`, a newline, `$(` or a backtick. */
+        private val COMMAND_SEPARATOR = Regex("""[;&|\n`]|\$\(""")
+
+        /** Quoting and grouping stripped from a token's ends, so `(rm` and `"-rf"` still read. */
+        private val TOKEN_QUOTES = setOf('"', '\'', '(', ')', '{', '}')
+
+        private val WINDOWS_DELETE_COMMANDS = setOf("del", "erase", "rd", "rmdir", "remove-item")
+
         private val SHELL_TOOLS =
             setOf(
                 "run_command",

@@ -611,7 +611,10 @@ class WorkspaceMcpToolProviderTest {
     fun `open_terminal rejects command with newlines or control characters`() =
         runBlocking {
             val core = createTestCore()
-            val args = """{"command":"echo hello\nrm -rf /"}"""
+            // A benign second line: a destructive one (`rm -rf /`) is now stopped earlier, at the
+            // approval gate, even under this provider-wide ALLOW (#1577), so it would no longer
+            // reach the tool's own newline check that this test is about.
+            val args = """{"command":"echo hello\necho world"}"""
             val result = core.invoke("open_terminal", args)
             assertTrue(result.isError)
             assertTrue(result.text.contains("security check failed"))
