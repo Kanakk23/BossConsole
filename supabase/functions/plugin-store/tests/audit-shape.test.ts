@@ -276,18 +276,51 @@ Deno.test("a hostile request produces a fully shaped audit row end to end", asyn
   assert((row.p_error_message as string).length <= 512)
 })
 
-Deno.test("logApiKeyAction still swallows persistence failures so audits never fail a publish", async () => {
-  const failing = {
-    rpc: () => Promise.resolve({ data: null, error: new Error("audit table unavailable") }),
+Deno.test("logApiKeyAction safely logs resolved and rejected audit failures without failing publish", async () => {
+  const logged: unknown[][] = []
+  const originalError = console.error
+  const resolvedFailure = {
+    rpc: () =>
+      Promise.resolve({
+        data: null,
+        error: {
+          code: "42501",
+          message: "permission denied; sensitive value was secret-token",
+          details: "secret-token",
+          hint: "secret-token",
+        },
+      }),
   } as unknown as SupabaseClient
-  await logApiKeyAction(failing, KEY_ID, "publish", "ai.rever.boss.form-assist", request({}))
-  // Reaching here without throwing is the invariant.
+  const transportError = new TypeError("request body contained secret-token")
+  transportError.name = "secret-token"
+  const rejectedFailure = {
+    rpc: () => Promise.reject(transportError),
+  } as unknown as SupabaseClient
+
+  console.error = (...args: unknown[]) => {
+    if (args[0] === "Error logging API key action:") {
+      logged.push(args)
+    } else {
+      originalError(...args)
+    }
+  }
+  try {
+    await logApiKeyAction(resolvedFailure, KEY_ID, "publish", "ai.rever.boss.form-assist", request({}))
+    await logApiKeyAction(rejectedFailure, KEY_ID, "publish", "ai.rever.boss.form-assist", request({}))
+  } finally {
+    console.error = originalError
+  }
+
+  assertEquals(logged, [
+    ["Error logging API key action:", { code: "42501" }],
+    ["Error logging API key action:", "TypeError"],
+  ])
 })
 
 Deno.test("a user agent truncated mid surrogate pair stays well-formed", () => {
   // 255 ASCII chars + one non-BMP char: a code-unit slice would leave a lone
-  // high surrogate, which Postgres's JSON input rejects - and the audit
-  // caller swallows that rejection, so the row would silently never exist.
+  // high surrogate, which Postgres's JSON input rejects. The RPC resolves
+  // with that failure; the best-effort audit caller logs it and keeps going.
   const ua = "A".repeat(255) + "\u{1F600}" + "tail"
   const shaped = auditUserAgent(ua)
   assert(shaped !== null)

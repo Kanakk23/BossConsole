@@ -101,8 +101,9 @@ export function auditClientIp(
 /**
  * Truncate without splitting a surrogate pair: a slice that ends on a lone
  * high surrogate is not text, and an unpaired surrogate serialized into the
- * audit payload is rejected by Postgres's JSON input - which the audit
- * caller's catch swallows, so the row would silently never be written.
+ * audit payload is rejected by Postgres's JSON input. The RPC resolves with
+ * that failure in its `error` result; the best-effort audit caller logs it but
+ * does not write the row or fail the original request.
  */
 function truncateWellFormed(value: string, max: number): string {
   if (value.length <= max) return value
