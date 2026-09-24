@@ -3,7 +3,7 @@ package ai.rever.boss.components.window_panel.components.main_window_panels
 import ai.rever.boss.components.common.rememberFaviconLoader
 import ai.rever.boss.components.model.TabDraggableComponent
 import ai.rever.boss.components.model.TabDropResult
-import ai.rever.boss.components.model.withDragSession
+import ai.rever.boss.components.model.detectTabDragGestures
 import ai.rever.boss.components.overlays.ContextMenuItem
 import ai.rever.boss.components.overlays.HoverTooltipBox
 import ai.rever.boss.components.overlays.TooltipPlacement
@@ -14,7 +14,6 @@ import ai.rever.boss.plugin.ui.BossTheme
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -245,26 +244,18 @@ private fun Modifier.tabChipDrag(
     onDragEnd: (TabDropResult?) -> Unit,
 ): Modifier =
     pointerInput(tab, panelId, tabIndex) {
-        tabDragComponent.withDragSession { session ->
-            detectDragGestures(
-                onDragStart = { offset ->
-                    session.start(
-                        tab = tab,
-                        panelId = panelId,
-                        index = tabIndex,
-                        position = windowPosition() + offset,
-                    )
-                },
-                onDrag = { change, dragAmount ->
-                    change.consume()
-                    session.update(dragAmount)
-                },
-                // Cleaned up first either way: a result that throws must not leave a ghost stuck to
-                // the pointer.
-                onDragEnd = { onDragEnd(session.end()) },
-                onDragCancel = { session.cancel() },
-            )
-        }
+        detectTabDragGestures(
+            component = tabDragComponent,
+            onStart = { offset ->
+                tabDragComponent.startDragging(
+                    tabInfo = tab,
+                    panelId = panelId,
+                    index = tabIndex,
+                    startPosition = windowPosition() + offset,
+                )
+            },
+            onEnd = onDragEnd,
+        )
     }
 
 /**

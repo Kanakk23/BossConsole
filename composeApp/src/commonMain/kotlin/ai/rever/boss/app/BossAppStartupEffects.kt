@@ -2,6 +2,7 @@ package ai.rever.boss.app
 
 import ai.rever.boss.components.plugin.DefaultPlugin
 import ai.rever.boss.components.plugin.PluginUpdateRegistry
+import ai.rever.boss.components.plugin.currentPluginHealth
 import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
 import ai.rever.boss.components.plugin.tab_types.registerPanelHostTab
 import ai.rever.boss.components.registery.PanelComponentStoreRegistry
@@ -26,6 +27,7 @@ import ai.rever.boss.components.workspaces.tabListChanges
 import ai.rever.boss.components.workspaces.workspaceManager
 import ai.rever.boss.consumePendingInitialProject
 import ai.rever.boss.consumePendingInitialTab
+import ai.rever.boss.health.WorkspaceHealthSources
 import ai.rever.boss.performance.BrowserTabInfo
 import ai.rever.boss.performance.EditorTabResourceInfo
 import ai.rever.boss.performance.PerformanceState
@@ -194,7 +196,7 @@ internal fun BossAppStartupEffects(state: BossAppState) {
 
     // Cancel any active drag when window loses focus (prevents stuck ghost)
     LaunchedEffect(state.tabDragComponent, windowId) {
-        WindowFocusManager.focusedWindowFlow.collect { focusedWindowId ->
+        WindowFocusManager.activeWindowFlow.collect { focusedWindowId ->
             // If this window lost focus and there's an active drag, cancel it
             if (focusedWindowId != windowId && state.tabDragComponent.isDragging) {
                 state.tabDragComponent.cancelDrag()
@@ -221,7 +223,18 @@ internal fun BossAppStartupEffects(state: BossAppState) {
     LaunchedEffect(windowId, windowProjectState) {
         val pendingProject = consumePendingInitialProject(windowId)
         if (pendingProject != null) {
+            // Opening a project in a NEW window is itself the answer to "where": the window's
+            // own fresh Space. So the project-selection effect must not ask for a layout on top.
+            state.answeredProjectPath = pendingProject.path
             windowProjectState.selectProject(pendingProject)
+        }
+    }
+
+    // "Open this project" from anywhere outside BossAppDialogs - the top bar, Home, the Open
+    // Project list - lands on this window's one "where should it open?" dialog.
+    LaunchedEffect(windowId) {
+        ProjectOpenRequests.requestsFor(windowId).collect { project ->
+            requestProjectOpen(state, state.windowProjectState, project)
         }
     }
 
@@ -360,15 +373,16 @@ internal fun BossAppStartupEffects(state: BossAppState) {
         val path = selectedProject.path
         if (path.isEmpty()) return@LaunchedEffect
 
-        // A project the restore selected is not a project the user just picked. Last
-        // Session carries its own layout, and both of the branches below would discard
-        // it - the apply by clearing panels, the prompt by covering it with a question
-        // nobody asked. See isUserProjectSelection.
-        if (!isUserProjectSelection(path, state.restoredProjectPath)) {
-            // Consumed, so re-opening the same project later still counts as a choice.
-            state.restoredProjectPath = null
-            return@LaunchedEffect
-        }
+        // A project the restore selected is not a project the user just picked: Last Session
+        // carries its own layout, and both branches below would discard it - the apply by
+        // clearing panels, the prompt by covering it with a question nobody asked. Nor is one a
+        // person placed through "where should this open?", which already decided the layout.
+        // Both marks are consumed together, so re-opening the same project later still counts as
+        // a choice. See gateProjectSelection.
+        val gate = gateProjectSelection(path, state.restoredProjectPath, state.answeredProjectPath)
+        state.restoredProjectPath = gate.restoredProjectPath
+        state.answeredProjectPath = gate.answeredProjectPath
+        if (!gate.handle) return@LaunchedEffect
 
         when (val choice = WorkspaceSettingsManager.currentSettings.value.resolveOnProjectSelection()) {
             // Named rather than folded into an else, so adding a fourth mode has to
@@ -379,7 +393,7 @@ internal fun BossAppStartupEffects(state: BossAppState) {
             is ProjectSelectionWorkspace.Ask -> {
                 // The prompt names the project so it reads as a consequence of what was
                 // just done, rather than an unexplained dialog at startup.
-                state.pendingWorkspacePrompt = selectedProject.name
+                state.pendingWorkspacePrompt = SpacePrompt(selectedProject, placeOnPick = false)
             }
 
             is ProjectSelectionWorkspace.Apply -> {
@@ -445,7 +459,15 @@ internal fun BossAppStartupEffects(state: BossAppState) {
         ai.rever.boss.services.editor.EditorAPIAccess
             .initialize(plugin)
 
+        // Let `boss status` and `boss doctor` report this window's plugin health. DefaultPlugin's
+        // init already created the manager, so a health query reads it and creates nothing.
+        val pluginHealthSource = { currentPluginHealth(plugin.dynamicPluginManager) }
+        WorkspaceHealthSources.registerPlugins(windowId, pluginHealthSource)
+
         onDispose {
+            // Unregister first, before the plugin is disposed, so a health query never reads a disposed manager.
+            WorkspaceHealthSources.unregisterPlugins(windowId, pluginHealthSource)
+
             // NOTE: Browser disposal moved to main.kt onCloseRequest handler
             // Browsers must be disposed BEFORE Compose disposal begins, not during it
             // See main.kt onCloseRequest for the disposeAllBrowsersBlocking() call
