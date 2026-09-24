@@ -40,11 +40,7 @@ actual object URLHandlerService {
         val requiresConfirmation: Boolean,
     )
 
-    /**
-     * Bound on tab opens per [UrlOpenRateLimiter.WINDOW_MS]. `boss://` and
-     * http/https are both registered with the OS, so any program or web page
-     * can hand BOSS a stream of these; without a bound each one is a new tab.
-     */
+    /** Bound on untrusted `boss://url` approval requests per [UrlOpenRateLimiter.WINDOW_MS]. */
     private val openRateLimiter = UrlOpenRateLimiter()
 
     // Flag to track if the app is ready to handle URLs
@@ -116,10 +112,10 @@ actual object URLHandlerService {
         url: String,
         requiresConfirmation: Boolean,
     ) {
-        // Bounded at intake, before the queue: a burst arriving at cold start
-        // must not grow it unboundedly, and one arriving when ready must not
-        // open (or prompt) without limit either.
-        if (!openRateLimiter.tryAcquire()) {
+        // Bound requests that need operator approval before they enter the cold-start
+        // queue. Direct browser handoffs and operator CLI opens retain their normal
+        // behavior; the approval queue has its own capacity bound as well.
+        if (requiresConfirmation && !openRateLimiter.tryAcquire()) {
             logger.warn(
                 LogCategory.BROWSER,
                 "URL open rate-limited",

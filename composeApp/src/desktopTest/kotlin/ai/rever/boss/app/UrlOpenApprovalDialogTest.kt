@@ -15,6 +15,14 @@ class UrlOpenApprovalDialogTest {
     val rule = createComposeRule()
 
     @Test
+    fun `approval displays bidi and invisible characters as escapes`() {
+        assertEquals(
+            "https://example.test/path\\u202e\\u200b\\u2066\\u000aend",
+            visibleUrlForApproval("https://example.test/path\u202e\u200b\u2066\nend"),
+        )
+    }
+
+    @Test
     fun `next identical request cannot be approved by an immediate second click`() {
         val queue = UrlOpenApprovalQueue()
         queue.enqueue(PendingUrlOpen("https://identical.example", "identical.example"))

@@ -1,14 +1,10 @@
 package ai.rever.boss.services
 
 /**
- * Sliding-window bound on how fast tabs may be opened for URLs BOSS was asked
- * to open from outside itself.
+ * Sliding-window bound on untrusted URL requests that require operator approval.
  *
- * Every external open funnels through [URLHandlerService.handleURL] — a
- * `boss://url` deep link, a plain http/https hand-off when BOSS is the default
- * browser, a queued cold-start drain — and each of those is reachable by any
- * program or web page that can ask the OS to open a URL. Without a bound a
- * loop of such requests opens tabs as fast as they arrive (tab-spam DoS).
+ * External `boss://url` requests pass through [URLHandlerService.handleURL].
+ * Without a bound, a loop of requests can fill the approval queue.
  * [tryAcquire] admits at most [MAX_OPENS] opens per [WINDOW_MS]; the rest are
  * dropped with a log line by the caller.
  *
