@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.net.URL
 import java.nio.file.Paths
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
@@ -73,6 +74,16 @@ internal fun macOSAppBundlePathFromLibraryPath(libraryPath: String): String? =
     libraryPath
         .split(File.pathSeparatorChar)
         .firstNotNullOfOrNull(::macOSAppBundlePathIn)
+
+/** Find a `.app` ancestor of a code-source URL within the six checked levels. */
+internal fun appBundleAncestorOf(location: URL?): File? {
+    var current = CodeSourceLocation.fileOf(location)
+    repeat(6) {
+        if (current?.name?.endsWith(MACOS_APP_BUNDLE_SUFFIX) == true) return current
+        current = current?.parentFile
+    }
+    return null
+}
 
 /**
  * Resolve a macOS app bundle path without coupling the decision logic to the
@@ -892,7 +903,6 @@ object UpdateInstaller {
      * Get current application path for macOS .app bundle
      * Returns null if running in development mode or path cannot be determined
      */
-    @Suppress("NestedBlockDepth", "ReturnCount")
     fun getCurrentApplicationPath(): String? {
         return try {
             logger.debug(LogCategory.SYSTEM, "Detecting current application path")
@@ -912,33 +922,26 @@ object UpdateInstaller {
             //
             // URL.path is encoded, so paths with spaces cannot be used directly.
             // The shared resolver also preserves network-share authorities.
-            val currentFile = currentCodeSourceFile()
+            val codeSourceLocation =
+                runCatching {
+                    UpdateInstaller::class.java.protectionDomain
+                        ?.codeSource
+                        ?.location
+                }.getOrNull()
             logger.trace(
                 LogCategory.SYSTEM,
                 "Current code source",
-                mapOf("path" to (currentFile?.absolutePath ?: "<unavailable>")),
+                mapOf("url" to (codeSourceLocation?.toString() ?: "<unavailable>")),
             )
 
-            if (currentFile != null) {
-                // Walk up the directory tree looking for .app bundle
-                var curr: File = currentFile
-                for (i in 0..5) {
-                    logger.trace(
-                        LogCategory.SYSTEM,
-                        "Checking parent",
-                        mapOf("index" to i, "path" to curr.absolutePath),
-                    )
-                    if (curr.name.endsWith(".app")) {
-                        logger.debug(
-                            LogCategory.SYSTEM,
-                            "Found app bundle via directory traversal",
-                            mapOf("path" to curr.absolutePath),
-                        )
-                        return resolveRealAppPath(curr.absolutePath)
-                    }
-                    val parent = curr.parentFile ?: break
-                    curr = parent
-                }
+            val appBundle = appBundleAncestorOf(codeSourceLocation)
+            if (appBundle != null) {
+                logger.debug(
+                    LogCategory.SYSTEM,
+                    "Found app bundle via directory traversal",
+                    mapOf("path" to appBundle.absolutePath),
+                )
+                return resolveRealAppPath(appBundle.absolutePath)
             }
 
             // Method 3: Check if running from Applications folder
