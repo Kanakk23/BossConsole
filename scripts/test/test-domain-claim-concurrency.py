@@ -16,6 +16,8 @@ with (Path(__file__).resolve().parents[2] / "supabase/config.toml").open("rb") a
 PSQL = ["docker", "exec", "-i", f"supabase_db_{project_id}", "psql", "-XqAt",
         "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1"]
 USER = str(uuid.uuid4())
+# Reused as a DNS label below: letters/digits satisfy both the organisation
+# slug grammar (no hyphens) and the domain grammar (no underscores).
 SLUG = "quota" + uuid.uuid4().hex[:16]
 SECOND_APP = "domain-quota-" + uuid.uuid4().hex
 AUTH = "SET LOCAL request.jwt.claims = '{\"role\":\"service_role\"}';"
@@ -30,12 +32,12 @@ created = False
 try:
     query(f"INSERT INTO auth.users(id,email) VALUES('{USER}','{SLUG}@quota.test');")
     created = True
-    created_org = query(f"""BEGIN; {AUTH}
+    setup = query(f"""BEGIN; {AUTH}
       SELECT public.create_organisation_internal(
         p_slug => '{SLUG}', p_name => 'Concurrent domain quota', p_description => NULL,
         p_owner_id => '{USER}', p_domain => NULL, p_visibility => 'private',
         p_join_policy => 'invite_only'); COMMIT;""")
-    assert json.loads(created_org)["success"], created_org
+    assert json.loads(setup).get("success") is True, f"Organisation setup failed: {setup}"
     org = query(f"SELECT id FROM public.organisations WHERE slug='{SLUG}'")
     assert org, "Organisation fixture missing"
 
