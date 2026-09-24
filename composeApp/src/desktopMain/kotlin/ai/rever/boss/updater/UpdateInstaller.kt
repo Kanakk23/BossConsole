@@ -916,11 +916,7 @@ object UpdateInstaller {
             // file on disk. `currentCodeSourceFile` (the sibling method) goes through
             // `toURI()` to dodge this; doing the same here is what lets
             // `installMacOSUpdate` find the bundle in a path with spaces.
-            val codeSourceLocation =
-                UpdateInstaller::class.java.protectionDomain
-                    ?.codeSource
-                    ?.location
-            val currentFile: File? = codeSourceLocation?.toURI()?.let(::File)
+            val currentFile = currentCodeSourceFile()
             logger.trace(
                 LogCategory.SYSTEM,
                 "Current code source",
