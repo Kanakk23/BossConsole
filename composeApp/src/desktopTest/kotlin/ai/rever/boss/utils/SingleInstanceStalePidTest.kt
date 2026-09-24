@@ -11,10 +11,12 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.concurrent.thread
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -93,6 +95,26 @@ class SingleInstanceStalePidTest {
     }
 
     @Test
+    fun `non-positive and non-numeric pid values parse as null pid`() {
+        val token = "c".repeat(TOKEN_HEX_LENGTH)
+
+        val negativePidText = "version=1\ntransport=TCP\nendpoint=56789\ntoken=$token\npid=-1"
+        val parsedNegative = parseInstanceDescriptor(negativePidText)
+        assertNotNull(parsedNegative)
+        assertNull(parsedNegative.pid, "Negative PID must parse as null")
+
+        val zeroPidText = "version=1\ntransport=TCP\nendpoint=56789\ntoken=$token\npid=0"
+        val parsedZero = parseInstanceDescriptor(zeroPidText)
+        assertNotNull(parsedZero)
+        assertNull(parsedZero.pid, "Zero PID must parse as null")
+
+        val alphaPidText = "version=1\ntransport=TCP\nendpoint=56789\ntoken=$token\npid=abc123"
+        val parsedAlpha = parseInstanceDescriptor(alphaPidText)
+        assertNotNull(parsedAlpha)
+        assertNull(parsedAlpha.pid, "Non-numeric PID must parse as null")
+    }
+
+    @Test
     fun `isProcessAlive correctly identifies current process and dead pids`() {
         val currentPid = ProcessHandle.current().pid()
         assertTrue(isProcessAlive(currentPid), "Current JVM process must be alive")
@@ -104,18 +126,17 @@ class SingleInstanceStalePidTest {
     @Test
     fun `isAnotherInstanceRunning immediately returns false for dead pid without network ping`() {
         val deadPid = getTerminatedPid()
-        ServerSocket(0).use { serverSocket ->
+        ServerSocket(0, 10, InetAddress.getLoopbackAddress()).use { serverSocket ->
             serverSocket.soTimeout = 50
             val staleDescriptor =
                 InstanceDescriptor(
                     transport = SingleInstanceTransport.TCP,
                     endpoint = serverSocket.localPort.toString(),
-                    token = "c".repeat(TOKEN_HEX_LENGTH),
+                    token = "d".repeat(TOKEN_HEX_LENGTH),
                     pid = deadPid,
                 )
 
-            SingleInstanceFiles.prepare()
-            SingleInstanceFiles.write(staleDescriptor)
+            writeDescriptor(staleDescriptor)
 
             // Must return false immediately because PID is known dead
             val running = SingleInstanceManager.isAnotherInstanceRunning()
@@ -131,18 +152,17 @@ class SingleInstanceStalePidTest {
     @Test
     fun `acquireLock immediately reclaims stale descriptor with dead pid`() {
         val deadPid = getTerminatedPid()
-        ServerSocket(0).use { serverSocket ->
+        ServerSocket(0, 10, InetAddress.getLoopbackAddress()).use { serverSocket ->
             serverSocket.soTimeout = 50
             val staleDescriptor =
                 InstanceDescriptor(
                     transport = SingleInstanceTransport.TCP,
                     endpoint = serverSocket.localPort.toString(),
-                    token = "d".repeat(TOKEN_HEX_LENGTH),
+                    token = "e".repeat(TOKEN_HEX_LENGTH),
                     pid = deadPid,
                 )
 
-            SingleInstanceFiles.prepare()
-            SingleInstanceFiles.write(staleDescriptor)
+            writeDescriptor(staleDescriptor)
 
             // Attempting to acquire lock should instantly succeed by reclaiming the stale descriptor
             val acquired = SingleInstanceManager.acquireLock()
@@ -153,15 +173,86 @@ class SingleInstanceStalePidTest {
                 serverSocket.accept()
             }
 
-            val published = SingleInstanceFiles.read()
+            val published = readPublishedDescriptor()
             assertNotNull(published)
             assertEquals(ProcessHandle.current().pid(), published.pid)
         }
     }
 
     @Test
+    fun `live pid with non-answering endpoint still reclaims via ping fallback`() {
+        val currentPid = ProcessHandle.current().pid()
+        val deadPort = ServerSocket(0, 10, InetAddress.getLoopbackAddress()).use { it.localPort }
+        val staleDescriptor =
+            InstanceDescriptor(
+                transport = SingleInstanceTransport.TCP,
+                endpoint = deadPort.toString(),
+                token = "f".repeat(TOKEN_HEX_LENGTH),
+                pid = currentPid,
+            )
+
+        writeDescriptor(staleDescriptor)
+
+        // Live PID must not be taken as proof the instance is running; fallback ping fails
+        assertFalse(
+            SingleInstanceManager.isAnotherInstanceRunning(),
+            "isAnotherInstanceRunning must return false when live PID's endpoint does not answer",
+        )
+
+        // acquireLock must reclaim the stale descriptor because ping fails
+        val acquired = SingleInstanceManager.acquireLock()
+        assertTrue(
+            acquired,
+            "acquireLock must reclaim stale descriptor with live PID when ping fails",
+        )
+
+        val published = readPublishedDescriptor()
+        assertNotNull(published)
+        assertEquals(currentPid, published.pid)
+    }
+
+    @Test
+    fun `live pid with answering endpoint is detected as running and not reclaimed`() {
+        val currentPid = ProcessHandle.current().pid()
+        val token = "g".repeat(TOKEN_HEX_LENGTH)
+        ServerSocket(0, 10, InetAddress.getLoopbackAddress()).use { serverSocket ->
+            val liveDescriptor =
+                InstanceDescriptor(
+                    transport = SingleInstanceTransport.TCP,
+                    endpoint = serverSocket.localPort.toString(),
+                    token = token,
+                    pid = currentPid,
+                )
+
+            writeDescriptor(liveDescriptor)
+            val serverThread = startFakePingServer(serverSocket)
+
+            try {
+                assertTrue(
+                    SingleInstanceManager.isAnotherInstanceRunning(),
+                    "isAnotherInstanceRunning must return true for responding live instance",
+                )
+
+                val acquired = SingleInstanceManager.acquireLock()
+                assertFalse(
+                    acquired,
+                    "acquireLock must not reclaim responding live instance",
+                )
+
+                val currentDescriptor = readPublishedDescriptor()
+                assertNotNull(currentDescriptor)
+                assertEquals(token, currentDescriptor.token)
+                assertEquals(currentPid, currentDescriptor.pid)
+            } finally {
+                serverSocket.close()
+                serverThread.join(1000)
+            }
+        }
+    }
+
+    @Test
     fun `legacy descriptor with null pid falls back to ping and prevents lock reclamation when endpoint responds`() {
-        val token = "e".repeat(TOKEN_HEX_LENGTH)
+        val token = "h".repeat(TOKEN_HEX_LENGTH)
         ServerSocket(0, 10, InetAddress.getLoopbackAddress()).use { serverSocket ->
             val legacyDescriptor =
                 InstanceDescriptor(
@@ -171,8 +262,7 @@ class SingleInstanceStalePidTest {
                     pid = null,
                 )
 
-            SingleInstanceFiles.prepare()
-            SingleInstanceFiles.write(legacyDescriptor)
+            writeDescriptor(legacyDescriptor)
 
             val serverThread = startFakePingServer(serverSocket)
 
@@ -189,7 +279,7 @@ class SingleInstanceStalePidTest {
                 assertFalse(acquired, "acquireLock must return false and not reclaim responding legacy instance")
 
                 // 4. Verify the descriptor was not overwritten or reclaimed
-                val currentDescriptor = SingleInstanceFiles.read()
+                val currentDescriptor = readPublishedDescriptor()
                 assertNotNull(currentDescriptor)
                 assertNull(currentDescriptor.pid, "Descriptor pid must remain null")
                 assertEquals(legacyDescriptor.endpoint, currentDescriptor.endpoint)
@@ -199,6 +289,49 @@ class SingleInstanceStalePidTest {
                 serverThread.join(1000)
             }
         }
+    }
+
+    @Test
+    fun `reloadDevPlugin returns HostOffline immediately for dead pid without exchange timeout`() {
+        val deadPid = getTerminatedPid()
+        ServerSocket(0, 10, InetAddress.getLoopbackAddress()).use { serverSocket ->
+            serverSocket.soTimeout = 50
+            val staleDescriptor =
+                InstanceDescriptor(
+                    transport = SingleInstanceTransport.TCP,
+                    endpoint = serverSocket.localPort.toString(),
+                    token = "i".repeat(TOKEN_HEX_LENGTH),
+                    pid = deadPid,
+                )
+
+            writeDescriptor(staleDescriptor)
+
+            val result = SingleInstanceManager.reloadDevPlugin("sample-tool")
+            assertIs<ReloadResult.HostOffline>(result)
+            assertTrue(
+                result.message.contains("instance process is not running"),
+                "Message should state instance process is not running: ${result.message}",
+            )
+
+            // Verify that no socket connection or exchange was attempted against the endpoint
+            assertThrows<SocketTimeoutException> {
+                serverSocket.accept()
+            }
+        }
+    }
+
+    // ==================== Helpers ====================
+
+    private fun runtimeDirPath(): Path = File(tempDir.toFile(), "run").toPath()
+
+    private fun descriptorPath(): Path = runtimeDirPath().resolve("single-instance")
+
+    private fun readPublishedDescriptor(): InstanceDescriptor? =
+        if (Files.exists(descriptorPath())) parseInstanceDescriptor(Files.readString(descriptorPath())) else null
+
+    private fun writeDescriptor(descriptor: InstanceDescriptor) {
+        Files.createDirectories(runtimeDirPath())
+        Files.writeString(descriptorPath(), descriptor.encode())
     }
 
     private fun startFakePingServer(serverSocket: ServerSocket): Thread =

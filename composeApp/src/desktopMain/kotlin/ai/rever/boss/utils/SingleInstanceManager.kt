@@ -234,7 +234,7 @@ internal fun parseInstanceDescriptor(text: String): InstanceDescriptor? {
     val transport = SingleInstanceTransport.entries.firstOrNull { it.name == fields[KEY_TRANSPORT] }
     val endpoint = fields[KEY_ENDPOINT]?.takeIf { it.isNotBlank() }
     val token = fields[KEY_TOKEN]?.takeIf { it.length >= TOKEN_HEX_LENGTH }
-    val pid = fields[KEY_PID]?.toLongOrNull()
+    val pid = fields[KEY_PID]?.toLongOrNull()?.takeIf { it > 0 }
 
     return if (transport != null && endpoint != null && token != null) {
         InstanceDescriptor(transport, endpoint, token, pid)
@@ -245,12 +245,19 @@ internal fun parseInstanceDescriptor(text: String): InstanceDescriptor? {
 
 /**
  * Checks whether the OS process with [pid] is currently alive.
- * Returns false if the process does not exist, has exited, or cannot be queried.
+ * Returns false only when the process is positively known not to exist or has exited.
+ * If the process existence cannot be determined (e.g. security manager, query failure),
+ * returns true so callers fall back to the authoritative channel ping rather than
+ * prematurely reclaiming resources.
+ *
+ * Note: PIDs are only meaningful on the local machine and namespace that wrote the descriptor.
+ * Across containers, VMs, or network filesystems (e.g. NFS ~/.boss), a foreign PID may appear
+ * nonexistent locally, causing fallback to ping when the safe default (true) is used on error.
  */
 internal fun isProcessAlive(pid: Long): Boolean =
     runCatching {
         ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
-    }.getOrDefault(false)
+    }.getOrDefault(true)
 
 /**
  * One request read off the channel.
@@ -456,7 +463,7 @@ internal fun isForwardableUrl(url: String?): Boolean =
  * Linux — the descriptor holds the channel token, and the endpoint it names is
  * where a forward (including the auth callback) gets delivered.
  */
-internal object SingleInstanceFiles {
+private object SingleInstanceFiles {
     private const val RUNTIME_DIR_NAME = "run"
     private const val DESCRIPTOR_FILE_NAME = "single-instance"
     private const val SOCKET_FILE_NAME = "single-instance.sock"
@@ -615,8 +622,10 @@ private object SingleInstanceWire {
 
         return try {
             // A socket file left by a crashed instance would make bind fail with
-            // "address already in use". The caller has already established that
-            // nothing answers there, so removing it is safe.
+            // "address already in use". The caller has already either established that
+            // nothing answers there via respondsToPing, or inferred staleness from a dead PID.
+            // Note: a false dead-PID verdict would unlink a live instance's socket and bind
+            // over it, which is why isProcessAlive must never fail open.
             Files.deleteIfExists(path)
 
             val channel = ServerSocketChannel.open(StandardProtocolFamily.UNIX)
@@ -1674,6 +1683,9 @@ object SingleInstanceManager {
         val target =
             SingleInstanceFiles.read()
                 ?: return ReloadResult.HostOffline("BossConsole is not running.")
+        if (target.pid != null && !isProcessAlive(target.pid)) {
+            return ReloadResult.HostOffline("BossConsole is offline (instance process is not running)")
+        }
         val message = "$PROTOCOL_VERSION ${target.token} $VERB_PLUGIN_DEV_RELOAD $pluginId"
         return try {
             val response =
@@ -1683,7 +1695,7 @@ object SingleInstanceManager {
                     timeoutMs = timeoutMs.toLong(),
                     maxResponseBytes = MAX_RESPONSE_BYTES,
                 ) ?: return if (target.pid != null && !isProcessAlive(target.pid)) {
-                    ReloadResult.HostOffline("BossConsole is offline (PID ${target.pid} is not running)")
+                    ReloadResult.HostOffline("BossConsole is offline (instance process is not running)")
                 } else if (SingleInstanceWire.respondsToPing(target)) {
                     ReloadResult.TimedOut(
                         "BossConsole is running but did not confirm the reload within $timeoutMs ms; " +
