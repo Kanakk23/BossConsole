@@ -910,12 +910,8 @@ object UpdateInstaller {
 
             // Method 2: Try to find app bundle from current JAR/class location.
             //
-            // `protectionDomain.codeSource.location` is a `URL`, and `URL.path` is
-            // URL-encoded - so a macOS install under "/Users/Bob Smith/.../BOSS.app"
-            // arrives as "/Users/Bob%20Smith/.../BOSS.app", which never matches any
-            // file on disk. `currentCodeSourceFile` (the sibling method) goes through
-            // `toURI()` to dodge this; doing the same here is what lets
-            // `installMacOSUpdate` find the bundle in a path with spaces.
+            // URL.path is encoded, so paths with spaces cannot be used directly.
+            // The shared resolver also preserves network-share authorities.
             val currentFile = currentCodeSourceFile()
             logger.trace(
                 LogCategory.SYSTEM,
