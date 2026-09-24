@@ -3,6 +3,14 @@ package ai.rever.boss.mcp
 import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.mcp.sandbox.DefaultMcpRiskEvaluator
 import ai.rever.boss.mcp.sandbox.McpRiskLevel
+import ai.rever.boss.mcp.secrets.McpResultFilter
+import ai.rever.boss.mcp.secrets.McpSecretPrePass
+import ai.rever.boss.mcp.secrets.SecretDescriptor
+import ai.rever.boss.mcp.secrets.SecretLookup
+import ai.rever.boss.mcp.secrets.SecretPreparation
+import ai.rever.boss.mcp.secrets.SecretRecord
+import ai.rever.boss.mcp.secrets.SecretReferenceResolver
+import ai.rever.boss.mcp.secrets.withSecrets
 import ai.rever.boss.plugin.api.McpToolArgs
 import ai.rever.boss.plugin.api.McpToolDefinition
 import ai.rever.boss.plugin.api.McpToolProvider
@@ -11,6 +19,7 @@ import ai.rever.boss.plugin.api.McpToolResult
 import ai.rever.boss.plugin.api.RegisteredMcpTool
 import ai.rever.boss.plugin.logging.LogSanitizer
 import ai.rever.boss.plugin.pathutils.BossDirectories
+import ai.rever.boss.services.supabase.SecretService
 import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.ComponentLogger
@@ -100,6 +109,29 @@ object McpToolRegistryImpl : McpToolRegistry {
     /** How long a kill-switch fault sits in the bottom bar — longer than a routine status message. */
     private const val FAULT_MESSAGE_MS = 10_000L
 
+    /**
+     * How `{{secret:<id>}}` references reach the vault: the same host-owned `SecretService` the
+     * Secret Manager panel and the browser autofill read through, mapped to the resolver's own
+     * record type at this one seam. Only consulted for a call that carries a reference, so a
+     * host with no signed-in session pays nothing until an agent asks for a secret - and then
+     * gets a refusal, since the RPC has no session to run under.
+     */
+    private val hostSecretLookup =
+        SecretLookup { limit, offset ->
+            SecretService.getUserSecrets(limit, offset).map { page ->
+                page.data.map { entry ->
+                    SecretRecord(
+                        id = entry.id,
+                        website = entry.website,
+                        username = entry.username,
+                        password = entry.password,
+                        notes = entry.notes,
+                        tags = entry.tags,
+                    )
+                }
+            }
+        }
+
     val policyEngine =
         McpPolicyEngine(
             policyFile = BossDirectories.resolve("mcp-tool-policy.json"),
@@ -123,6 +155,7 @@ object McpToolRegistryImpl : McpToolRegistry {
             policyEngine = policyEngine,
             approvalBus = approvalBus,
             ledger = ledger,
+            secretLookup = hostSecretLookup,
         )
 
     init {
@@ -317,6 +350,17 @@ internal fun mcpToolPermitted(
 internal const val MAX_MCP_RESULT_CHARS: Int = 150_000
 
 /**
+ * The RBAC permission a `{{secret:<id>}}` reference requires of a non-admin user - the same one
+ * the secret-manager plugin puts on `secret_get` and `secrets_list` (see `docs/RBAC_GUIDE.md`).
+ */
+internal const val SECRET_READ_PERMISSION: String = "secret.read"
+
+private data class McpAccessSnapshot(
+    val isAdmin: Boolean = false,
+    val permissions: Set<String> = emptySet(),
+)
+
+/**
  * Cut [text] to at most [cap] characters and append a marker saying so.
  *
  * A free function next to [mcpToolPermitted], for the same reason: the rule is testable
@@ -389,7 +433,15 @@ private fun truncationMarker(
 // Suppressed rather than hidden behind mutable state: the count is a real signal that this
 // class wants its collaborators grouped into a config object, and that should stay visible
 // to whoever adds the ninth.
-@Suppress("LongParameterList")
+//
+// LargeClass for the same reason, and it is the same signal: the class now holds the kill
+// switch, RBAC, the policy path, YOLO mode, the approval fence, the secret pre-pass hand-off,
+// execution and the ledger write. The secret work keeps its own logic in
+// `ai.rever.boss.mcp.secrets` (McpSecretPrePass, the resolver, the substitution and the
+// scrubber) and adds only the hand-off here, so splitting further is a change to the
+// governance path's shape rather than to this feature - and should be done deliberately, not
+// as a side effect of landing one.
+@Suppress("LongParameterList", "LargeClass")
 internal class McpToolRegistryCore(
     private val disabledFile: File?,
     private val invokeTimeoutMs: Long = 60_000L,
@@ -400,6 +452,13 @@ internal class McpToolRegistryCore(
     val ledger: McpOperationLedger = McpOperationLedger(),
     /** Injected so tests need not set process env; production reads [McpYoloGate]. */
     val yoloAvailable: Boolean = !McpYoloGate.disabledByDeployment,
+    /**
+     * Where `{{secret:<id>}}` references are resolved from. `null` (the test default) means
+     * no vault: a call carrying a reference is refused as unresolved rather than passed
+     * through with its placeholders, so a registry without a vault can never hand a handler
+     * literal `{{secret:...}}` text it might mistake for a value.
+     */
+    secretLookup: SecretLookup? = null,
 ) {
     private val logger = BossLogger.forComponent("McpToolRegistry")
 
@@ -434,6 +493,20 @@ internal class McpToolRegistryCore(
         }
         return true
     }
+
+    /**
+     * The `{{secret:<id>}}` pre-pass. The permission check is a lambda over this core's own RBAC
+     * state so the pre-pass mirrors [mcpToolPermitted]'s admin bypass without holding a copy.
+     */
+    private val secretPrePass =
+        McpSecretPrePass(
+            policyEngine = policyEngine,
+            resolver = secretLookup?.let { SecretReferenceResolver(it) },
+            secretsPermitted = {
+                val access = accessSnapshot
+                access.isAdmin || SECRET_READ_PERMISSION in access.permissions
+            },
+        )
 
     /**
      * Serializes all mutations + recomputes (see [McpToolRegistryImpl] KDoc).
@@ -517,29 +590,14 @@ internal class McpToolRegistryCore(
     /**
      * Current user's RBAC state, pushed by the host (see [updateAccess]); gates tool exposure.
      *
-     * Already `@Volatile` before the global search existed, which is what makes the new reader
-     * safe: `permittedTools()` is now called from the search's supplier inside an `async` on
-     * `Dispatchers.Default`, so the write needs a happens-before edge to a thread the writer does
-     * not drive. Without it the staleness would fail OPEN - a search dispatched right after
-     * sign-out filtered against the previous session's permissions - which is the wrong direction
-     * for the field deciding whether admin-only tool names are enumerable.
-     *
-     * The two are volatile individually and NOT read as a pair: [updateAccess] writes [isAdmin]
-     * then [permissions] outside any lock a reader takes, so a reader can see the new flag with
-     * the old set. The window is one dispatch wide and only matters for permission-gated (not
-     * admin-gated) tools, which is why it is documented rather than locked.
-     *
-     * **It fails OPEN**, and that is the part to carry forward if this reasoning is ever copied
-     * somewhere else: the exposed set during that window is the outgoing session's, so a tool the
-     * new state would deny can still be listed for one dispatch after a sign-out. Tolerable here
-     * because the registry backs a loopback-only server for the local machine's own agents; not
-     * tolerable in a context where the reader is a remote caller.
+     * One immutable volatile snapshot keeps the admin flag and permission set from different
+     * sessions from being observed together. This matters for secret delivery, where a mixed
+     * snapshot could otherwise turn a short metadata-exposure race into a credential gate that
+     * fails open. The volatile write also supplies the happens-before edge required by background
+     * readers such as global search.
      */
     @Volatile
-    private var isAdmin = false
-
-    @Volatile
-    private var permissions: Set<String> = emptySet()
+    private var accessSnapshot = McpAccessSnapshot()
 
     /** Enabled tools = registered minus user-disabled minus permission-denied. This is what the bridge mirrors. */
     private val _tools = MutableStateFlow<List<RegisteredMcpTool>>(emptyList())
@@ -711,8 +769,7 @@ internal class McpToolRegistryCore(
         isAdmin: Boolean,
         permissions: Set<String>,
     ) = synchronized(mutationLock) {
-        this.isAdmin = isAdmin
-        this.permissions = permissions
+        accessSnapshot = McpAccessSnapshot(isAdmin, permissions)
         applyExposed()
     }
 
@@ -785,7 +842,10 @@ internal class McpToolRegistryCore(
     fun permittedTools(): List<RegisteredMcpTool> = _all.value.filter { permitted(it.definition) }
 
     /** Mirrors host RBAC. The rule itself is [mcpToolPermitted], which is where it is tested. */
-    private fun permitted(def: McpToolDefinition): Boolean = mcpToolPermitted(def, isAdmin, permissions)
+    private fun permitted(def: McpToolDefinition): Boolean {
+        val access = accessSnapshot
+        return mcpToolPermitted(def, access.isAdmin, access.permissions)
+    }
 
     @Suppress("LongMethod") // Keep authorization and execution inside the same cancellation audit boundary.
     suspend fun invoke(
@@ -804,11 +864,20 @@ internal class McpToolRegistryCore(
         val savedPolicy = policyEngine.policyFor(toolName, tool.providerId, tool.definition.readOnly)
         val policy = askBeforeDestructiveShell(toolName, args, savedPolicy)
         val startTime = System.nanoTime()
+        // The secret pre-pass runs before the audit boundary below on purpose: nothing in it
+        // executes the tool, and a cancellation while the vault is being read has nothing to
+        // record - the ledger's job is to say what happened to an authorized-or-refused call,
+        // and this call is neither yet. Everything it decides is carried into that boundary.
+        val secrets = secretPrePass.prepare(args, policy)
+        val effectivePolicy = secrets.effectivePolicy(policy)
         var disposition = McpApprovalDisposition.AUTO_ALLOWED
         var result: McpToolResult? = null
         var executionStarted = false
         try {
-            val authorization = authorizeInvocation(tool, args, policy, revocation, escalated = policy != savedPolicy)
+            // `escalated` is dev's destructive-shell gate (#1577/#1624); the secret path reaches
+            // the same conclusion by its own route, so both flow into one authorize().
+            val authorization =
+                authorize(tool, args, effectivePolicy, revocation, secrets, escalated = policy != savedPolicy)
             disposition = authorization.first
             val denial = authorization.second
             result =
@@ -817,14 +886,14 @@ internal class McpToolRegistryCore(
                         McpToolResult(denial, isError = true)
                     }
 
-                    !confirmApproval(tool, revocation, disposition) || !isAvailable(tool) -> {
+                    !confirmApproval(tool, revocation, disposition, secrets) || !isAvailable(tool) -> {
                         disposition = McpApprovalDisposition.POLICY_DENIED
                         McpToolResult("MCP tool access revoked while awaiting approval", isError = true)
                     }
 
                     else -> {
                         executionStarted = true
-                        executeAuthorized(tool, args)
+                        executeAuthorized(tool, secrets.executionArgs(args), secrets.resultFilter())
                     }
                 }
             return requireNotNull(result)
@@ -845,10 +914,12 @@ internal class McpToolRegistryCore(
                 ledger.record(
                     toolName = toolName,
                     providerId = tool.providerId,
-                    policyApplied = policy,
+                    policyApplied = effectivePolicy,
                     approvalDisposition = disposition,
                     durationMs = (System.nanoTime() - startTime) / 1_000_000L,
                     isError = result?.isError ?: true,
+                    // The ORIGINAL arguments, references intact: a reference is inert text,
+                    // so this record carries what the agent wrote and never what it received.
                     rawArgs = McpArgumentSanitizer.parseArguments(args.raw),
                     errorSnippet =
                         when {
@@ -856,6 +927,7 @@ internal class McpToolRegistryCore(
                             result?.isError == true -> result?.text
                             else -> null
                         },
+                    secretRefs = secrets.references.map { it.ledgerName },
                 )
             }
         }
@@ -868,9 +940,11 @@ internal class McpToolRegistryCore(
         tool: RegisteredMcpTool,
         revocation: Long,
         disposition: McpApprovalDisposition,
+        secrets: SecretPreparation,
     ): Boolean =
         withContext(Dispatchers.IO) {
             isAvailable(tool) &&
+                (secrets !is SecretPreparation.Ready || secretAccessPermitted()) &&
                 policyEngine.confirmInvocation(
                     tool.definition.name,
                     revocation,
@@ -879,6 +953,11 @@ internal class McpToolRegistryCore(
                     declaredReadOnly = tool.definition.readOnly,
                 )
         }
+
+    private fun secretAccessPermitted(): Boolean {
+        val access = accessSnapshot
+        return access.isAdmin || SECRET_READ_PERMISSION in access.permissions
+    }
 
     /** Recheck access before saving a queued ALLOW; resets invalidate older answers under the policy lock. */
     @Suppress("ReturnCount") // Ordered denial, access revocation, persistence and write-failure outcomes.
@@ -1034,11 +1113,26 @@ internal class McpToolRegistryCore(
         }
 
     /**
-     * [escalated] is true when [askBeforeDestructiveShell] turned a saved ALLOW into this ASK. A
-     * rule saved from such a prompt would change nothing - the gate overrides it on the next
-     * destructive call - so an approval here always counts as once, whatever scope came back
-     * (#1624). The dialog offers only that scope; this holds the line if a caller asks for more.
+     * The secret pre-pass's refusal is final and never reaches the policy path; anything else
+     * is authorized as before, with the descriptors carried into the prompt.
      */
+    private suspend fun authorize(
+        tool: RegisteredMcpTool,
+        args: McpToolArgs,
+        policy: McpPolicyAction,
+        revocation: Long,
+        secrets: SecretPreparation,
+        escalated: Boolean,
+    ): Pair<McpApprovalDisposition, String?> =
+        when (secrets) {
+            is SecretPreparation.Refused -> {
+                secrets.disposition to secrets.message
+            }
+
+            else -> {
+                authorizeInvocation(tool, args, policy, revocation, escalated, secrets.descriptors)
+            }
+        }
 
     /**
      * An approval of an escalated call counts as once, whatever scope came back (#1624). The dialog
@@ -1067,6 +1161,7 @@ internal class McpToolRegistryCore(
         policy: McpPolicyAction,
         revocation: Long,
         escalated: Boolean = false,
+        secretRefs: List<SecretDescriptor> = emptyList(),
     ): Pair<McpApprovalDisposition, String?> =
         when (policy) {
             McpPolicyAction.DENY -> {
@@ -1078,8 +1173,9 @@ internal class McpToolRegistryCore(
             }
 
             // YOLO answers the prompt, and only the prompt: DENY above, the kill switch and RBAC
-            // are all decided before this branch is reached.
-            McpPolicyAction.ASK if policyEngine.yoloMode.value -> {
+            // are all decided before this branch is reached. A secret-bearing call still asks:
+            // YOLO answers for the tool, never for the vault.
+            McpPolicyAction.ASK if policyEngine.yoloMode.value && secretRefs.isEmpty() -> {
                 McpApprovalDisposition.YOLO_ALLOWED to null
             }
 
@@ -1090,15 +1186,27 @@ internal class McpToolRegistryCore(
                             tool.definition.name,
                             tool.providerId,
                             McpArgumentSanitizer.parseArguments(args.raw),
-                            riskAssessment = DefaultMcpRiskEvaluator().evaluateRisk(tool.definition.name, args),
+                            riskAssessment =
+                                DefaultMcpRiskEvaluator()
+                                    .evaluateRisk(tool.definition.name, args)
+                                    .withSecrets(secretRefs),
                             declaredReadOnly = tool.definition.readOnly,
                             toolDescription = tool.definition.description,
                             policy = policy,
                             escalated = escalated,
+                            secretRefs = secretRefs,
                         )
                 ) {
                     is McpApprovalDecision.Approved -> {
-                        approvedAuthorization(tool, onceIfEscalated(tool, decision, escalated), revocation)
+                        // Two reasons a broader scope cannot be honoured, one mechanism: the
+                        // destructive-shell gate overrides any saved allow on the next call
+                        // (#1624), and a secret-bearing call is refused a durable rule because
+                        // the prompt was raised for the secret, not for the tool.
+                        approvedAuthorization(
+                            tool,
+                            onceIfEscalated(tool, decision, escalated || secretRefs.isNotEmpty()),
+                            revocation,
+                        )
                     }
 
                     is McpApprovalDecision.Denied -> {
@@ -1135,10 +1243,16 @@ internal class McpToolRegistryCore(
             this == McpApprovalDisposition.SESSION_TRUSTED ||
                 this == McpApprovalDisposition.PROVIDER_TRUST_PERSIST_FAILED
 
+    /**
+     * [filter] runs before the cap, and over the failure text too: a result is scrubbed of
+     * resolved secrets (when the call carried any) and only then bounded, so the cut cannot
+     * fall inside a value and leave half of it readable.
+     */
     private suspend fun executeAuthorized(
         tool: RegisteredMcpTool,
         args: McpToolArgs,
-    ): McpToolResult = capResult(tool.definition.name, executeUncapped(tool, args))
+        filter: McpResultFilter = McpResultFilter.NONE,
+    ): McpToolResult = capResult(tool.definition.name, filter.apply(executeUncapped(tool, args)))
 
     /**
      * Bound the text a plugin answers with, whatever it asked to say.

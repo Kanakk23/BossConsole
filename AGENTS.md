@@ -2133,6 +2133,7 @@ workspace by selecting the tools you need." Tools install app-wide, not into a S
 - [Authenticated IPC rollout](docs/authenticated-ipc-rollout.md): paired runtime release, ownership, and credential lifetime.
 
 - [MCP for agent-less operators](docs/mcp-agentless-operators.md) - Toolbox kill-switches and attach path
+- [Secret references in MCP tool calls](docs/MCP_SECRET_REFERENCES.md) - the guarantee, its non-goals, the pipeline and the invariants
 
 - [Core Subsystems](docs/SUBSYSTEMS.md) - Auth, UI, keyboard shortcuts, threading, default applications, runner, BossTerm
 - [BossEditor](docs/BOSSEDITOR.md) - External editor dependency, LSP, PSI, editor features
@@ -2201,7 +2202,8 @@ still override provider ALLOW. The Trusted plugins UI lists ALLOW rules only; ha
 provider DENY rules currently require policy-file editing to remove.
 
 **YOLO mode** makes any call whose policy resolves to ASK run without prompting, for every tool
-and provider, CRITICAL-risk ones and tools registered later included. Any user can turn it on,
+and provider, CRITICAL-risk ones and tools registered later included - secret-bearing calls
+excepted: YOLO answers for the tool, never for the vault. Any user can turn it on,
 behind one confirmation (`McpYoloConfirmation`, composed per window in `BossAppDialogs` and
 raised through `McpYoloPrompt`), from either of two places: **MCP access → YOLO mode...** in the
 bottom bar, or the **Tools → MCP YOLO Mode** checkbox in the application menu. The menu item is
@@ -2211,9 +2213,9 @@ checkmark is the indicator and unchecking turns the mode off; in the bar it read
 in the alert colour with "Turn off YOLO mode" first in the menu.
 
 - **It replaces only the prompt.** `policyFor` is untouched, so explicit tool or provider DENY,
-  an unreadable policy file, the kill switch and RBAC still refuse first, and a revoke or DENY
-  landing mid-flight still stops the call at `confirmInvocation`. `McpYoloModeTest` drives the
-  real registry to pin this.
+  an unreadable policy file, the kill switch and RBAC still refuse first, a secret-bearing call
+  keeps its prompt, and a revoke or DENY landing mid-flight still stops the call at
+  `confirmInvocation`. `McpYoloModeTest` drives the real registry to pin this.
 - **In memory only** (`McpPolicyEngine.yoloMode`), off at every launch. Prompts already queued
   when it is turned on still ask.
 - **Audited in the ledger, both the calls and the switch.** Each call it lets through is
@@ -2256,6 +2258,53 @@ never overridden, so it is the durable answer there (#1624). Shell tools are rat
 string in their arguments. Arguments nested past MAX_MCP_ARGUMENT_DEPTH rate CRITICAL without being
 parsed (every parse on the invoke path checks the same depth guard first); arguments too wide to
 scan fully rate CRITICAL on the part that was not inspected.
+
+### Secret references at the governance boundary
+
+`{{secret:<id>}}` in a governed tool's arguments is resolved by the host inside
+`McpToolRegistryCore.invoke`, after the operator approves and before the handler runs. The full
+contract is [docs/MCP_SECRET_REFERENCES.md](docs/MCP_SECRET_REFERENCES.md); the decisions a
+later change is most likely to want to undo are recorded here so they are undone knowingly.
+
+- **Non-disclosure, not non-exfiltration.** The claim is that the value never enters the
+  LLM-facing path (arguments, result, approval dialog, ledger, host log). It is not that an
+  authorized tool cannot forward it. Plugins are in-process and already hold the vault through
+  `PluginContext.secretDataProvider`, so references add no plugin-side exposure. Do not let
+  docs or PR text drift toward the stronger claim.
+- **`invoke` is an enforcement boundary for governed traffic, not a security boundary for the
+  process.** BossTerm's built-ins and terminal-tab's `run_in_sidebar`/`cli` never reach it (#495);
+  a reference typed there is never resolved.
+- **A secret-bearing call always asks.** The secret policy sits above session trust, above a
+  tool or provider ALLOW and above YOLO mode in the precedence, and `secretBearingCalls` has
+  only ASK and DENY. There
+  is no ALLOW on purpose: a flagship governance primitive must not ship with its own bypass. An
+  operator who wants fewer prompts is asking for a per-(tool, secret) grant with its own review
+  and revocation surface, which is a separate design.
+- **The vault is read once, before the prompt.** The operator must see which secret (website,
+  username, field) the tool would receive, and that metadata comes from the same RPC as the
+  value. A second read after approval would be theatre. The value is delivered only after
+  `confirmApproval`'s revocation fence passes.
+- **All or nothing.** One malformed or unresolvable reference refuses the whole call before any
+  prompt. A handler must never receive placeholder text it might mistake for a value; that is
+  also why `secretReferencesEnabled = false` refuses rather than passes through.
+- **Substitution rewrites the JSON tree and rebuilds `McpToolArgs` through `parseMcpToolArgs`**,
+  so the scalar map and the raw JSON a handler may parse itself cannot disagree. Keys are never
+  scanned or substituted.
+- **The scrubber is defense in depth and is switchable** (`resultScrubbingEnabled`). It replaces
+  exact, JSON-escaped and percent-encoded forms of values of 8+ characters; it cannot see a hash,
+  a base64 encoding or a case change, and the docs table says so. The invariant tests run with it
+  off to prove the rest of the pipeline holds without it. It runs before the result cap so a cut
+  cannot land inside a value.
+- **The ledger stores references.** `sanitizedArgs` is built from the ORIGINAL arguments, and
+  `secretRefs` lists `<id>.<field>`. `SECRET_FORBIDDEN` and `SECRET_UNRESOLVED` are "withheld"
+  in the activity log's exhaustive `when`, the same bucket as `QUEUE_FULL`.
+- **UUID ids only, three fields only.** The grammar is anchored and brace-free so it is linear;
+  TOTP is deliberately not a field (a six-digit code cannot be scrubbed, and nothing consumes one
+  through a tool today).
+- **The RBAC gate mirrors the plugin's.** A non-admin needs `secret.read`, the permission the
+  secret-manager plugin puts on `secret_get`; the AI-provider tag refusal mirrors that plugin's
+  `aiProviderRefusal`. Neither can be reached through a reference that could not be reached
+  through the plugin.
 
 ## Process log authority and lifetime
 

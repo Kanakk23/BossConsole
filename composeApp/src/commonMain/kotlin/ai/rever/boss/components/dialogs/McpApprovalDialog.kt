@@ -3,6 +3,7 @@ package ai.rever.boss.components.dialogs
 import ai.rever.boss.mcp.McpApprovalRequest
 import ai.rever.boss.mcp.McpArgumentSanitizer
 import ai.rever.boss.mcp.McpMutatingToolCatalog
+import ai.rever.boss.mcp.secrets.SecretDescriptor
 import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.ui.BossTheme
 import androidx.compose.foundation.BorderStroke
@@ -110,9 +111,24 @@ internal fun McpApprovalScope.persistsDeny(): Boolean = this == McpApprovalScope
  * destructive attempts needs. An object so the rules sit together, apart from the composable.
  */
 internal object McpPromptChoices {
-    /** The scopes offered: all of them, or once plus "Always" for its deny half when escalated. */
+    /**
+     * The scopes offered: all of them, or a narrowed set when a saved allow could not have
+     * pre-approved this call.
+     *
+     * Two reasons that happens, and they narrow differently. An **escalated** call (#1624) offers
+     * once plus "Always" for its deny half, since the destructive-shell gate overrides any saved
+     * allow on the next call anyway. A **secret-bearing** call offers once and this session: the
+     * two durable scopes are refused by the engine for such a call
+     * (`approvedAuthorization` applies them as once), so offering them would promise a rule that
+     * is never written, while session trust is genuinely available because it never satisfies a
+     * later secret-bearing call - that one asks again regardless.
+     */
     fun scopesFor(request: McpApprovalRequest): List<McpApprovalScope> =
-        if (request.escalated) listOf(McpApprovalScope.ONCE, McpApprovalScope.ALWAYS_TOOL) else McpApprovalScope.entries
+        when {
+            request.escalated -> listOf(McpApprovalScope.ONCE, McpApprovalScope.ALWAYS_TOOL)
+            request.secretRefs.isNotEmpty() -> listOf(McpApprovalScope.ONCE, McpApprovalScope.SESSION)
+            else -> McpApprovalScope.entries
+        }
 
     /** What the allow button sends: always once on an escalated request, whatever is selected. */
     fun allowFlagsFor(
@@ -233,6 +249,14 @@ fun McpApprovalDialog(
 
                     Spacer(modifier = Modifier.height(16.dp))
                     ToolDetails(request)
+
+                    // What the tool would be handed from the vault. Metadata only - the request
+                    // carries descriptors, never values - and above the risk line because it is
+                    // the one fact this dialog exists to put in front of the operator here.
+                    if (request.secretRefs.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        SecretReferencesSection(request.secretRefs)
+                    }
 
                     val riskLines =
                         buildList {
@@ -624,5 +648,53 @@ private fun ScopeOption(
             Text(text = title, fontSize = 13.sp, color = titleColor)
             Text(text = description, fontSize = 11.sp, color = colors.textSecondary)
         }
+    }
+}
+
+/**
+ * The secrets a call would deliver, one row each, and the sentence about scope that keeps the
+ * operator's expectations right: the value goes to the tool and never to the agent, and a
+ * secret-bearing call asks again whatever rule exists for the tool (see `McpSecretPolicyAction`).
+ */
+@Composable
+internal fun SecretReferencesSection(secretRefs: List<SecretDescriptor>) {
+    val colors = BossTheme.colors
+    Column(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .background(colors.raised, RoundedCornerShape(4.dp))
+                .border(1.dp, colors.alert, RoundedCornerShape(4.dp))
+                .padding(8.dp),
+    ) {
+        Text(
+            text =
+                if (secretRefs.size == 1) {
+                    "This call receives 1 secret:"
+                } else {
+                    "This call receives ${secretRefs.size} secrets:"
+                },
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = colors.alert,
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        secretRefs.forEach { descriptor ->
+            Text(
+                text = descriptor.display,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                color = colors.textPrimary,
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text =
+                "The value goes to the tool, never to the agent. " +
+                    "Secret-bearing calls ask every time and cannot create a durable allow rule; " +
+                    "\"this session\" still covers this tool's calls that carry no secret.",
+            fontSize = 11.sp,
+            color = colors.textSecondary,
+        )
     }
 }

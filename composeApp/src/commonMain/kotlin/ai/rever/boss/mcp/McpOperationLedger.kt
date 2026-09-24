@@ -157,6 +157,7 @@ class McpOperationLedger(
         // hash-chained ledger an audit reads, but it is not a tool call and must not inflate the
         // call and error counters the activity log summarises.
         countsAsCall: Boolean = true,
+        secretRefs: List<String> = emptyList(),
     ): McpOperationRecord {
         val sanitized = sanitizeArguments(rawArgs)
         val sanitizedErrorSnippet = errorSnippet?.let { McpArgumentSanitizer.sanitizeMessage(it).take(4096) }
@@ -172,6 +173,7 @@ class McpOperationLedger(
                 isError = isError,
                 sanitizedArgs = sanitized,
                 errorSnippet = sanitizedErrorSnippet,
+                secretRefs = secretRefs,
             )
 
         // Under one lock so queue order always equals ring-buffer order. What does NOT
