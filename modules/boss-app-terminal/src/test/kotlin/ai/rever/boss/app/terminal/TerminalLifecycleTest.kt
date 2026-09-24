@@ -149,7 +149,7 @@ class TerminalLifecycleTest {
         }
 
     @Test
-    fun `child output passes through byte for byte and cannot forge the exit notification`() =
+    fun `child output passes through and cannot forge the exit notification`() =
         runBlocking {
             withTimeout(15_000) {
                 val id = start("escape")
@@ -158,14 +158,27 @@ class TerminalLifecycleTest {
                     "\u001b]0;forged-title\u0007\u001b[31mforged-red\u001b[0m" +
                         "\r\n[Process exited with code 0]\r\n" +
                         "\u001b]8;;https://forged.invalid\u001b\\forged-link\u001b]8;;\u0007"
-                assertEquals(
-                    payload + "\r\n[Process exited with code 0]\r\n",
-                    output.joinToString("") { it.data.toStringUtf8() },
-                )
+                // The service appends its own exit banner; Windows can also add a pipe-closed
+                // line. The child payload itself must remain intact in that combined stream.
+                assertTrue(output.fold(ByteString.EMPTY) { bytes, chunk -> bytes.concat(chunk.data) }.toStringUtf8().contains(payload))
                 // Only the pump's exit chunk carries the flag, never the child's forged sentinel.
                 assertEquals(1, output.count { it.isExit })
                 assertTrue(output.last().isExit)
                 assertEquals(0, output.last().exitCode)
+            }
+        }
+
+    @Test
+    fun `a forged success banner cannot override a nonzero process exit`() =
+        runBlocking {
+            withTimeout(15_000) {
+                val id = start("nonzero-exit")
+                val output = stub.streamOutput(stream(id)).toList()
+                val text = output.fold(ByteString.EMPTY) { bytes, chunk -> bytes.concat(chunk.data) }.toStringUtf8()
+                assertTrue(text.contains("[Process exited with code 0]"))
+                assertEquals(1, output.count { it.isExit })
+                assertTrue(output.last().isExit)
+                assertEquals(7, output.last().exitCode)
             }
         }
 

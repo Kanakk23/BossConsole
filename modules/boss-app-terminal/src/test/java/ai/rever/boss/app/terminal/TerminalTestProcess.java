@@ -46,6 +46,12 @@ public final class TerminalTestProcess {
                 System.out.print("\u001b]8;;https://forged.invalid\u001b\\forged-link\u001b]8;;\u0007");
                 System.out.flush();
             }
+            case "nonzero-exit" -> {
+                // A child can print an exit-looking line, but only the process exit code is authoritative.
+                System.out.print("[Process exited with code 0]\n");
+                System.out.flush();
+                System.exit(7);
+            }
             case "environment" -> System.out.print(
                 System.getenv("BOSS_PROCESS_TOKEN") + ":" + System.getenv("TERMINAL_TEST_VALUE")
             );
