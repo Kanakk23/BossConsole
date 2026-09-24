@@ -766,6 +766,157 @@ class WorkspaceMcpToolProviderTest {
             assertTrue(fileManager.loadWorkspace(WorkspaceFileManagerCommon.fileNameForId(wsId)) == null)
         }
 
+    /**
+     * The middle layer on its own: what a path-shaped id would become if it ever reached the name
+     * derivation. `isSafeWorkspaceId` refuses such an id at the top of both handlers today, so the
+     * invocation below is a regression guard for THAT gate; this assertion is the one that pins
+     * this derivation, and it fails if `workspaceFileNameFor` stops sanitizing.
+     */
+    @Test
+    fun `close_workspace derives the file to delete from the id, never from a path in it`() =
+        runBlocking {
+            val core = createTestCore()
+            // A sibling of the workspace directory, which is where ~/.boss/*.json sits relative
+            // to ~/Documents/BOSS/workspaces in production. On Windows the joined path
+            // dir\workspace-disposable-\..\victim.json resolves lexically, missing component
+            // or not; the assertion holds on every platform because the id never becomes a path.
+            val victim = File(workspaceDir.parentFile, "victim-${workspaceDir.name}.json")
+            victim.writeText("{}")
+            try {
+                val traversal = "${WorkspaceMcpToolProvider.DISPOSABLE_ID_PREFIX}/../${victim.name}"
+                assertEquals(
+                    "${WorkspaceMcpToolProvider.DISPOSABLE_ID_PREFIX}_.._${victim.name}",
+                    WorkspaceMcpToolProvider.workspaceFileNameFor(traversal),
+                )
+                // Refused before that derivation is reached, by the id gate on dev.
+                val result = core.invoke("close_workspace", """{"workspaceId":"$traversal"}""")
+                assertTrue(result.isError, result.text)
+                assertTrue(result.text.contains("Invalid workspaceId"), result.text)
+                assertTrue(victim.exists(), "a workspace id must never reach a path outside the workspace directory")
+            } finally {
+                victim.delete()
+            }
+        }
+
+    @Test
+    fun `the file manager refuses a name that is not a bare file name`() =
+        runBlocking {
+            val victim = File(workspaceDir.parentFile, "victim-${workspaceDir.name}.json")
+            victim.writeText(WorkspaceSerializer.serialize(savedSpaceFixture("victim", workspaceDir.absolutePath)))
+            try {
+                assertFalse(fileManager.deleteWorkspace("../${victim.name}"))
+                assertTrue(victim.exists(), "deleteWorkspace must not follow a relative path out of the directory")
+                assertNull(fileManager.loadWorkspace("../${victim.name}"))
+                assertNull(fileManager.loadDocument("../${victim.name}"))
+                assertFalse(fileManager.writeDocumentBlocking("../${victim.name}", "{}"))
+                val escaping = savedSpaceFixture("x", workspaceDir.absolutePath)
+                assertNull(fileManager.saveWorkspace(escaping, "../escaped.json"))
+                assertFalse(File(workspaceDir.parentFile, "escaped.json").exists())
+                assertEquals(
+                    WorkspaceSerializer.serialize(savedSpaceFixture("victim", workspaceDir.absolutePath)),
+                    victim.readText(),
+                    "the file outside the directory is untouched",
+                )
+            } finally {
+                victim.delete()
+            }
+        }
+
+    /**
+     * A regression guard for `isSafeWorkspaceId`, which is what refuses this today, kept because
+     * the id gate and the name derivation are edited in different files by different changes and
+     * removing either must fail something. The layer this PR adds is pinned by
+     * `the file manager refuses a name that is not a bare file name`, which drives the manager
+     * directly and fails without `isBareFileName`.
+     */
+    @Test
+    fun `open_workspace cannot read a workspace file outside the workspace directory by id`() =
+        runBlocking {
+            val core = createTestCore()
+            val outside = File(workspaceDir.parentFile, "outside-${workspaceDir.name}.json")
+            outside.writeText(WorkspaceSerializer.serialize(savedSpaceFixture("Outside", workspaceDir.absolutePath)))
+            try {
+                val result = core.invoke("open_workspace", """{"workspaceId":"../${outside.name}"}""")
+                assertTrue(result.isError, result.text)
+                assertTrue(result.text.contains("Invalid workspaceId"), result.text)
+                assertFalse(result.text.contains("\"workspaceName\":\"Outside\""), result.text)
+            } finally {
+                outside.delete()
+            }
+        }
+
+    @Test
+    fun `a workspace created by an id ending in json can be reopened by that id`() =
+        runBlocking {
+            val core = createTestCore()
+            val created =
+                core.invoke("open_workspace", """{"workspaceId":"round-trip.json","createIfAbsent":true}""")
+            assertFalse(created.isError, created.text)
+            val createdId =
+                Json
+                    .parseToJsonElement(created.text)
+                    .jsonObject["workspaceId"]
+                    ?.jsonPrimitive
+                    ?.content
+            // One file, named as the read path derives it: not `round-trip.json.json`.
+            assertTrue(File(workspaceDir, "round-trip.json").isFile, workspaceDir.list()?.joinToString().orEmpty())
+            assertFalse(File(workspaceDir, "round-trip.json.json").exists())
+
+            // Reopening by either spelling finds the Space that was created, not a second one.
+            for (id in listOf("round-trip.json", "round-trip")) {
+                val reopened = core.invoke("open_workspace", """{"workspaceId":"$id"}""")
+                assertFalse(reopened.isError, reopened.text)
+                assertEquals(
+                    createdId,
+                    Json
+                        .parseToJsonElement(reopened.text)
+                        .jsonObject["workspaceId"]
+                        ?.jsonPrimitive
+                        ?.content,
+                )
+            }
+            assertEquals(1, workspaceDir.list()?.count { it.startsWith("round-trip") })
+        }
+
+    @Test
+    fun `the bare-name rule refuses the names Windows would resolve elsewhere`() {
+        for (name in listOf("space.json", "my..space.json", "workspace-disposable-1.json", "..hidden")) {
+            assertTrue(WorkspaceFileManagerCommon.isBareFileName(name), name)
+        }
+        for (
+        name in
+        listOf(
+            "",
+            ".",
+            "..",
+            "...",
+            ".. ",
+            ".  ",
+            "../x.json",
+            "..\\x.json",
+            "dir/x.json",
+            "C:x.json",
+            "x.json:stream",
+            "x\u0000.json",
+            "x\u0001.json",
+        )
+        ) {
+            assertFalse(WorkspaceFileManagerCommon.isBareFileName(name), "must refuse: '$name'")
+        }
+    }
+
+    @Test
+    fun `an empty name addresses the workspace directory and is refused`() =
+        runBlocking {
+            // Paths.get(dir, "") is dir itself, so before the bare-name rule these aimed at the
+            // workspace directory rather than at a file in it.
+            assertFalse(fileManager.deleteWorkspace(""))
+            assertNull(fileManager.loadWorkspace(""))
+            assertNull(fileManager.loadDocument(""))
+            assertFalse(fileManager.writeDocumentBlocking("", "{}"))
+            assertTrue(workspaceDir.isDirectory, "the workspace directory itself must survive")
+        }
+
     @Test
     fun `close_workspace errors when nothing is released and nothing is deleted`() =
         runBlocking {

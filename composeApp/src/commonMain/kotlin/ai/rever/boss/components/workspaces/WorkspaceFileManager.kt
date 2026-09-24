@@ -57,7 +57,15 @@ expect class WorkspaceFileManager(
     suspend fun deleteWorkspace(fileName: String): Boolean
 
     /**
-     * Get full path for a workspace file
+     * Get full path for a workspace file.
+     *
+     * @param fileName a bare file name in the workspace directory, as
+     *   [WorkspaceFileManagerCommon.isBareFileName] defines one. Callers inside this class derive
+     *   names from [WorkspaceFileManagerCommon.fileNameForId] or from a real directory listing, so
+     *   they always satisfy it.
+     * @throws IllegalArgumentException when [fileName] is not such a name. The refusal is the point
+     *   (a name with a separator in it would address a file outside the directory), so a caller
+     *   passing a name it did not derive should expect it and not assume a null or a false.
      */
     fun getWorkspaceFilePath(fileName: String): String
 
@@ -199,6 +207,38 @@ object WorkspaceFileManagerCommon {
      * lowercase write replaces the store the gate exists to protect (#926).
      */
     fun isReservedDocumentFileName(fileName: String): Boolean = fileName.lowercase() in reservedDocumentFileNamesFolded
+
+    /**
+     * Whether [fileName] names a file directly inside the workspace directory: one path component
+     * that addresses a file in it and nothing else. Every file this manager reads, writes or
+     * deletes is named by such a name, and [getWorkspaceFilePath] refuses anything else, so a name
+     * that reaches it from outside (an MCP argument, a hand-edited file) cannot climb out of the
+     * directory. A refusal is deliberately not "sanitize and continue": a caller that built a name
+     * with a separator in it has a bug, and quietly mapping it onto some other file would hide it.
+     *
+     * The rule is lexical because Windows resolves `..` lexically too: `dir\missing\..\x.json`
+     * reaches `dir\x.json` there even though `missing` does not exist, so an existence check on the
+     * joined path is not a defence. For the same reason it judges the name Win32 would *use*, not
+     * the one it was handed: Win32 trims trailing spaces and dots from a path component, so `".. "`
+     * addresses the parent directory there while passing a naive `!= ".."` test. Trimming collapses
+     * every all-dots-and-spaces name (`.`, `..`, `...`, `".. "`) to empty, which is why one
+     * emptiness test covers them all. `:` is refused because it introduces a drive (`C:x.json`) or
+     * an alternate data stream (`notes.json:evil`); on the JDK those throw `InvalidPathException`
+     * at the join today, which is an accident of the JDK rather than something this rule states.
+     * An empty name is refused because `Paths.get(dir, "")` is `dir` itself, so it addresses the
+     * workspace directory, and `deleteWorkspace("")` then aimed at the directory rather than at a
+     * file in it.
+     *
+     * This is the **name**-level rule. [ai.rever.boss.mcp.isSafeWorkspaceId] is the **id**-level
+     * one, applied earlier at the MCP tool boundary, and the two deliberately differ: an id is a
+     * caller-chosen identifier, so it refuses any `..` substring and every ISO control character,
+     * while a name here may legitimately contain `..` inside it (`my..space.json`). Neither implies
+     * the other; this one is the last gate, and holds for names that never passed the first.
+     */
+    fun isBareFileName(fileName: String): Boolean =
+        // The component Win32 would actually resolve, which is the one that has to be a file name.
+        fileName.trimEnd(' ', '.').isNotEmpty() &&
+            fileName.none { it == '/' || it == '\\' || it == ':' || it.isISOControl() }
 
     /**
      * Extract workspace name from filename

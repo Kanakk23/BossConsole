@@ -498,19 +498,21 @@ object WorkspaceMcpToolProvider : McpToolProvider {
             // Check saved workspaces
             if (workspace == null) {
                 val fileManager = getFileManager()
-                val fileName =
-                    if (workspaceId.endsWith(".json")) {
-                        workspaceId
-                    } else {
-                        WorkspaceFileManagerCommon.fileNameForId(workspaceId)
-                    }
-                workspace = fileManager.loadWorkspace(fileName)?.withStableId()
+                workspace = fileManager.loadWorkspace(workspaceFileNameFor(workspaceId))?.withStableId()
             }
         }
 
         if (workspace == null) {
             if (createIfAbsent || !name.isNullOrBlank()) {
-                val newId = workspaceId?.takeIf { it.isNotBlank() } ?: LayoutWorkspace.generateId()
+                // The same `.json` the read path strips (see workspaceFileNameFor): an agent that
+                // echoes a file name back from a listing as the id must create the Space the next
+                // open will find. Without this the id kept its suffix, saveWorkspace derived
+                // `<id>.json` from it, and `foo.json` was written to `foo.json.json` while every
+                // later read looked in `foo.json` - not found, and a second createIfAbsent silently
+                // replaced the first layout.
+                val newId =
+                    workspaceId?.removeSuffix(".json")?.takeIf { it.isNotBlank() }
+                        ?: LayoutWorkspace.generateId()
                 // Slot ids (the shipped layouts and the last-session autosave record) are
                 // identities the watcher and startup restore key on; a file carrying one is
                 // the legacy shape the merge cleans up, and it is silently dropped next launch.
@@ -1004,13 +1006,7 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         // substring): a user's saved Space whose name merely mentions "disposable" is not ours.
         var fileDeleted = false
         if (workspaceId.startsWith(DISPOSABLE_ID_PREFIX)) {
-            val fileName =
-                if (workspaceId.endsWith(".json")) {
-                    workspaceId
-                } else {
-                    WorkspaceFileManagerCommon.fileNameForId(workspaceId)
-                }
-            fileDeleted = getFileManager().deleteWorkspace(fileName)
+            fileDeleted = getFileManager().deleteWorkspace(workspaceFileNameFor(workspaceId))
         }
 
         // Saying "success" when neither happened leaves the agent unable to tell "closed"
@@ -1064,6 +1060,21 @@ object WorkspaceMcpToolProvider : McpToolProvider {
             "'$reserved', which BOSS keeps for its own records (Space themes, the session " +
             "records). Pass a different workspaceId."
     }
+
+    /**
+     * The file a caller-supplied workspace id lives in. An id is a name, never a path: the
+     * `.json` suffix an agent may echo back from a listing is accepted, but the name is then
+     * derived through [WorkspaceFileManagerCommon.fileNameForId] exactly as it was when the file
+     * was written, so a separator or `..` in the id cannot select a file outside the workspace
+     * directory.
+     *
+     * Confinement itself no longer rests here: [isSafeWorkspaceId] refuses a path-shaped id at the
+     * top of both handlers, and [WorkspaceFileManagerCommon.isBareFileName] refuses a path-shaped
+     * name at the file manager. This is the layer in between, and what it is for is that the name
+     * read is the name written: the create path strips the same suffix when it mints an id.
+     */
+    internal fun workspaceFileNameFor(workspaceId: String): String =
+        WorkspaceFileManagerCommon.fileNameForId(workspaceId.removeSuffix(".json"))
 
     private fun createDefaultWorkspace(
         id: String,
