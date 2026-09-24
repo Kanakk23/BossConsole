@@ -2,6 +2,7 @@ package ai.rever.boss.plugin
 
 import ai.rever.boss.plugin.loader.FileHashing
 import ai.rever.boss.plugin.loader.PluginBundledTrust
+import ai.rever.boss.plugin.loader.PluginSignatureEnforcement
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.plugin.loader.PluginSignatureVerifier
 import ai.rever.boss.plugin.loader.PluginStoreTrust
@@ -19,15 +20,12 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Pins the reconciler's trust ordering: a JAR whose store signature verifies
- * (or whose bundled-trust marker matches its bytes) must outrank ANY unsigned
- * drop-in claiming a higher version. Before this, winner selection was purely
- * version/mtime/filename, so a hand-dropped unsigned jar with a bigger version
- * won the group, the signed jar was deleted with its `.sig`, and installed.json
- * was repointed at the unsigned artifact.
+ * Pins the reconciler's trust ordering in strict mode and its version ordering
+ * during the warn-only signature rollout.
  */
 class PluginJarReconcilerTrustTest {
     private val temps = mutableListOf<File>()
+    private var previousEnforcement: String? = null
 
     private val keyPair =
         KeyPairGenerator
@@ -49,11 +47,18 @@ class PluginJarReconcilerTrustTest {
     @BeforeTest
     fun injectVerifier() {
         PluginJarReconciler.signatureVerifier = testVerifier
+        previousEnforcement = System.getProperty(PluginSignatureEnforcement.PROPERTY)
+        System.setProperty(PluginSignatureEnforcement.PROPERTY, "true")
     }
 
     @AfterTest
     fun cleanup() {
         PluginJarReconciler.signatureVerifier = PluginSignatureVerifier(PluginStoreTrust.TRUSTED_KEYS)
+        if (previousEnforcement == null) {
+            System.clearProperty(PluginSignatureEnforcement.PROPERTY)
+        } else {
+            System.setProperty(PluginSignatureEnforcement.PROPERTY, previousEnforcement!!)
+        }
         temps.forEach { it.deleteRecursively() }
     }
 
@@ -125,12 +130,32 @@ class PluginJarReconcilerTrustTest {
             File(PluginSignatureSidecar.pathFor(signed.absolutePath)).exists(),
             "the signed jar's sidecar must survive",
         )
-        assertFalse(unsigned.exists(), "the unsigned drop-in is the loser and is removed")
+        assertTrue(unsigned.exists(), "a newer unsigned artifact is retained for investigation")
         assertEquals(
             signed.absolutePath,
             PluginPersistence.getInstalledPlugin(pluginId)?.jarPath,
             "installed.json must not be repointed at the unsigned jar",
         )
+    }
+
+    @Test
+    fun `warn-only rollout keeps a newer unsigned update and its recorded version`() {
+        System.setProperty(PluginSignatureEnforcement.PROPERTY, "false")
+        val dir = tempPluginDir()
+        val pluginId = "ai.rever.boss.plugin.test.rollout"
+        val signed = manifestJar(dir, "rollout-1.0.0.jar", pluginId, "1.0.0")
+        val unsigned = manifestJar(dir, "rollout-2.0.0.jar", pluginId, "2.0.0")
+        signWithTestKey(signed, pluginId, "1.0.0")
+        PluginPersistence.addInstalledPlugin(pluginId, signed.absolutePath, enabled = true)
+
+        repeat(2) {
+            val result = PluginJarReconciler.reconcilePluginDir(dir, pluginIds = null)
+            assertEquals(listOf(unsigned), result.winners)
+            assertTrue(signed.exists(), "the signed fallback must survive")
+            assertTrue(unsigned.exists(), "the update must not be deleted on each launch")
+            assertEquals(unsigned.absolutePath, PluginPersistence.getInstalledPlugin(pluginId)?.jarPath)
+            assertEquals("2.0.0", PluginPersistence.getInstalledPlugin(pluginId)?.installedVersion)
+        }
     }
 
     @Test
@@ -163,7 +188,7 @@ class PluginJarReconcilerTrustTest {
         assertEquals(listOf(bundled), result.winners)
         assertTrue(bundled.exists())
         assertTrue(PluginBundledTrust.isTrusted(bundled.absolutePath))
-        assertFalse(unsigned.exists())
+        assertTrue(unsigned.exists())
     }
 
     @Test
