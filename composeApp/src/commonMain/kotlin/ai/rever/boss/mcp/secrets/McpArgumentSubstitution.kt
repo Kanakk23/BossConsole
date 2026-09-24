@@ -18,7 +18,7 @@ import kotlinx.serialization.json.JsonPrimitive
  *   reads through `McpToolArgs.string(k)` and the raw JSON it may parse itself in agreement
  *   (INV6): both are rebuilt from one tree.
  *
- * Only string primitives are candidates. Keys are never scanned or substituted. Numbers, booleans
+ * Only string primitives are substituted. References in keys are rejected. Numbers, booleans
  * and nulls cannot carry a reference and are left byte-for-byte alone.
  */
 object McpArgumentSubstitution {
@@ -71,7 +71,28 @@ object McpArgumentSubstitution {
      * Scan the argument object for references. See [SecretReferenceParser.findIn] for the
      * malformed-wins rule.
      */
-    fun scan(arguments: JsonElement): SecretReferenceScan = SecretReferenceParser.findIn(stringValues(arguments))
+    fun scan(arguments: JsonElement): SecretReferenceScan {
+        referenceKey(arguments)?.let {
+            return SecretReferenceScan.Malformed(it, "A secret reference cannot be a JSON key")
+        }
+        return SecretReferenceParser.findIn(stringValues(arguments))
+    }
+
+    private fun referenceKey(element: JsonElement): String? =
+        when (element) {
+            is JsonObject -> {
+                element.keys.firstOrNull(SecretReferenceParser::mayContain)
+                    ?: element.values.firstNotNullOfOrNull(::referenceKey)
+            }
+
+            is JsonArray -> {
+                element.firstNotNullOfOrNull(::referenceKey)
+            }
+
+            is JsonPrimitive -> {
+                null
+            }
+        }
 
     /**
      * Return [arguments] with every reference replaced by its value from [values].

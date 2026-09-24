@@ -483,6 +483,10 @@ jobs:
       - name: Verify BOSS AI admission across PostgreSQL sessions
         timeout-minutes: 2
         run: python3 scripts/test/test-boss-ai-concurrency.py
+
+      - name: Verify domain quota across PostgreSQL sessions
+        timeout-minutes: 2
+        run: python3 scripts/test/test-domain-claim-concurrency.py
       - name: Verify BOSS AI ticket single-spend across PostgreSQL sessions
         timeout-minutes: 2
         run: python3 scripts/test/test-boss-ai-ticket-concurrency.py
