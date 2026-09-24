@@ -7,6 +7,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -44,10 +45,15 @@ class RelocatedDownloadsAccessTest {
         assertTrue(result.exceptionOrNull() is SecurityException, "$what must be refused, got $result")
     }
 
-    @Test
-    fun `the temp directory really is outside the home the provider enforces`() {
+    /**
+     * Every case here is about the Downloads branch of the check. If the temp directory were
+     * inside home, the home branch would admit everything and each test would pass for the
+     * wrong reason, so the premise gates all of them rather than being a test of its own.
+     */
+    @BeforeTest
+    fun outsideHomeOrSkip() {
         val home = File(System.getProperty("user.home")).canonicalFile
-        assumeFalse(outside.startsWith(home), "temp dir $outside is inside home $home; the test proves nothing")
+        assumeFalse(outside.startsWith(home), "temp dir $outside is inside home $home; the tests prove nothing")
     }
 
     @Test
