@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -58,6 +59,31 @@ actual object WorkspaceSettingsManager {
         loadSettingsSync()
     }
 
+    private fun readSettingsFromFile(): WorkspaceSettings? {
+        if (!settingsFile.exists()) return null
+        val content =
+            try {
+                settingsFile.readText()
+            } catch (e: Exception) {
+                logger.warn(LogCategory.SYSTEM, "Error reading settings file", error = e)
+                null
+            }
+
+        return content?.let { raw ->
+            try {
+                json.decodeFromString<WorkspaceSettings>(raw)
+            } catch (e: SerializationException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.warn(LogCategory.SYSTEM, "Error decoding settings", error = e)
+                null
+            } catch (e: IllegalArgumentException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.warn(LogCategory.SYSTEM, "Error decoding settings", error = e)
+                null
+            }
+        }
+    }
+
     private fun loadSettingsSync() {
         try {
             settingsFile.parentFile?.mkdirs()
@@ -68,34 +94,40 @@ actual object WorkspaceSettingsManager {
                 return
             }
 
-            val settings = json.decodeFromString<WorkspaceSettings>(settingsFile.readText())
-            val migrated = WorkspaceSettingsMigrations.migrate(settings)
+            val settings = readSettingsFromFile() ?: return
+
+            val migrated =
+                try {
+                    WorkspaceSettingsMigrations.migrate(settings)
+                } catch (e: Exception) {
+                    logger.warn(LogCategory.SYSTEM, "Error migrating settings", error = e)
+                    null
+                }
+
             _currentSettings.value = migrated ?: settings
             if (migrated == null) {
                 logger.debug(LogCategory.SYSTEM, "Loaded settings")
-                return
-            }
-
-            writeSettings(migrated)
-            // INFO only when a default actually moved. Every pre-v1 file is stamped, so
-            // logging the stamp at INFO would put a "Migrated" line on every existing
-            // install of every platform while nothing changed.
-            if (migrated.defaultWorkspaceId != settings.defaultWorkspaceId) {
-                logger.info(
-                    LogCategory.SYSTEM,
-                    "Migrated default workspace",
-                    mapOf(
-                        "from" to settings.defaultWorkspaceId,
-                        "to" to migrated.defaultWorkspaceId,
-                    ),
-                )
             } else {
-                logger.debug(LogCategory.SYSTEM, "Stamped workspace settings version")
+                writeSettings(migrated)
+                // INFO only when a default actually moved. Every pre-v1 file is stamped, so
+                // logging the stamp at INFO would put a "Migrated" line on every existing
+                // install of every platform while nothing changed.
+                if (migrated.defaultWorkspaceId != settings.defaultWorkspaceId) {
+                    logger.info(
+                        LogCategory.SYSTEM,
+                        "Migrated default workspace",
+                        mapOf(
+                            "from" to settings.defaultWorkspaceId,
+                            "to" to migrated.defaultWorkspaceId,
+                        ),
+                    )
+                } else {
+                    logger.debug(LogCategory.SYSTEM, "Stamped workspace settings version")
+                }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
             logger.warn(LogCategory.SYSTEM, "Error loading settings", error = e)
         }
     }

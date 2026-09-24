@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -31,6 +32,7 @@ import java.io.File
  * - Synchronous load on init, asynchronous save
  * - Graceful error handling with fallback to defaults
  */
+@Suppress("TooManyFunctions")
 actual object KeymapSettingsManager {
     private val logger = BossLogger.forComponent("KeymapSettingsManager")
 
@@ -64,6 +66,31 @@ actual object KeymapSettingsManager {
         loadSettingsSync()
     }
 
+    private fun readSettingsFromFile(): KeymapSettings? {
+        if (!settingsFile.exists()) return null
+        val content =
+            try {
+                settingsFile.readText()
+            } catch (e: Exception) {
+                logger.error(LogCategory.SYSTEM, "Failed to read keymap settings file, using defaults", error = e)
+                null
+            }
+
+        return content?.let { raw ->
+            try {
+                json.decodeFromString<KeymapSettings>(raw)
+            } catch (e: SerializationException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.error(LogCategory.SYSTEM, "Failed to decode keymap settings, using defaults", error = e)
+                null
+            } catch (e: IllegalArgumentException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.error(LogCategory.SYSTEM, "Failed to decode keymap settings, using defaults", error = e)
+                null
+            }
+        }
+    }
+
     /**
      * Load settings synchronously on startup.
      * If file doesn't exist, uses default keymap.
@@ -72,12 +99,22 @@ actual object KeymapSettingsManager {
     internal fun loadSettingsSync() {
         try {
             if (settingsFile.exists()) {
-                val content = settingsFile.readText()
-                val loaded = json.decodeFromString<KeymapSettings>(content)
+                val loaded = readSettingsFromFile()
+                if (loaded == null) {
+                    _currentSettings.value = KeymapPresets.getBOSSDefault()
+                    return
+                }
+
                 logger.debug(LogCategory.SYSTEM, "Loaded keymap settings", mapOf("path" to settingsFile.absolutePath))
 
                 // Apply migration to add any new actions from preset
-                val migrated = migrateSettings(loaded)
+                val migrated =
+                    try {
+                        migrateSettings(loaded)
+                    } catch (e: Exception) {
+                        logger.warn(LogCategory.SYSTEM, "Could not migrate keymap settings", error = e)
+                        loaded
+                    }
 
                 // Save if migration made changes
                 if (migrated != loaded) {
@@ -109,7 +146,6 @@ actual object KeymapSettingsManager {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
             logger.error(LogCategory.SYSTEM, "Failed to load keymap settings, using defaults", error = e)
             _currentSettings.value = KeymapPresets.getBOSSDefault()
         }

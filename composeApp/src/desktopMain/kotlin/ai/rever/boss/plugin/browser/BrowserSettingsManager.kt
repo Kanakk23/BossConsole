@@ -9,6 +9,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -76,37 +77,58 @@ object BrowserSettingsManager {
         loadSettingsSync()
     }
 
+    private fun readSettingsFromFile(): BrowserSettingsData? {
+        if (!settingsFile.exists()) return null
+        val content =
+            try {
+                settingsFile.readText()
+            } catch (e: Exception) {
+                logger.warn(LogCategory.BROWSER, "Failed to read browser settings", error = e)
+                null
+            }
+
+        return content?.let { raw ->
+            try {
+                json.decodeFromString<BrowserSettingsData>(raw)
+            } catch (e: SerializationException) {
+                settingsFile.backupCorrupt(logger, LogCategory.BROWSER, e)
+                logger.warn(LogCategory.BROWSER, "Failed to decode browser settings", error = e)
+                null
+            } catch (e: IllegalArgumentException) {
+                settingsFile.backupCorrupt(logger, LogCategory.BROWSER, e)
+                logger.warn(LogCategory.BROWSER, "Failed to decode browser settings", error = e)
+                null
+            }
+        }
+    }
+
     private fun loadSettingsSync() {
         try {
-            if (settingsFile.exists()) {
-                val content = settingsFile.readText()
-                val settings = json.decodeFromString<BrowserSettingsData>(content)
+            val settings = readSettingsFromFile() ?: return
 
-                // Apply loaded settings
-                BrowserSettings.userAgent = settings.userAgent
-                BrowserSettings.customUserAgent = settings.customUserAgent
-                BrowserSettings.currentProfile = settings.currentProfile
-                // Validate retry/recovery settings to prevent invalid values from manual file editing
-                BrowserSettings.maxInitRetries = settings.maxInitRetries.coerceIn(1, 10)
-                BrowserSettings.maxRecoveryAttempts = settings.maxRecoveryAttempts.coerceIn(1, 10)
-                // Secret Manager settings (setter mirrors to the system property the plugin reads)
-                BrowserSettings.discretePasswordFill = settings.discretePasswordFill
-                BrowserSettings.suggestPasswords = settings.suggestPasswords
-                BrowserSettings.offerToSavePasswords = settings.offerToSavePasswords
-                // Tab sharing (setter mirrors to the system property the plugin reads)
-                BrowserSettings.showShareButton = settings.showShareButton
-                BrowserSettings.warnForExecutables = settings.warnForExecutables
+            // Apply loaded settings
+            BrowserSettings.userAgent = settings.userAgent
+            BrowserSettings.customUserAgent = settings.customUserAgent
+            BrowserSettings.currentProfile = settings.currentProfile
+            // Validate retry/recovery settings to prevent invalid values from manual file editing
+            BrowserSettings.maxInitRetries = settings.maxInitRetries.coerceIn(1, 10)
+            BrowserSettings.maxRecoveryAttempts = settings.maxRecoveryAttempts.coerceIn(1, 10)
+            // Secret Manager settings (setter mirrors to the system property the plugin reads)
+            BrowserSettings.discretePasswordFill = settings.discretePasswordFill
+            BrowserSettings.suggestPasswords = settings.suggestPasswords
+            BrowserSettings.offerToSavePasswords = settings.offerToSavePasswords
+            // Tab sharing (setter mirrors to the system property the plugin reads)
+            BrowserSettings.showShareButton = settings.showShareButton
+            BrowserSettings.warnForExecutables = settings.warnForExecutables
 
-                // Update available profiles if we have more
-                if (settings.availableProfiles.isNotEmpty()) {
-                    BrowserSettings.availableProfiles.clear()
-                    BrowserSettings.availableProfiles.addAll(settings.availableProfiles)
-                }
+            // Update available profiles if we have more
+            if (settings.availableProfiles.isNotEmpty()) {
+                BrowserSettings.availableProfiles.clear()
+                BrowserSettings.availableProfiles.addAll(settings.availableProfiles)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.BROWSER, e)
             logger.warn(LogCategory.BROWSER, "Failed to load browser settings", error = e)
         }
     }

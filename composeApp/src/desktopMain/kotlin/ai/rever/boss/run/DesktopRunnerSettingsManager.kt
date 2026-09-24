@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -62,20 +63,42 @@ actual object RunnerSettingsManager {
                 settingsFile.parentFile?.mkdirs()
 
                 if (settingsFile.exists()) {
-                    val content = settingsFile.readText()
-                    val settings = json.decodeFromString<RunnerSettings>(content)
+                    val content =
+                        try {
+                            settingsFile.readText()
+                        } catch (e: Exception) {
+                            logger.warn(LogCategory.SYSTEM, "Error reading runner settings file", error = e)
+                            return@withContext
+                        }
+
+                    val settings =
+                        try {
+                            json.decodeFromString<RunnerSettings>(content)
+                        } catch (e: SerializationException) {
+                            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                            logger.warn(LogCategory.SYSTEM, "Error decoding runner settings", error = e)
+                            return@withContext
+                        } catch (e: IllegalArgumentException) {
+                            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                            logger.warn(LogCategory.SYSTEM, "Error decoding runner settings", error = e)
+                            return@withContext
+                        }
+
                     _currentSettings.value = settings
                     logger.debug(LogCategory.SYSTEM, "Loaded settings")
                 } else {
                     // Create default settings file
-                    val content = json.encodeToString(RunnerSettings.serializer(), _currentSettings.value)
-                    settingsFile.atomicWriteText(content)
-                    logger.debug(LogCategory.SYSTEM, "Created default settings file")
+                    try {
+                        val content = json.encodeToString(RunnerSettings.serializer(), _currentSettings.value)
+                        settingsFile.atomicWriteText(content)
+                        logger.debug(LogCategory.SYSTEM, "Created default settings file")
+                    } catch (e: Exception) {
+                        logger.warn(LogCategory.SYSTEM, "Could not write default runner settings file", error = e)
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
                 logger.warn(LogCategory.SYSTEM, "Error loading settings", error = e)
                 // Keep default settings on error
             }

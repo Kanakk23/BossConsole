@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 /**
@@ -71,26 +72,55 @@ actual object SidebarVisibilitySettingsManager {
             }
         }
 
+    private fun readSettingsFromFile(): SidebarVisibilitySettings? {
+        if (!settingsFile.exists()) return null
+        val content =
+            try {
+                settingsFile.readText()
+            } catch (e: Exception) {
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Failed to read sidebar visibility file, using defaults",
+                    error = e,
+                )
+                null
+            }
+
+        return content?.let { raw ->
+            try {
+                json.decodeFromString(SidebarVisibilitySettings.serializer(), raw)
+            } catch (e: SerializationException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Failed to decode sidebar visibility, using defaults",
+                    error = e,
+                )
+                SidebarVisibilitySettings()
+            } catch (e: IllegalArgumentException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Failed to decode sidebar visibility, using defaults",
+                    error = e,
+                )
+                SidebarVisibilitySettings()
+            }
+        }
+    }
+
     private fun loadSettingsSync() {
         try {
-            if (settingsFile.exists()) {
-                val content = settingsFile.readText()
-                val settings = json.decodeFromString(SidebarVisibilitySettings.serializer(), content)
-                _currentSettings.value = settings
-                logger.debug(
-                    LogCategory.SYSTEM,
-                    "Loaded sidebar visibility",
-                    mapOf(
-                        "hiddenCount" to settings.hiddenPanelIds.size,
-                    ),
-                )
-            } else {
-                _currentSettings.value = SidebarVisibilitySettings()
-            }
+            val settings = readSettingsFromFile() ?: SidebarVisibilitySettings()
+            _currentSettings.value = settings
+            logger.debug(
+                LogCategory.SYSTEM,
+                "Loaded sidebar visibility",
+                mapOf("hiddenCount" to settings.hiddenPanelIds.size),
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
             logger.warn(LogCategory.SYSTEM, "Failed to load sidebar visibility, using defaults", error = e)
             _currentSettings.value = SidebarVisibilitySettings()
         }

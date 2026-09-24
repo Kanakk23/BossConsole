@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 /**
@@ -84,18 +85,50 @@ object BrowserEngineSettingsManager {
             this
         }
 
+    private fun readSettingsFromFile(): BrowserEngineSettings {
+        if (!settingsFile.exists()) return BrowserEngineSettings()
+        val content =
+            try {
+                settingsFile.readText()
+            } catch (e: Exception) {
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "Error reading browser engine settings file, using defaults",
+                    error = e,
+                )
+                null
+            }
+
+        return content?.let { raw ->
+            try {
+                json.decodeFromString<BrowserEngineSettings>(raw)
+            } catch (e: SerializationException) {
+                settingsFile.backupCorrupt(logger, LogCategory.BROWSER, e)
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "Error decoding browser engine settings, using defaults",
+                    error = e,
+                )
+                BrowserEngineSettings()
+            } catch (e: IllegalArgumentException) {
+                settingsFile.backupCorrupt(logger, LogCategory.BROWSER, e)
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "Error decoding browser engine settings, using defaults",
+                    error = e,
+                )
+                BrowserEngineSettings()
+            }
+        } ?: BrowserEngineSettings()
+    }
+
     private fun loadSync(): BrowserEngineSettings {
         val loaded =
             try {
-                if (settingsFile.exists()) {
-                    json.decodeFromString<BrowserEngineSettings>(settingsFile.readText())
-                } else {
-                    BrowserEngineSettings()
-                }
+                readSettingsFromFile()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                settingsFile.backupCorrupt(logger, LogCategory.BROWSER, e)
                 logger.warn(LogCategory.BROWSER, "Error loading browser engine settings, using defaults", error = e)
                 BrowserEngineSettings()
             }

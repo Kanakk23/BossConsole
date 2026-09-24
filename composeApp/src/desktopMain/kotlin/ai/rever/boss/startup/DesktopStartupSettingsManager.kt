@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 /**
@@ -89,21 +90,43 @@ actual object StartupSettingsManager {
                     settingsFile.parentFile?.mkdirs()
 
                     if (settingsFile.exists()) {
-                        val content = settingsFile.readText()
-                        val settings = json.decodeFromString<StartupSettings>(content)
+                        val content =
+                            try {
+                                settingsFile.readText()
+                            } catch (e: Exception) {
+                                logger.warn(LogCategory.SYSTEM, "Error reading startup settings file", error = e)
+                                return@withLock
+                            }
+
+                        val settings =
+                            try {
+                                json.decodeFromString<StartupSettings>(content)
+                            } catch (e: SerializationException) {
+                                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                                logger.warn(LogCategory.SYSTEM, "Error decoding startup settings", error = e)
+                                return@withLock
+                            } catch (e: IllegalArgumentException) {
+                                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                                logger.warn(LogCategory.SYSTEM, "Error decoding startup settings", error = e)
+                                return@withLock
+                            }
+
                         applyLoadedIfUnchanged(settings, epochAtStart)
                         logger.debug(LogCategory.SYSTEM, "Loaded settings")
                     } else {
                         // Create default settings file
-                        createDefaultFile(epochAtStart)
-                        logger.debug(LogCategory.SYSTEM, "Created default settings file")
+                        try {
+                            createDefaultFile(epochAtStart)
+                            logger.debug(LogCategory.SYSTEM, "Created default settings file")
+                        } catch (e: Exception) {
+                            logger.warn(LogCategory.SYSTEM, "Could not create default startup settings file", error = e)
+                        }
                     }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (
                     @Suppress("TooGenericExceptionCaught") e: Exception,
                 ) {
-                    settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
                     logger.warn(LogCategory.SYSTEM, "Error loading settings", error = e)
                     // Keep default settings on error
                 }

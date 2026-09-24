@@ -9,6 +9,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -113,13 +114,31 @@ object BrowserZoomSettingsManager {
     private fun loadSettings() {
         try {
             if (settingsFile.exists()) {
-                val content = settingsFile.readText()
-                settings = json.decodeFromString<BrowserZoomSettingsData>(content)
+                val content =
+                    try {
+                        settingsFile.readText()
+                    } catch (e: Exception) {
+                        logger.warn(LogCategory.BROWSER, "Error reading zoom settings file", error = e)
+                        settings = BrowserZoomSettingsData()
+                        return
+                    }
+
+                settings =
+                    try {
+                        json.decodeFromString<BrowserZoomSettingsData>(content)
+                    } catch (e: SerializationException) {
+                        settingsFile.backupCorrupt(logger, LogCategory.BROWSER, e)
+                        logger.warn(LogCategory.BROWSER, "Error decoding zoom settings", error = e)
+                        BrowserZoomSettingsData()
+                    } catch (e: IllegalArgumentException) {
+                        settingsFile.backupCorrupt(logger, LogCategory.BROWSER, e)
+                        logger.warn(LogCategory.BROWSER, "Error decoding zoom settings", error = e)
+                        BrowserZoomSettingsData()
+                    }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.BROWSER, e)
             logger.warn(LogCategory.BROWSER, "Error loading zoom settings", error = e)
             settings = BrowserZoomSettingsData()
         }

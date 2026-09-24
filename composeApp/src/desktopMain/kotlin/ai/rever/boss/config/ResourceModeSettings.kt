@@ -92,18 +92,22 @@ object ResourceModeSettings {
     @Suppress("TooGenericExceptionCaught")
     private fun load(): ResourceModeSettingsData {
         if (!settingsFile.exists()) return ResourceModeSettingsData()
-        return try {
-            val content = settingsFile.readText()
-            json.decodeFromString(serializer, content)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
-            logger.warn(
-                LogCategory.SYSTEM,
-                "Could not read resource-mode settings - using defaults",
-                mapOf("error" to (e.message ?: "unknown")),
-            )
+        val content =
+            try {
+                settingsFile.readText()
+            } catch (e: Exception) {
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Could not read resource-mode settings - using defaults",
+                    mapOf("error" to (e.message ?: "unknown")),
+                )
+                null
+            }
+        return if (content != null) {
+            decode(content) { error ->
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, error)
+            }
+        } else {
             ResourceModeSettingsData()
         }
     }
@@ -119,10 +123,14 @@ object ResourceModeSettings {
      * wrote - the same additive-migration hazard documented for the Supabase models in AGENTS.md,
      * where one unmodelled field emptied whole lists on installed builds.
      */
-    internal fun decode(raw: String): ResourceModeSettingsData =
+    internal fun decode(
+        raw: String,
+        onFailure: ((Throwable) -> Unit)? = null,
+    ): ResourceModeSettingsData =
         runCatching {
             json.decodeFromString(serializer, raw)
         }.getOrElse { e ->
+            onFailure?.invoke(e)
             logger.warn(
                 LogCategory.SYSTEM,
                 "Could not read resource-mode settings - using defaults",

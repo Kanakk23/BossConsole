@@ -15,6 +15,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 /**
@@ -102,20 +103,43 @@ internal object DefaultAppsSettingsManager {
         try {
             settingsFile.parentFile?.mkdirs()
             if (!settingsFile.exists()) return
-            _settings.value = json.decodeFromString<DefaultAppsSettings>(settingsFile.readText())
-            logger.debug(
-                LogCategory.SYSTEM,
-                "Loaded default-apps settings",
-                mapOf("promptShown" to _settings.value.promptShown),
-            )
+
+            val content =
+                try {
+                    settingsFile.readText()
+                } catch (e: Exception) {
+                    logger.warn(LogCategory.SYSTEM, "Could not read default-apps settings file", error = e)
+                    null
+                }
+
+            val loadedSettings =
+                if (content != null) {
+                    try {
+                        json.decodeFromString<DefaultAppsSettings>(content)
+                    } catch (e: SerializationException) {
+                        settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                        logger.warn(LogCategory.SYSTEM, "Could not decode default-apps settings", error = e)
+                        null
+                    } catch (e: IllegalArgumentException) {
+                        settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                        logger.warn(LogCategory.SYSTEM, "Could not decode default-apps settings", error = e)
+                        null
+                    }
+                } else {
+                    null
+                }
+
+            _settings.value = loadedSettings ?: DefaultAppsSettings()
+            if (loadedSettings != null) {
+                logger.debug(
+                    LogCategory.SYSTEM,
+                    "Loaded default-apps settings",
+                    mapOf("promptShown" to _settings.value.promptShown),
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
-            // Defaults, which means the prompt may be offered again. Better than
-            // the alternative failure direction: a corrupt file that silently
-            // suppressed the offer forever would leave no way to discover the
-            // feature at all.
             logger.warn(LogCategory.SYSTEM, "Could not read default-apps settings", error = e)
             _settings.value = DefaultAppsSettings()
         }

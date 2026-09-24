@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 
 /**
  * Persists the user's host theme choice and keeps the live [BossThemeController]
@@ -90,12 +91,34 @@ object AppThemeSettingsManager {
 
     private fun loadSync() {
         try {
-            val content = if (settingsFile.exists()) settingsFile.readText() else null
-            _settings.value = AppThemeSettings.decodeOrDefaults(content, SystemUtils.isWindows)
+            val content =
+                if (settingsFile.exists()) {
+                    try {
+                        settingsFile.readText()
+                    } catch (e: Exception) {
+                        logger.warn(LogCategory.SYSTEM, "Failed to read app theme settings, using default", error = e)
+                        _settings.value = platformDefaults
+                        return
+                    }
+                } else {
+                    null
+                }
+
+            _settings.value =
+                try {
+                    AppThemeSettings.decodeOrDefaults(content, SystemUtils.isWindows)
+                } catch (e: SerializationException) {
+                    settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                    logger.warn(LogCategory.SYSTEM, "Failed to decode app theme settings, using default", error = e)
+                    platformDefaults
+                } catch (e: IllegalArgumentException) {
+                    settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                    logger.warn(LogCategory.SYSTEM, "Failed to decode app theme settings, using default", error = e)
+                    platformDefaults
+                }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
             logger.warn(LogCategory.SYSTEM, "Failed to load app theme settings, using default", error = e)
             _settings.value = platformDefaults
         }

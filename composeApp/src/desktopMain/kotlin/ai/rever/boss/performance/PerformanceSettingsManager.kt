@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -39,20 +40,60 @@ actual object PerformanceSettingsManager {
         loadSettingsSync()
     }
 
+    private fun readSettingsFromFile(): PerformanceSettings? {
+        if (!settingsFile.exists()) return null
+        val content =
+            try {
+                settingsFile.readText()
+            } catch (e: Exception) {
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Failed to read performance settings file - using defaults",
+                    error = e,
+                )
+                null
+            }
+
+        return content?.let { raw ->
+            try {
+                json.decodeFromString<PerformanceSettings>(raw)
+            } catch (e: SerializationException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Failed to decode performance settings - using defaults",
+                    error = e,
+                )
+                PerformanceSettings()
+            } catch (e: IllegalArgumentException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Failed to decode performance settings - using defaults",
+                    error = e,
+                )
+                PerformanceSettings()
+            }
+        }
+    }
+
     private fun loadSettingsSync() {
         try {
-            if (settingsFile.exists()) {
-                val content = settingsFile.readText()
-                val settings = json.decodeFromString<PerformanceSettings>(content)
-                // Validate loaded settings to handle potentially corrupted files
-                _currentSettings.value = settings.validated()
-            } else {
-                _currentSettings.value = PerformanceSettings()
-            }
+            val settings = readSettingsFromFile() ?: PerformanceSettings()
+            _currentSettings.value =
+                try {
+                    settings.validated()
+                } catch (e: Exception) {
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "Failed to validate performance settings - using defaults",
+                        error = e,
+                    )
+                    PerformanceSettings()
+                }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
             logger.warn(LogCategory.SYSTEM, "Failed to load performance settings - using defaults", error = e)
             _currentSettings.value = PerformanceSettings()
         }

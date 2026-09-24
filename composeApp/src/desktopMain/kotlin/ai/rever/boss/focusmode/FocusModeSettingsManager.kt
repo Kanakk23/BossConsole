@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import java.io.File
 
 /**
@@ -49,18 +50,55 @@ actual object FocusModeSettingsManager {
         loadSettingsSync()
     }
 
+    private fun readSettingsFromFile(platformDefaults: FocusModeSettings): FocusModeSettings? {
+        if (!settingsFile.exists()) return null
+        val content =
+            try {
+                settingsFile.readText()
+            } catch (e: Exception) {
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Failed to read settings file, using defaults",
+                    error = e,
+                )
+                null
+            }
+
+        // Merge against the platform defaults rather than plain-decoding: a file written
+        // before the per-edge switches existed has no opinion about them, and the class
+        // defaults would hide both sidebars on Windows with no way to reveal them.
+        return content?.let { raw ->
+            try {
+                FocusModeSettings.decodeWithDefaults(raw, platformDefaults)
+            } catch (e: SerializationException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Failed to decode settings, falling back to defaults",
+                    error = e,
+                )
+                platformDefaults
+            } catch (e: IllegalArgumentException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Failed to decode settings, falling back to defaults",
+                    error = e,
+                )
+                platformDefaults
+            }
+        }
+    }
+
     /**
      * Load settings synchronously on startup.
      * If file doesn't exist, uses default settings.
      */
     private fun loadSettingsSync() {
+        val platformDefaults = FocusModeSettings.defaultForCurrentPlatform()
         try {
             if (settingsFile.exists()) {
-                val content = settingsFile.readText()
-                // Merge against the platform defaults rather than plain-decoding: a file written
-                // before the per-edge switches existed has no opinion about them, and the class
-                // defaults would hide both sidebars on Windows with no way to reveal them.
-                val settings = FocusModeSettings.decodeWithDefaults(content, platformDefaults)
+                val settings = readSettingsFromFile(platformDefaults) ?: platformDefaults
                 _currentSettings.value = settings
                 logger.debug(LogCategory.SYSTEM, "Loaded settings", mapOf("path" to settingsFile.absolutePath))
             } else {
@@ -81,7 +119,6 @@ actual object FocusModeSettingsManager {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
             logger.warn(LogCategory.SYSTEM, "Failed to load settings, falling back to defaults", error = e)
             _currentSettings.value = platformDefaults
         }

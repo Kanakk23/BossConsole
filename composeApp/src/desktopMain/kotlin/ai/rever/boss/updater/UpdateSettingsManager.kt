@@ -11,6 +11,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -119,12 +120,35 @@ actual object UpdateSettingsManager {
      * Load settings from disk synchronously
      * Called during initialization to restore user preferences
      */
+    private fun readSettingsFromFile(): UpdateSettingsData? {
+        if (!settingsFile.exists()) return null
+        val content =
+            try {
+                settingsFile.readText()
+            } catch (e: Exception) {
+                logger.warn(LogCategory.SYSTEM, "Failed to read update settings file", error = e)
+                null
+            }
+
+        return content?.let { raw ->
+            try {
+                json.decodeFromString<UpdateSettingsData>(raw)
+            } catch (e: SerializationException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.warn(LogCategory.SYSTEM, "Failed to decode update settings", error = e)
+                null
+            } catch (e: IllegalArgumentException) {
+                settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
+                logger.warn(LogCategory.SYSTEM, "Failed to decode update settings", error = e)
+                null
+            }
+        }
+    }
+
     private fun loadSettingsSync() {
         try {
-            if (settingsFile.exists()) {
-                val content = settingsFile.readText()
-                val settings = json.decodeFromString<UpdateSettingsData>(content)
-
+            val settings = readSettingsFromFile()
+            if (settings != null) {
                 // Apply loaded settings
                 UpdateSettings.autoCheckEnabled = settings.autoCheckEnabled
                 UpdateSettings.checkIntervalHours = settings.checkIntervalHours
@@ -146,7 +170,6 @@ actual object UpdateSettingsManager {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            settingsFile.backupCorrupt(logger, LogCategory.SYSTEM, e)
             logger.warn(LogCategory.SYSTEM, "Failed to load update settings", error = e)
             // Continue with defaults
         }
