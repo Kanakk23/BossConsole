@@ -232,8 +232,8 @@ class ChromiumEngineFallbackChecksumTest {
         // mirroring the plugin update jar identity vet. The archive is
         // extracted into the engine directory and its binaries are later
         // EXECUTED, so when nothing pins its bytes it must not install: the
-        // attempt fails and can be retried once the catalog can vouch for the
-        // archive again.
+        // attempt fails before network access and can be retried once the
+        // catalog can vouch for the archive again.
         servedBytes = goodBytes
         val catalog =
             FakeCatalogSource(
@@ -250,7 +250,7 @@ class ChromiumEngineFallbackChecksumTest {
             result.exceptionOrNull()?.message?.contains("no catalog checksum") == true,
             "the refusal must say nothing pins the archive, got: ${result.exceptionOrNull()?.message}",
         )
-        assertEquals(listOf(BACKUP_PATH), requestedPaths)
+        assertEquals(emptyList<String>(), requestedPaths, "a hashless backup must not be downloaded")
     }
 
     @Test
