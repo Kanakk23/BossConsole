@@ -160,7 +160,16 @@ class McpOperationLedger(
         secretRefs: List<String> = emptyList(),
     ): McpOperationRecord {
         val sanitized = sanitizeArguments(rawArgs)
-        val sanitizedErrorSnippet = errorSnippet?.let { McpArgumentSanitizer.sanitizeMessage(it).take(4096) }
+        // Bound regex work before sanitizing. Omit oversized input entirely so cutting through
+        // a quoted credential cannot turn its prefix into apparently harmless plaintext.
+        val sanitizedErrorSnippet =
+            errorSnippet?.let {
+                if (it.length > 8192) {
+                    "[OMITTED: error too large]"
+                } else {
+                    McpArgumentSanitizer.sanitizeMessage(it).take(4096)
+                }
+            }
         val draft =
             McpOperationRecord(
                 id = UUID.randomUUID().toString(),
