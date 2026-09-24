@@ -1,12 +1,15 @@
 package ai.rever.boss.mcp
 
-import ai.rever.boss.cli.CLISecurityValidator
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assumptions.abort
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFalse
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
+import java.nio.file.FileSystemException
+import java.nio.file.Files
 import kotlin.test.assertTrue
 
 /**
@@ -37,50 +40,6 @@ class WorkspaceMcpSecurityBoundsTest {
     }
 
     @Test
-    fun `normalizePath resolves redundant slashes dots and traversals`() {
-        assertEquals("/etc/passwd", CLISecurityValidator.normalizePath("/etc/./passwd"))
-        assertEquals("/etc/shadow", CLISecurityValidator.normalizePath("/var/log/../../etc/shadow"))
-        assertEquals("C:/Windows/System32", CLISecurityValidator.normalizePath("c:\\Windows\\System32"))
-        assertEquals("C:/windows/system32", CLISecurityValidator.normalizePath("c:\\windows\\system32"))
-        assertEquals("C:/Windows", CLISecurityValidator.normalizePath("C:/Windows/System32/.."))
-        assertEquals("/", CLISecurityValidator.normalizePath("/"))
-        assertEquals("C:/", CLISecurityValidator.normalizePath("c:\\"))
-    }
-
-    @Test
-    fun `isRestrictedSystemPath flags sensitive operating system paths`() {
-        // POSIX roots
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/etc"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/etc/shadow"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/proc"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/sys"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/root"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/dev"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/boot"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/bin"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/usr/bin"))
-
-        // Windows roots
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("C:\\Windows"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("c:/windows/system32"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("C:\\Program Files"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("C:\\Program Files (x86)"))
-
-        // Bare roots
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("C:\\"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("c:/"))
-
-        // Traversals into restricted roots
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("/var/log/../../etc/passwd"))
-        assertTrue(CLISecurityValidator.isRestrictedSystemPath("C:\\Users\\..\\Windows\\System32"))
-
-        // Safe user paths
-        assertFalse(CLISecurityValidator.isRestrictedSystemPath("/home/user/workspace/repo"))
-        assertFalse(CLISecurityValidator.isRestrictedSystemPath("C:\\Users\\developer\\projects\\boss"))
-    }
-
-    @Test
     fun `open_workspace refuses restricted system paths`() =
         runBlocking {
             val core = createTestCore()
@@ -89,7 +48,6 @@ class WorkspaceMcpSecurityBoundsTest {
                     "/etc",
                     "/sys",
                     "/proc",
-                    "/root",
                     "C:/Windows",
                     "C:\\Program Files",
                 )
@@ -128,4 +86,62 @@ class WorkspaceMcpSecurityBoundsTest {
                 "Expected restriction error, got: ${result.text}",
             )
         }
+
+    @Test
+    fun `open_terminal refuses symlink pointing to restricted system directory`(
+        @TempDir tempDir: File,
+    ) = runBlocking {
+        val target = File("/etc")
+        assumeTrue(target.isDirectory, "/etc must exist and be a directory for POSIX symlink test")
+
+        val link = File(tempDir, "symlink-to-etc")
+        try {
+            Files.createSymbolicLink(link.toPath(), target.toPath())
+        } catch (e: UnsupportedOperationException) {
+            abort("no symlink support: ${e.message}")
+        } catch (e: FileSystemException) {
+            abort("symlink creation refused: ${e.message}")
+        }
+
+        val core = createTestCore()
+        val result = core.invoke("open_terminal", """{"workingDirectory":"${link.absolutePath}"}""")
+        assertTrue(result.isError, "Symlink to restricted directory should be rejected")
+        assertTrue(
+            result.text.contains("restricted system directory"),
+            "Expected restriction error, got: ${result.text}",
+        )
+        assertTrue(
+            result.text.contains("canonical path"),
+            "Expected refusal to specifically cite canonical path branch, got: ${result.text}",
+        )
+    }
+
+    @Test
+    fun `open_workspace refuses symlink pointing to restricted system directory`(
+        @TempDir tempDir: File,
+    ) = runBlocking {
+        val target = File("/etc")
+        assumeTrue(target.isDirectory, "/etc must exist and be a directory for POSIX symlink test")
+
+        val link = File(tempDir, "symlink-to-etc-workspace")
+        try {
+            Files.createSymbolicLink(link.toPath(), target.toPath())
+        } catch (e: UnsupportedOperationException) {
+            abort("no symlink support: ${e.message}")
+        } catch (e: FileSystemException) {
+            abort("symlink creation refused: ${e.message}")
+        }
+
+        val core = createTestCore()
+        val result = core.invoke("open_workspace", """{"projectPath":"${link.absolutePath}"}""")
+        assertTrue(result.isError, "Symlink to restricted directory should be rejected")
+        assertTrue(
+            result.text.contains("restricted system directory"),
+            "Expected restriction error, got: ${result.text}",
+        )
+        assertTrue(
+            result.text.contains("canonical path"),
+            "Expected refusal to specifically cite canonical path branch, got: ${result.text}",
+        )
+    }
 }

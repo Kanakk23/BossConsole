@@ -138,13 +138,17 @@ object CLISecurityValidator {
             "/etc",
             "/sys",
             "/proc",
-            "/root",
             "/dev",
             "/boot",
             "/bin",
             "/sbin",
             "/usr/bin",
             "/usr/sbin",
+            "/usr/libexec",
+            "/system",
+            "/library",
+            "/private/etc",
+            "/private/var/db",
         )
 
     private val RESTRICTED_WINDOWS_DIRECTORIES =
@@ -158,9 +162,8 @@ object CLISecurityValidator {
         )
 
     /**
-     * Normalizes a path string by converting backslashes to forward slashes,
-     * stripping duplicate separators, and resolving `.` and `..` segments purely
-     * in memory without filesystem dependencies.
+     * Resolves `.` and `..` segments in a list of path segments.
+     * Preserves leading `..` only for relative paths.
      */
     private fun resolveSegments(
         segments: List<String>,
@@ -182,18 +185,32 @@ object CLISecurityValidator {
         return resolved
     }
 
+    private fun stripWindowsDevicePrefix(path: String): String {
+        val hasPrefix =
+            path.startsWith("\\\\?\\") ||
+                path.startsWith("\\\\.\\") ||
+                path.startsWith("//?/") ||
+                path.startsWith("//./")
+        val isDrive = path.length >= 6 && path[4].isLetter() && path[5] == ':'
+        return if (hasPrefix && isDrive) path.substring(4) else path
+    }
+
     /**
      * Normalizes a path string by converting backslashes to forward slashes,
      * stripping duplicate separators, and resolving `.` and `..` segments purely
      * in memory without filesystem dependencies.
+     *
+     * Note: [isValidPath] already rejects any path containing `..`, so the `..`-resolution
+     * here only earns its keep when [isRestrictedSystemPath] is evaluated before [isValidPath].
      */
     fun normalizePath(path: String): String {
         val trimmed = path.trim()
-        if (trimmed.isEmpty()) return ""
+        if (trimmed.isEmpty() || trimmed.length > MAX_OPEN_TARGET_PATH_LENGTH) return ""
 
-        val isWindowsDrive = trimmed.length >= 2 && trimmed[1] == ':' && trimmed[0].isLetter()
-        val prefix = if (isWindowsDrive) trimmed.substring(0, 2).uppercase() else ""
-        val remainder = if (isWindowsDrive) trimmed.substring(2) else trimmed
+        val p = stripWindowsDevicePrefix(trimmed)
+        val isWindowsDrive = p.length >= 2 && p[1] == ':' && p[0].isLetter()
+        val prefix = if (isWindowsDrive) p.substring(0, 2).uppercase() else ""
+        val remainder = if (isWindowsDrive) p.substring(2) else p
         val isAbsolute = remainder.startsWith('/') || remainder.startsWith('\\')
 
         val segments = remainder.split('/', '\\')

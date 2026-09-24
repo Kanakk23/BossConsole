@@ -1100,24 +1100,25 @@ private data class ProjectPathCheck(
 
 private suspend fun checkProjectPath(rawPath: String): ProjectPathCheck {
     val expandedPath = expandTilde(rawPath)
-    // Same gate the boss://folder deep link runs before opening a project folder: a connected
-    // MCP client is no more trusted than a web page, so both surfaces share one definition of
-    // an acceptable project path, failing closed.
+    // Enforces system path bounds in addition to the boss://folder deep link gate: an MCP
+    // client must not open restricted operating system directories, relative paths (which
+    // would resolve against the BOSS process working directory), or paths rejected by isValidPath,
+    // making the MCP surface strictly stricter.
     val rejection =
         when {
             CLISecurityValidator.isRestrictedSystemPath(expandedPath) -> {
                 "Refusing to open '$rawPath': target path is a restricted system directory."
             }
 
+            !File(expandedPath).isAbsolute -> {
+                "Path must be absolute (got '$rawPath'): a relative path would resolve against the " +
+                    "BOSS process's working directory, not the caller's."
+            }
+
             !CLISecurityValidator.isValidPath(expandedPath) -> {
                 "Refusing to open '$rawPath': the path contains characters the boss:// folder deep " +
                     "link rejects for the same operation (`..`, or shell metacharacters like `;`, `&`, " +
                     "`|`, `$` and a backtick). Pass a plain absolute path to the project directory instead."
-            }
-
-            !File(expandedPath).isAbsolute -> {
-                "Path must be absolute (got '$rawPath'): a relative path would resolve against the " +
-                    "BOSS process's working directory, not the caller's."
             }
 
             else -> {
