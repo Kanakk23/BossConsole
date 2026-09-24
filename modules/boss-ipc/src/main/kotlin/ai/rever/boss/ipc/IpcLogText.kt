@@ -12,18 +12,20 @@ package ai.rever.boss.ipc
  * Terminal escapes act on whoever reads the console, and bidi overrides and zero-width characters
  * change what a line appears to say without changing its bytes.
  *
- * Line breaks become `\n` / `\r`, the rest become UTF-16 `\uXXXX` escapes. Nothing is dropped, so the original is
- * recoverable from the escaped form, and the message the service stores is left untouched - only
- * what the kernel prints is neutralized. A tab is kept: it is ordinary layout inside one line.
+ * Line breaks become `\n` / `\r`, backslashes become `\\`, and the rest become UTF-16 `\uXXXX`
+ * escapes. Nothing is dropped, so the original is recoverable from the escaped form. The message
+ * the service stores is left untouched; only what the kernel prints is neutralized. A tab is kept
+ * as ordinary layout inside one line.
  *
  * Internal on purpose, and a twin rather than a dependency: the plugin api's `LogLineText` (PR
  * #1055) guards the same invariant for the BossLogger render path, but boss-ipc is a lower-level
  * published artifact that must not depend on plugin-logging, and that helper is internal to its
- * jar anyway.
+ * jar anyway. The hidden-character categories mirror `CLISecurityValidator` in composeApp;
+ * boss-ipc cannot depend on that application module.
  */
 internal object IpcLogText {
     fun neutralize(text: String): String {
-        if (text.codePoints().noneMatch(::needsEscaping)) return text
+        if (text.codePoints().noneMatch { it == '\\'.code || needsEscaping(it) }) return text
         return buildString(text.length + 16) {
             val codePoints = text.codePoints().iterator()
             while (codePoints.hasNext()) {
@@ -31,6 +33,7 @@ internal object IpcLogText {
                 when {
                     codePoint == '\n'.code -> append("\\n")
                     codePoint == '\r'.code -> append("\\r")
+                    codePoint == '\\'.code -> append("\\\\")
                     needsEscaping(codePoint) -> Character.toChars(codePoint).forEach { appendEscaped(it) }
                     else -> appendCodePoint(codePoint)
                 }
@@ -38,8 +41,9 @@ internal object IpcLogText {
         }
     }
 
-    // Match the repo's existing hidden-character policy (whitespace, CONTROL and FORMAT),
-    // except ordinary spaces and tabs, which are legible layout inside one log record.
+    // Match CLISecurityValidator's CONTROL, FORMAT, LINE_SEPARATOR and PARAGRAPH_SEPARATOR
+    // categories for full code points. Also escape other Unicode whitespace. Spaces and tabs
+    // remain legible layout inside one log record.
     private fun needsEscaping(codePoint: Int): Boolean =
         codePoint != SPACE &&
             codePoint != '\t'.code &&

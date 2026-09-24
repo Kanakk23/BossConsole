@@ -7,6 +7,7 @@ import ai.rever.boss.ipc.proto.ProcessState
 import ai.rever.boss.ipc.proto.ProcessStatusRequest
 import ai.rever.boss.ipc.proto.RegisterProcessRequest
 import ai.rever.boss.ipc.proto.ShutdownRequest
+import ai.rever.boss.ipc.proto.StateKey
 import ai.rever.boss.ipc.proto.StateServiceGrpcKt
 import ai.rever.boss.ipc.proto.StateUpdate
 import ai.rever.boss.ipc.services.KernelServiceImpl
@@ -19,6 +20,7 @@ import com.google.protobuf.ByteString
 import kotlinx.coroutines.runBlocking
 import org.junit.Test
 import org.slf4j.LoggerFactory
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -48,7 +50,29 @@ class KernelLogForgingTest {
         val tab = 0x09.toChar()
         val clean = "billing worker 2 (tab" + tab + "kept)"
 
-        assertTrue(IpcLogText.neutralize(clean) === clean)
+        assertEquals(clean, IpcLogText.neutralize(clean))
+    }
+
+    @Test
+    fun `literal backslashes remain distinct from escaped controls`() {
+        assertEquals("alpha\\\\n", IpcLogText.neutralize("alpha\\n"))
+        assertEquals("alpha\\n", IpcLogText.neutralize("alpha" + 0x0a.toChar()))
+        assertEquals("\\\\u0000", IpcLogText.neutralize("\\u0000"))
+    }
+
+    @Test
+    fun `hidden BMP characters and record separators are escaped`() {
+        val cases =
+            mapOf(
+                0x00 to "\\u0000",
+                0x7f to "\\u007f",
+                0x00ad to "\\u00ad",
+                0xfeff to "\\ufeff",
+                0x2029 to "\\u2029",
+            )
+        cases.forEach { (codePoint, expected) ->
+            assertEquals(expected, IpcLogText.neutralize(codePoint.toChar().toString()))
+        }
     }
 
     @Test
@@ -69,6 +93,10 @@ class KernelLogForgingTest {
     @Test
     fun `supplementary format characters are escaped without damaging visible emoji`() {
         val languageTag = String(Character.toChars(0xE0001))
+        val tagSpace = String(Character.toChars(0xE0020))
+        val musicalFormat = String(Character.toChars(0x1D173))
+        assertEquals("\\udb40\\udc20", IpcLogText.neutralize(tagSpace))
+        assertEquals("\\ud834\\udd73", IpcLogText.neutralize(musicalFormat))
         val emoji = String(Character.toChars(0x1F600))
         val input = "visible$emoji$languageTag\u00a0end"
         assertEquals("visible${emoji}\\udb40\\udc01\\u00a0end", IpcLogText.neutralize(input))
@@ -79,7 +107,8 @@ class KernelLogForgingTest {
         runBlocking {
             val lf = 0x0a.toChar()
             val cr = 0x0d.toChar()
-            val kernel = KernelServiceImpl()
+            val registeredManifest = AtomicReference<ProcessManifest?>()
+            val kernel = KernelServiceImpl(onProcessRegistered = { _, manifest, _ -> registeredManifest.set(manifest) })
             IpcTestServer(kernel).use { host ->
                 LogCapture(KernelServiceImpl::class.java).use { capture ->
                     val alpha =
@@ -103,6 +132,7 @@ class KernelLogForgingTest {
                     // The hostile name is stored as-is: neutralizing is for the log, not the message.
                     assertTrue(response.success)
                     assertEquals("alpha", response.assignedProcessId)
+                    assertEquals(hostileName, registeredManifest.get()?.displayName)
                     assertEquals(
                         ProcessState.PROCESS_STATE_RUNNING,
                         alpha
@@ -178,6 +208,9 @@ class KernelLogForgingTest {
 
                     assertEquals(1, created.version)
                     assertEquals(1, conflicted.version)
+                    val stored = alpha.getState(StateKey.newBuilder().setKey(hostileKey).build())
+                    assertEquals(hostileKey, stored.key)
+                    assertEquals(1, stored.version)
                     val records = capture.lines()
                     records.forEach { record ->
                         assertTrue(
