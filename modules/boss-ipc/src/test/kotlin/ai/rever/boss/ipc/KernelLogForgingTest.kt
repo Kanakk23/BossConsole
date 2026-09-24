@@ -70,7 +70,8 @@ class KernelLogForgingTest {
     fun `supplementary format characters are escaped without damaging visible emoji`() {
         val languageTag = String(Character.toChars(0xE0001))
         val emoji = String(Character.toChars(0x1F600))
-        assertEquals("visible${emoji}\\udb40\\udc01\\u00a0end", IpcLogText.neutralize("visible$emoji$languageTag\u00a0end"))
+        val input = "visible$emoji$languageTag\u00a0end"
+        assertEquals("visible${emoji}\\udb40\\udc01\\u00a0end", IpcLogText.neutralize(input))
     }
 
     @Test
