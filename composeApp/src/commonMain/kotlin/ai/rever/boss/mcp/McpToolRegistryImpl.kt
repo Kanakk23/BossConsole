@@ -485,7 +485,9 @@ private fun JsonElement.isUnquotedScalarOf(type: String): Boolean {
 // Suppressed rather than hidden behind mutable state: the count is a real signal that this
 // class wants its collaborators grouped into a config object, and that should stay visible
 // to whoever adds the ninth.
-@Suppress("LongParameterList")
+// Registration, authorization, and ledger state currently share one serialized core;
+// splitting them requires an ownership refactor across those lifecycle boundaries.
+@Suppress("LongParameterList", "LargeClass")
 internal class McpToolRegistryCore(
     private val disabledFile: File?,
     private val invokeTimeoutMs: Long = 60_000L,
