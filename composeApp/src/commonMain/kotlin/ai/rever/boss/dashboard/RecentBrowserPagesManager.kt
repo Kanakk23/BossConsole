@@ -245,6 +245,9 @@ object RecentBrowserPagesManager {
     /**
      * Load recent pages from disk asynchronously.
      * If no data exists, bootstraps from existing browser history.
+     *
+     * Internal rather than private so tests can drive the real load path against a hermetic file,
+     * as [RecentFilesManager]'s already is; production still reaches it only from `init`.
      */
     internal suspend fun loadAsync(
         ticket: RecentPagesLoadGuard.Ticket = loadGuard.begin(),
