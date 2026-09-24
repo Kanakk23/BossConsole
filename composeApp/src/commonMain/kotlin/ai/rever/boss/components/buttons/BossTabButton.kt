@@ -1,6 +1,5 @@
 package ai.rever.boss.components.buttons
 
-import ai.rever.boss.components.model.DraggingTabInfo
 import ai.rever.boss.components.model.TabDraggableComponent
 import ai.rever.boss.components.model.TabDropResult
 import ai.rever.boss.components.model.detectTabDragGestures

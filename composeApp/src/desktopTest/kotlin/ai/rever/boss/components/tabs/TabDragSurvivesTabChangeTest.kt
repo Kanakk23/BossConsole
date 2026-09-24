@@ -255,7 +255,6 @@ class TabDragSurvivesTabChangeTest {
             assertNull(component.draggingTab, "disposing the owner clears the ghost")
         }
 
-
     @Test
     fun `changing a button identity cancels only its old gesture`() =
         runComposeUiTest {

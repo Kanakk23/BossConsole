@@ -1,7 +1,6 @@
 package ai.rever.boss.components.window_panel.components.main_window_panels
 
 import ai.rever.boss.components.common.rememberFaviconLoader
-import ai.rever.boss.components.model.DraggingTabInfo
 import ai.rever.boss.components.model.TabDraggableComponent
 import ai.rever.boss.components.model.TabDropResult
 import ai.rever.boss.components.model.detectTabDragGestures
