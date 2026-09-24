@@ -31,7 +31,9 @@ object RushHourEngine {
         vehicleId: String,
         steps: Int,
     ): Result<RushHourBoard> {
-        if (steps == 0) return Result.success(board)
+        if (steps == 0 || steps !in -5..5) {
+            return Result.failure(IllegalArgumentException("Steps must be between -5 and 5, excluding zero"))
+        }
 
         val vehicle =
             board.getVehicle(vehicleId)

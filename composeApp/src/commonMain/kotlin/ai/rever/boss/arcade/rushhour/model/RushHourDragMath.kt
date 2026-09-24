@@ -58,20 +58,20 @@ object RushHourDragMath {
         minSteps: Int,
         maxSteps: Int,
     ): Int {
-        if (cellSizePx <= 0f) return 0
+        if (cellSizePx <= 0f || minSteps > 0 || maxSteps < 0) return 0
         val thresholdPx = cellSizePx * thresholdFraction
 
         return when {
-            clampedOffset >= thresholdPx -> {
+            clampedOffset >= thresholdPx && maxSteps > 0 -> {
                 // Determine how many cells forward
                 val steps = ((clampedOffset + cellSizePx * (1f - thresholdFraction)) / cellSizePx).toInt()
-                steps.coerceIn(1, maxSteps.coerceAtLeast(1))
+                steps.coerceIn(1, maxSteps)
             }
 
-            clampedOffset <= -thresholdPx -> {
+            clampedOffset <= -thresholdPx && minSteps < 0 -> {
                 // Determine how many cells backward
                 val steps = ((clampedOffset - cellSizePx * (1f - thresholdFraction)) / cellSizePx).toInt()
-                steps.coerceIn(minSteps.coerceAtMost(-1), -1)
+                steps.coerceIn(minSteps, -1)
             }
 
             else -> {
@@ -94,11 +94,7 @@ object RushHourDragMath {
         cellSizePx: Float,
         minSteps: Int,
         maxSteps: Int,
-    ): Int {
-        if (cellSizePx <= 0f) return 0
-        val rawStep = kotlin.math.round(clampedOffset / cellSizePx).toInt()
-        return rawStep.coerceIn(minSteps, maxSteps)
-    }
+    ): Int = computeSnapStep(clampedOffset, cellSizePx, minSteps = minSteps, maxSteps = maxSteps)
 
     /**
      * Computes the projected grid coordinate (row, col) of a vehicle given a projected step.

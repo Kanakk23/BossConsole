@@ -41,16 +41,13 @@ class RushHourSolverTest {
     @Test
     fun `levels 2 through 4 have solvable optimal paths`() {
         val l2Dist = RushHourSolver.findOptimalDistance(RushHourBoard.LEVEL_2)
-        assertNotNull(l2Dist)
-        assertTrue(l2Dist > 0)
+        assertEquals(11, l2Dist)
 
         val l3Dist = RushHourSolver.findOptimalDistance(RushHourBoard.LEVEL_3)
-        assertNotNull(l3Dist)
-        assertTrue(l3Dist > 0)
+        assertEquals(12, l3Dist)
 
         val l4Dist = RushHourSolver.findOptimalDistance(RushHourBoard.LEVEL_4)
-        assertNotNull(l4Dist)
-        assertTrue(l4Dist > 0)
+        assertEquals(14, l4Dist)
     }
 
     @Test

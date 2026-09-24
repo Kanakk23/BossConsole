@@ -25,13 +25,10 @@ object RushHourMcpTools : McpToolProvider {
     const val PROVIDER_ID = "arcade-rushhour"
 
     const val TOOL_STATE = "arcade_rushhour_state"
-    const val TOOL_STATE_PREFIXED = "mcp__boss__arcade_rushhour_state"
 
     const val TOOL_MOVE = "arcade_rushhour_move"
-    const val TOOL_MOVE_PREFIXED = "mcp__boss__arcade_rushhour_move"
 
     const val TOOL_RESET = "arcade_rushhour_reset"
-    const val TOOL_RESET_PREFIXED = "mcp__boss__arcade_rushhour_reset"
 
     const val ARG_VEHICLE_ID = "vehicleId"
     const val ARG_STEPS = "steps"
@@ -60,38 +57,30 @@ object RushHourMcpTools : McpToolProvider {
         val moveDescription =
             "Moves a vehicle along its orientation axis by a given number of steps (positive=forward/right/down, negative=backward/left/up)."
         val resetDescription =
-            "Resets the Rush Hour puzzle board to a designated level (1 to 4) and clears trajectory history."
+            "Resets the Rush Hour puzzle board to a designated level (1 to 4, default 1) and clears trajectory history."
 
         return listOf(
             McpToolDefinition(
                 name = TOOL_STATE,
                 description = stateDescription,
-                handler = stateHandler,
-            ),
-            McpToolDefinition(
-                name = TOOL_STATE_PREFIXED,
-                description = stateDescription,
+                inputSchema = """{"type":"object","properties":{}}""",
                 handler = stateHandler,
             ),
             McpToolDefinition(
                 name = TOOL_MOVE,
                 description = moveDescription,
+                inputSchema =
+                    """{"type":"object","properties":{"vehicleId":{"type":"string"},"steps":{"type":"integer","minimum":-5,"maximum":5}},"required":["vehicleId","steps"]}""",
                 handler = moveHandler,
-            ),
-            McpToolDefinition(
-                name = TOOL_MOVE_PREFIXED,
-                description = moveDescription,
-                handler = moveHandler,
+                readOnly = false,
             ),
             McpToolDefinition(
                 name = TOOL_RESET,
                 description = resetDescription,
+                inputSchema =
+                    """{"type":"object","properties":{"level":{"type":"integer","minimum":1,"maximum":4}}}""",
                 handler = resetHandler,
-            ),
-            McpToolDefinition(
-                name = TOOL_RESET_PREFIXED,
-                description = resetDescription,
-                handler = resetHandler,
+                readOnly = false,
             ),
         )
     }
@@ -114,10 +103,11 @@ object RushHourMcpTools : McpToolProvider {
         val snapshot = RushHourGameState.state.value
         val validMoves = RushHourEngine.computeValidMoves(snapshot.board)
         val score =
-            RushHourSolver.calculateOptimalityScore(
-                optimalRemaining = snapshot.optimalDistanceRemaining,
-                stepsTaken = snapshot.stepsTaken,
-            )
+            snapshot.trajectorySummary?.efficiencyPercentage
+                ?: RushHourSolver.calculateOptimalityScore(
+                    optimalRemaining = snapshot.optimalDistanceRemaining,
+                    stepsTaken = snapshot.stepsTaken,
+                )
 
         val json =
             buildJsonObject {
@@ -208,10 +198,11 @@ object RushHourMcpTools : McpToolProvider {
 
         val snapshot = moveResult.getOrThrow()
         val score =
-            RushHourSolver.calculateOptimalityScore(
-                optimalRemaining = snapshot.optimalDistanceRemaining,
-                stepsTaken = snapshot.stepsTaken,
-            )
+            snapshot.trajectorySummary?.efficiencyPercentage
+                ?: RushHourSolver.calculateOptimalityScore(
+                    optimalRemaining = snapshot.optimalDistanceRemaining,
+                    stepsTaken = snapshot.stepsTaken,
+                )
 
         val response =
             buildJsonObject {

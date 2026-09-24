@@ -2,6 +2,8 @@ package ai.rever.boss.arcade.rushhour
 
 import ai.rever.boss.arcade.rushhour.mcp.RushHourMcpTools
 import ai.rever.boss.arcade.rushhour.model.RushHourGameState
+import ai.rever.boss.mcp.McpPolicyAction
+import ai.rever.boss.mcp.McpPolicyEngine
 import ai.rever.boss.mcp.McpToolRegistryCore
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -25,7 +27,10 @@ class RushHourMcpTest {
     @BeforeTest
     fun setUp() {
         runBlocking {
-            registryCore = McpToolRegistryCore(disabledFile = null)
+            val policy = McpPolicyEngine()
+            policy.setToolPolicy(RushHourMcpTools.TOOL_MOVE, McpPolicyAction.ALLOW)
+            policy.setToolPolicy(RushHourMcpTools.TOOL_RESET, McpPolicyAction.ALLOW)
+            registryCore = McpToolRegistryCore(disabledFile = null, policyEngine = policy)
             registryCore.registerProvider(RushHourMcpTools)
             RushHourGameState.reset(1)
         }
@@ -43,11 +48,13 @@ class RushHourMcpTest {
     fun `tools are correctly registered in MCP registry`() {
         val registered = registryCore.tools.value.map { it.definition.name }
         assertTrue(registered.contains(RushHourMcpTools.TOOL_STATE))
-        assertTrue(registered.contains(RushHourMcpTools.TOOL_STATE_PREFIXED))
         assertTrue(registered.contains(RushHourMcpTools.TOOL_MOVE))
-        assertTrue(registered.contains(RushHourMcpTools.TOOL_MOVE_PREFIXED))
         assertTrue(registered.contains(RushHourMcpTools.TOOL_RESET))
-        assertTrue(registered.contains(RushHourMcpTools.TOOL_RESET_PREFIXED))
+        assertEquals(3, registered.size)
+        val definitions = registryCore.tools.value.associateBy { it.definition.name }
+        assertTrue(definitions.getValue(RushHourMcpTools.TOOL_STATE).definition.readOnly)
+        assertFalse(definitions.getValue(RushHourMcpTools.TOOL_MOVE).definition.readOnly)
+        assertFalse(definitions.getValue(RushHourMcpTools.TOOL_RESET).definition.readOnly)
     }
 
     @Test
@@ -110,6 +117,13 @@ class RushHourMcpTest {
             assertTrue(res3.isError)
             val errObj = json.parseToJsonElement(res3.text).jsonObject
             assertFalse(errObj["success"]?.jsonPrimitive?.boolean == true)
+
+            val zero = registryCore.invoke(RushHourMcpTools.TOOL_MOVE, """{"vehicleId":"A","steps":0}""")
+            val overflow =
+                registryCore.invoke(RushHourMcpTools.TOOL_MOVE, """{"vehicleId":"A","steps":-2147483648}""")
+            assertTrue(zero.isError)
+            assertTrue(overflow.isError)
+            assertEquals(0, RushHourGameState.state.value.stepsTaken)
         }
 
     @Test

@@ -203,6 +203,11 @@ class RushHourInteractionTest {
                 maxSteps = maxSteps,
             )
         assertEquals(2, multiCell, "150px drag across 100px cells should commit 2 steps")
+
+        assertEquals(0, RushHourDragMath.computeSnapStep(90f, cellSize, minSteps = 0, maxSteps = 0))
+        assertEquals(0, RushHourDragMath.computeSnapStep(-90f, cellSize, minSteps = 0, maxSteps = 0))
+        assertEquals(1, RushHourDragMath.computeProjectedStep(45f, cellSize, minSteps, maxSteps))
+        assertEquals(0, RushHourDragMath.computeProjectedStep(35f, cellSize, minSteps, maxSteps))
     }
 
     @Test
@@ -223,7 +228,7 @@ class RushHourInteractionTest {
                         }
                     }
                 }
-            jobs.awaitAll()
+            val successfulMoves = jobs.awaitAll().count { it.isSuccess }
 
             // After all jobs, board must remain valid and non-overlapping
             val currentBoard = RushHourGameState.state.value.board
@@ -231,6 +236,18 @@ class RushHourInteractionTest {
             assertTrue(vehicleA != null, "Vehicle A must exist")
             assertTrue(vehicleA.col in 0..4, "Vehicle A col must be in legal range")
             assertEquals(10, currentBoard.vehicles.size, "All 10 vehicles must remain intact")
+            assertEquals(successfulMoves, RushHourGameState.state.value.stepsTaken, "Concurrent moves must not lose updates")
+        }
+    }
+
+    @Test
+    fun testRejectedMovesDoNotAlterTrajectory() {
+        runBlocking {
+            val original = RushHourGameState.state.value
+            assertTrue(RushHourGameState.move("A", 0).isFailure)
+            assertTrue(RushHourGameState.move("A", Int.MIN_VALUE).isFailure)
+            assertTrue(RushHourGameState.move("A", Int.MAX_VALUE).isFailure)
+            assertEquals(original, RushHourGameState.state.value)
         }
     }
 

@@ -64,6 +64,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -104,10 +105,11 @@ fun RushHourScreen(modifier: Modifier = Modifier) {
     var showHelpSheet by remember { mutableStateOf(false) }
 
     val optimalityScore =
-        RushHourSolver.calculateOptimalityScore(
-            optimalRemaining = snapshot.optimalDistanceRemaining,
-            stepsTaken = snapshot.stepsTaken,
-        )
+        snapshot.trajectorySummary?.efficiencyPercentage
+            ?: RushHourSolver.calculateOptimalityScore(
+                optimalRemaining = snapshot.optimalDistanceRemaining,
+                stepsTaken = snapshot.stepsTaken,
+            )
 
     val focusRequester = remember { FocusRequester() }
 
@@ -236,7 +238,8 @@ fun RushHourScreen(modifier: Modifier = Modifier) {
                         scope.launch { RushHourGameState.selectVehicle(id) }
                     },
                     onMoveVehicle = { id, steps ->
-                        scope.launch { RushHourGameState.move(id, steps) }
+                        RushHourGameState.move(id, steps)
+                        Unit
                     },
                 )
             }
@@ -503,7 +506,7 @@ private fun RushHourBoardArena(
     board: RushHourBoard,
     selectedVehicleId: String?,
     onSelectVehicle: (String) -> Unit,
-    onMoveVehicle: (String, Int) -> Unit,
+    onMoveVehicle: suspend (String, Int) -> Unit,
 ) {
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize(),
@@ -719,7 +722,7 @@ private fun VehiclePiece(
     blockInset: Dp,
     isSelected: Boolean,
     onSelect: () -> Unit,
-    onMove: (Int) -> Unit,
+    onMove: suspend (Int) -> Unit,
     onDragPreview: (DragPreview?) -> Unit,
 ) {
     val isTarget = vehicle.id == RushHourBoard.TARGET_VEHICLE_ID
@@ -802,7 +805,7 @@ private fun VehiclePiece(
                         },
                     shape = RoundedCornerShape(10.dp),
                 ).clickable { onSelect() }
-                .pointerInput(vehicle.id, board) {
+                .pointerInput(vehicle.id, board, cellSizePx) {
                     detectDragGestures(
                         onDragStart = {
                             if (isSettling) return@detectDragGestures
@@ -837,8 +840,10 @@ private fun VehiclePiece(
                                                     dampingRatio = 0.85f,
                                                 ),
                                         )
-                                        // 2. Only after animation completes: commit move and snap back to 0
+                                        // Commit before clearing the offset, then let the board
+                                        // state render at its new coordinate on the next frame.
                                         onMove(step)
+                                        withFrameNanos { }
                                         dragAnimatable.snapTo(0f)
                                     } finally {
                                         isSettling = false

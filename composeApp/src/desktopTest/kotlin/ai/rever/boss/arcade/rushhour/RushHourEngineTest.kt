@@ -12,11 +12,11 @@ import kotlin.test.assertTrue
 
 class RushHourEngineTest {
     @Test
-    fun `zero steps returns identical board`() {
+    fun `zero and out-of-range steps are rejected`() {
         val board = RushHourBoard.LEVEL_1
-        val result = RushHourEngine.move(board, "X", 0)
-        assertTrue(result.isSuccess)
-        assertEquals(board, result.getOrThrow())
+        assertTrue(RushHourEngine.move(board, "X", 0).isFailure)
+        assertTrue(RushHourEngine.move(board, "X", Int.MIN_VALUE).isFailure)
+        assertTrue(RushHourEngine.move(board, "X", Int.MAX_VALUE).isFailure)
     }
 
     @Test

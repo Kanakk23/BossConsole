@@ -25,24 +25,14 @@
 The engine follows a modular, reactive architecture across Compose Multiplatform layers:
 
 ```
-composeApp/
-??? src/commonMain/kotlin/ai/rever/boss/arcade/rushhour/
-?   ??? model/
-?   ?   ??? RushHourVehicle.kt         # Immutable vehicle model & cell projection
-?   ?   ??? RushHourBoard.kt           # 6x6 grid state, hashing, and built-in levels
-?   ?   ??? RushHourEngine.kt          # Deterministic state reducer & move validator
-?   ?   ??? RushHourSolver.kt          # Optimal BFS graph search & deadlock detector
-?   ?   ??? RushHourGameState.kt       # Thread-safe StateFlow controller with Main dispatch
-?   ??? eval/
-?   ?   ??? RushHourTrajectoryLogger.kt # Trajectory evaluation, cycle & efficiency metrics
-?   ??? ui/
-?       ??? RushHourScreen.kt          # Compose UI with BossConsole Operator design tokens
-??? src/desktopMain/kotlin/ai/rever/boss/arcade/rushhour/mcp/
-?   ??? RushHourMcpTools.kt            # MCP Perception & Action tool provider
-??? src/desktopTest/kotlin/ai/rever/boss/arcade/rushhour/
-    ??? RushHourEngineTest.kt          # Core engine mechanics, collisions & win condition
-    ??? RushHourSolverTest.kt          # BFS correctness & optimal move count validation
-    ??? RushHourMcpTest.kt             # MCP tool invocation & schema verification
+composeApp/src/
+├── commonMain/kotlin/ai/rever/boss/arcade/rushhour/
+│   ├── model/  # Board, vehicle, engine, solver, drag math, serialized game state
+│   ├── eval/   # Trajectory logger and efficiency metrics
+│   ├── mcp/    # Production-registered state, move, and reset tools
+│   └── ui/     # Screen, theme, help sheet, and tab type
+└── desktopTest/kotlin/ai/rever/boss/arcade/rushhour/
+    └── *Test.kt # Engine, interaction, solver, MCP, and tab tests
 ```
 
 ---
@@ -53,16 +43,18 @@ The gym includes four mathematically verified classic boards with increasing puz
 
 | Level | Name | Vehicles | Optimal Moves ($d^*$) | Description |
 |---|---|---|---|---|
-| **Level 1** | Beginner | 8 vehicles | **8 moves** | Classic entry challenge requiring coordinated vertical clearing to open row 2. |
-| **Level 2** | Intermediate | 8 vehicles | **11 moves** | Multi-step truck maneuvering requiring backwards-forwards oscillation. |
+| **Level 1** | Beginner | 10 vehicles | **8 moves** | Classic entry challenge requiring coordinated vertical clearing to open row 2. |
+| **Level 2** | Intermediate | 11 vehicles | **11 moves** | Multi-step truck maneuvering requiring backwards-forwards oscillation. |
 | **Level 3** | Advanced | 10 vehicles | **12 moves** | Dense layout with cascading dependencies across columns 2, 3, and 4. |
-| **Level 4** | Expert | 10 vehicles | **14 moves** | Deep strategic puzzle with tight spatial packing and deceptive cycles. |
+| **Level 4** | Expert | 11 vehicles | **14 moves** | Deep strategic puzzle with tight spatial packing and deceptive cycles. |
 
 ---
 
 ## 4. MCP Tools: Perception & Action API
 
-The environment exposes three Model Context Protocol (MCP) tools registered with `McpToolRegistryImpl`. They are available both with standard identifiers and with the `mcp__boss__` prefix.
+The environment exposes three Model Context Protocol (MCP) tools registered with `McpToolRegistryImpl`. The host registers their canonical names; MCP clients may display them with an `mcp__boss__` prefix.
+
+The gym has one process-wide board: all open Rush Hour tabs and MCP clients observe and mutate the same run. A reset from either surface replaces that shared run.
 
 ### 4.1. `arcade_rushhour_state` (`mcp__boss__arcade_rushhour_state`)
 Inspects the current 6x6 puzzle board, vehicle coordinates, legal moves, optimal distance remaining ($d^*$), and win status.
@@ -75,24 +67,24 @@ Inspects the current 6x6 puzzle board, vehicle coordinates, legal moves, optimal
   "gridSize": 6,
   "targetVehicle": "X",
   "exit": { "row": 2, "col": 5 },
-  "currentLevel": 1,
+  "level": 1,
   "stepsTaken": 0,
   "isSolved": false,
   "isDeadlocked": false,
   "optimalDistanceRemaining": 8,
-  "boardHash": "X:2,1,2,H|A:0,0,2,V|B:0,4,3,V|C:1,5,2,V|D:3,2,2,V|E:4,0,2,H|F:4,4,2,H|G:5,1,2,H",
+  "optimalityScore": 100.0,
   "vehicles": [
-    { "id": "X", "row": 2, "col": 1, "length": 2, "isHorizontal": true, "cells": [{"row":2,"col":1},{"row":2,"col":2}] },
-    { "id": "A", "row": 0, "col": 0, "length": 2, "isHorizontal": false, "cells": [{"row":0,"col":0},{"row":1,"col":0}] },
-    ...
+    { "id": "X", "row": 2, "col": 0, "length": 2, "isHorizontal": true },
+    { "id": "A", "row": 0, "col": 2, "length": 2, "isHorizontal": true }
   ],
   "validMoves": [
-    { "vehicleId": "A", "steps": 1 },
-    { "vehicleId": "A", "steps": 2 },
-    { "vehicleId": "D", "steps": -1 }
+    { "vehicleId": "A", "steps": -1 },
+    { "vehicleId": "A", "steps": -2 }
   ]
 }
 ```
+
+The abbreviated `vehicles` and `validMoves` arrays above show representative entries; the live response contains all vehicles and legal moves.
 
 ---
 
@@ -103,11 +95,12 @@ Executes an atomic displacement of a designated vehicle along its fixed axis.
 ```json
 {
   "vehicleId": "A",
-  "steps": 2
+  "steps": -1
 }
 ```
 - `vehicleId` *(string, required)*: Identifier of the vehicle to slide (e.g. `"X"`, `"A"`, `"B"`).
 - `steps` *(integer, required)*: Number of cells to move.
+  - Must be nonzero and between -5 and 5; blocked or out-of-range moves are rejected.
   - For horizontal vehicles: Positive = Right (`+col`), Negative = Left (`-col`).
   - For vertical vehicles: Positive = Down (`+row`), Negative = Up (`-row`).
 
@@ -116,12 +109,13 @@ Executes an atomic displacement of a designated vehicle along its fixed axis.
 {
   "success": true,
   "vehicleId": "A",
-  "steps": 2,
+  "steps": -1,
   "stepsTaken": 1,
-  "optimalDistanceRemaining": 8,
+  "optimalDistanceRemaining": 7,
+  "optimalityScore": 100.0,
   "isSolved": false,
   "isDeadlocked": false,
-  "boardHash": "..."
+  "message": "Moved 'A' by -1 step(s)"
 }
 ```
 
@@ -129,7 +123,9 @@ Executes an atomic displacement of a designated vehicle along its fixed axis.
 ```json
 {
   "success": false,
-  "error": "Cannot move vehicle A by 3 steps: movement path is blocked by vehicle or grid boundary."
+  "vehicleId": "A",
+  "steps": 6,
+  "error": "Steps must be between -5 and 5, excluding zero"
 }
 ```
 
@@ -152,7 +148,7 @@ Resets the board to a chosen level (1 to 4) and wipes the trajectory evaluation 
   "success": true,
   "level": 1,
   "optimalDistance": 8,
-  "message": "Board successfully reset to Level 1. Optimal moves: 8."
+  "message": "Rush Hour Gym reset to Level 1"
 }
 ```
 
@@ -166,7 +162,7 @@ Resets the board to a chosen level (1 to 4) and wipes the trajectory evaluation 
 - `stepIndex`: Sequential move number.
 - `action`: Vehicle and directional displacement (e.g., `X:+1`, `B:-2`).
 - `boardHash`: Canonical state representation string.
-- `latencyMs`: Elapsed duration per decision cycle.
+- `latencyMs`: Elapsed local move validation time; it does not measure agent decision latency.
 - `optimalRemaining`: Ground truth $d^*$ calculated via BFS at that exact state.
 
 ### Aggregate Evaluation Summary
@@ -182,10 +178,10 @@ Upon reaching the exit condition, the logger computes:
 
 ## 6. Compose UI & Apple HIG Overhaul
 
-The graphical front-end ([RushHourScreen.kt](file:///composeApp/src/commonMain/kotlin/ai/rever/boss/arcade/rushhour/ui/RushHourScreen.kt)) is built with Apple Human Interface Guidelines (HIG) and the `apple-design-toolkit`:
+The graphical front-end (`RushHourScreen.kt`) is built with Apple Human Interface Guidelines (HIG) and the `apple-design-toolkit`:
 
 ### 6.1. Visual & Spatial Architecture
-- **Dynamic Aspect-Ratio Container**: Built using `BoxWithConstraints` and `Modifier.aspectRatio(1f)` to dynamically scale the 6x6 arena to window bounds without ever clipping or overflowing.
+- **Dynamic Board Container**: Uses `BoxWithConstraints` to size the 6x6 arena within ordinary window bounds.
 - **Continuous Squircle Shell**: Board shell styled in `#121620` with `16.dp` continuous squircle corners, `1.dp` subtle border (`Color.White.copy(0.08f)`), and layered soft ambient depth shadow.
 - **Tactile Vehicles**:
   - **Car X (Target)**: Apple Sunset Coral to Warm Amber gradient with embossed directional chevron (`➔`) pointing directly to the exit gate.
@@ -196,7 +192,7 @@ The graphical front-end ([RushHourScreen.kt](file:///composeApp/src/commonMain/k
 ### 6.2. 1D Constrained Drag & Snap Physics (`RushHourDragMath.kt`)
 - **Axis Locking**: Horizontal vehicles strictly lock to X drag (zero Y offset); vertical vehicles strictly lock to Y drag (zero X offset).
 - **Dynamic Boundary Clamping**: Real-time open space calculations (`minSteps`, `maxSteps`) clamp drag translation between `[minSteps * cellSize, maxSteps * cellSize]`.
-- **Snap Threshold**: Dragging $\ge 40\%$ commits a move to `RushHourEngine`; dragging $< 40\%$ smoothly bounces back using spring physics (`animateFloatAsState`).
+- **Snap Threshold**: Dragging $\ge 40\%$ commits a move to `RushHourEngine`; dragging $< 40\%$ smoothly bounces back using `Animatable` spring physics.
 - **Accessible Click Controls**: Directional step buttons and keyboard shortcuts provided as alternatives.
 
 ### 6.3. Interactive Help Sheet (`RushHourHelpSheet.kt`)
@@ -210,16 +206,15 @@ The graphical front-end ([RushHourScreen.kt](file:///composeApp/src/commonMain/k
 
 ## 7. Verification & Benchmark Test Suites
 
-All 27 automated tests pass cleanly (100% pass rate):
+Run the focused test suite with:
 
 ```bash
-# Safe Windows test runner (avoids Gradle daemon resource locks)
-./gradlew :composeApp:desktopTest -x :composeApp:desktopProcessResources --no-daemon --tests "ai.rever.boss.arcade.rushhour.*"
+./gradlew :composeApp:desktopTest --tests "ai.rever.boss.arcade.rushhour.*"
 ```
 
-### Test Coverage (27/27 Passing):
-- **`RushHourInteractionTest` (5/5)**: Evaluates 1D axis isolation (zero perpendicular offset), boundary and collision clamping, snap threshold decisions, and rapid alternating gesture concurrency.
-- **`RushHourEngineTest` (7/7)**: Validates boundary enforcement, collision detection, step sequences, and win detection.
-- **`RushHourSolverTest` (6/6)**: Verifies BFS optimal path length against ground truth (L1=8, L2=11, L3=12, L4=14), plus deadlock detection.
-- **`RushHourMcpTest` (6/6)**: Validates MCP registration, schema conformity, move dispatch, error reporting, and state resets.
-- **`RushHourTabTest` (3/3)**: Confirms tab descriptor metadata, `needsNoInput = true`, and tab registry wiring.
+### Test Coverage (29 tests):
+- **`RushHourInteractionTest` (7)**: Drag constraints, snap thresholds, and concurrent move accounting.
+- **`RushHourEngineTest` (7)**: Boundaries, collisions, invalid steps, and win detection.
+- **`RushHourSolverTest` (6)**: BFS paths, optimal distances, and deadlock detection.
+- **`RushHourMcpTest` (6)**: Tool registration, move dispatch, errors, and resets.
+- **`RushHourTabTest` (3)**: Tab descriptor and registry wiring.

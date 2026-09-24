@@ -12,7 +12,7 @@ import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.arkivanov.decompose.ComponentContext
-import kotlin.time.Clock
+import java.util.UUID
 
 /**
  * Tab type metadata for Boss Arcade: Rush Hour Gym.
@@ -42,7 +42,7 @@ object RushHourTabType : TabTypeInfo {
  * Tab state representation for an open Rush Hour game tab.
  */
 data class RushHourTabInfo(
-    override val id: String = "rushhour-tab-${Clock.System.now().toEpochMilliseconds()}",
+    override val id: String = "rushhour-tab-${UUID.randomUUID()}",
     override val title: String = "Rush Hour",
     override val icon: ImageVector = Icons.Outlined.Extension,
 ) : TabInfo {
