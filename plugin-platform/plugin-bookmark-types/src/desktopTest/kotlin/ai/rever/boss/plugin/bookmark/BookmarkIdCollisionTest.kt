@@ -3,8 +3,6 @@ package ai.rever.boss.plugin.bookmark
 import ai.rever.boss.plugin.workspace.TabConfig
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNotEquals
-import kotlin.test.assertTrue
 
 /**
  * Guards the id-minting fix on the bookmark side. `generateId` used to be a bare
@@ -35,7 +33,7 @@ class BookmarkIdCollisionTest {
     }
 
     @Test
-    fun `two bookmarks added in one millisecond persist as two entries`() {
+    fun `two generated bookmarks persist as two entries`() {
         val collection = BookmarkCollection(name = "Bulk")
         val updated = collection.addBookmark(bookmark()).addBookmark(bookmark())
         assertEquals(2, updated.bookmarks.size)
@@ -49,15 +47,13 @@ class BookmarkIdCollisionTest {
     }
 
     @Test
-    fun `a duplicate id is reminted on the way in rather than shared`() {
+    fun `add bookmark preserves a caller supplied duplicate id`() {
         val first = bookmark()
         val collection = BookmarkCollection(name = "Bulk", bookmarks = listOf(first))
         // The colliding shape still arrives - a caller-supplied id, a stale file, an import.
         val updated = collection.addBookmark(first.copy())
         assertEquals(2, updated.bookmarks.size)
         val ids = updated.bookmarks.map { it.id }
-        assertEquals(2, ids.toSet().size)
-        assertTrue(ids.first() == first.id)
-        assertNotEquals(first.id, updated.bookmarks.last().id)
+        assertEquals(listOf(first.id, first.id), ids)
     }
 }

@@ -1393,7 +1393,7 @@ template picked from the fourth of those is the same gesture as one picked from 
 - **Templates are the SET of built-in ids, and it cannot be a prefix test.**
   `PredefinedWorkspaces.allIds` is derived from `allWorkspaces`, so a ninth built-in joins by
   existing; all eight ids are named constants so one can be referred to. `LayoutWorkspace.generateId()`
-  mints `workspace-<epoch millis>`, so a saved Space carries the same `workspace-` prefix as a
+  mints `workspace-<epoch millis>-<entropy>`, so a saved Space carries the same `workspace-` prefix as a
   built-in and `startsWith("workspace-")` would call every Space a template. The NAME is not the key
   either - a user can save a Space called "Claude Code".
 - **There is deliberately NO `isTemplate` field on `LayoutWorkspace`.** It is the plugin api type,
@@ -1498,7 +1498,7 @@ Three properties of the adoption worth keeping:
   id for the same file on every launch, so nothing could refer to that Space across a restart - the
   session set records ids, and so does every preserved-state key.
 - **It cannot be mistaken for either kind of id.** No built-in id ends in `-saved`, and
-  `generateId()` produces `workspace-<epoch millis>`, so an adopted id is recognisable as one. The
+  `generateId()` produces `workspace-<epoch millis>-<entropy>`, so an adopted id is recognisable as one. The
   plugin's template set is the eight literal ids, so an adopted Space files under Spaces.
 - **Nothing is rewritten on disk.** The migration is in memory, so a launch that reads a legacy file
   cannot half-write anything, and the file keeps the name the user sees in the folder.

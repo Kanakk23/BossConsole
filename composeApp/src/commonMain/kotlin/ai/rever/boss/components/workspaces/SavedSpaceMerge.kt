@@ -238,7 +238,7 @@ internal fun mergeSavedWorkspaces(
 /**
  * What a legacy file's id becomes when it is adopted.
  *
- * Deliberately not something `generateId()` could produce (`workspace-<epoch millis>`), so an
+ * Deliberately not something `generateId()` could produce (`workspace-<epoch millis>-<entropy>`), so an
  * adopted id is recognisable as one and can never be mistaken for a Space the user saved normally.
  */
 

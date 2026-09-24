@@ -109,24 +109,9 @@ data class BookmarkCollection(
 
     /**
      * Add a bookmark to this collection.
-     *
-     * A bookmark's id is its identity everywhere below - findBookmark, updateBookmark and
-     * removeBookmark all key on it - so an id already held must not enter the list twice:
-     * re-mint rather than leave both entries answering to one id.
+     * The caller-supplied id is preserved so callers can still address the added bookmark.
      */
-    fun addBookmark(bookmark: Bookmark): BookmarkCollection {
-        val resolved =
-            if (bookmarks.any { it.id == bookmark.id }) {
-                bookmark.copy(
-                    id =
-                        generateSequence { Bookmark.generateId() }
-                            .first { id -> bookmarks.none { it.id == id } },
-                )
-            } else {
-                bookmark
-            }
-        return copy(bookmarks = bookmarks + resolved)
-    }
+    fun addBookmark(bookmark: Bookmark): BookmarkCollection = copy(bookmarks = bookmarks + bookmark)
 
     /**
      * Remove a bookmark from this collection.

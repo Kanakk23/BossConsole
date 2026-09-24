@@ -1879,7 +1879,7 @@ class BossTabsComponent(
         }
 
         override fun openNewTab(url: String): String? {
-            val newTabId = bossTabsComponent.mintTabId("browser_")
+            val newTabId = bossTabsComponent.mintTabId("browser")
             val newTab =
                 FluckTabInfo(
                     id = newTabId,

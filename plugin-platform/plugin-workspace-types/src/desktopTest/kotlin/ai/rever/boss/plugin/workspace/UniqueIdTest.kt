@@ -29,6 +29,13 @@ class UniqueIdTest {
     }
 
     @Test
+    fun `workspace ids are distinct and retain their persisted prefix`() {
+        val ids = List(10_000) { LayoutWorkspace.generateId() }
+        assertEquals(ids.size, ids.toSet().size)
+        assertTrue(ids.all { it.matches(Regex("workspace-\\d+-[0-9a-f]{16}")) })
+    }
+
+    @Test
     fun `the minted id keeps the prefix, the clock's millisecond and a hex suffix`() {
         val id = uniqueId("bookmark", fixedClock)
         val parts = id.split("-")
