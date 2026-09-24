@@ -203,6 +203,10 @@ internal class BossAppState(
     // commands it would start. One at a time: a second arrival is refused, not queued.
     var pendingSpaceLoad by mutableStateOf<PendingSpaceLoad?>(null)
 
+    // The same holding pattern for `boss://plugin?id=…&action=…`: a link the OS
+    // will accept from any program cannot dispatch into a plugin unattended.
+    val pluginActionApprovals = PluginActionApprovalQueue()
+
     // An MCP tool execution requested by an AI agent that is suspended waiting
     // for operator approval under an ASK policy.
     var pendingMcpApproval by mutableStateOf<McpApprovalRequest?>(null)
@@ -363,6 +367,13 @@ internal fun ComponentContext.rememberBossAppState(
         remember(splitViewState, windowId) {
             SplitViewOperationsImpl(splitViewState, windowId)
         }
+    // Release its Main-dispatched coroutine scope when this window's composition leaves, so a
+    // closed window does not leak the scope or any in-flight operation.
+    DisposableEffect(splitViewOperations) {
+        onDispose {
+            splitViewOperations.dispose()
+        }
+    }
 
     // Create workspace data provider wrapper for plugins
     val workspaceDataProvider =
