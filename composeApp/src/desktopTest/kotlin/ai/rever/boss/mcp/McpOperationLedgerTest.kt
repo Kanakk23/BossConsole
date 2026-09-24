@@ -29,6 +29,29 @@ import kotlin.test.assertTrue
 class McpOperationLedgerTest {
     private val tempFiles = mutableListOf<File>()
 
+    @Test
+    fun `large error transcripts are omitted before regex work`() {
+        val ledger = McpOperationLedger()
+        val record =
+            ledger.record(
+                toolName = "test",
+                providerId = "test",
+                policyApplied = McpPolicyAction.ALLOW,
+                approvalDisposition = McpApprovalDisposition.AUTO_ALLOWED,
+                durationMs = 0,
+                isError = true,
+                rawArgs = emptyMap(),
+                errorSnippet = "curl ".repeat(30_000),
+            )
+        assertEquals("[OMITTED: error too large]", record.errorSnippet)
+    }
+
+    @Test
+    fun `basic auth redaction preserves the original flag separator`() {
+        assertEquals("curl --user=[REDACTED]", McpArgumentSanitizer.sanitizeMessage("curl --user=alice:password"))
+        assertEquals("curl -u  [REDACTED]", McpArgumentSanitizer.sanitizeMessage("curl -u  alice:password"))
+    }
+
     private fun createTempLedgerFile(): File {
         val dir =
             kotlin.io.path

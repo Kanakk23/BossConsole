@@ -9,8 +9,10 @@ import io.github.jan.supabase.auth.SettingsCodeVerifierCache
 import io.github.jan.supabase.auth.SettingsSessionManager
 import java.io.File
 import java.io.IOException
+import java.nio.channels.FileChannel
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.GeneralSecurityException
 import java.security.SecureRandom
@@ -38,10 +40,9 @@ private const val KEY_FILE_NAME = "session-store.key"
  * `~/.boss` directory whose files this app otherwise keeps owner-only.
  *
  * Storage, both files under the directory [createEncryptedSessionSettings] resolves:
- *  - `session-store.key` — a random 32-byte AES key, base64, created exclusively
- *    (`Files.createFile`, owner-only on POSIX from its first byte) so two processes starting
- *    against the same directory cannot each generate a key and orphan the other's store,
- *    then filled through [atomicWriteText] (see `AtomicFileWrite.kt`);
+ *  - `session-store.key` — a random 32-byte AES key, base64, published atomically while
+ *    holding the persistent `session-store.key.lock` file lock. Both files are owner-only
+ *    on POSIX from their first byte; concurrent creators adopt the same completed key;
  *  - `session-store.enc` — one `base64(key):base64(iv + ciphertext)` line per entry, so
  *    even key names are opaque. Every persisted write draws a fresh 96-bit IV.
  *
@@ -169,8 +170,8 @@ internal class EncryptedSessionSettings(
     }
 
     /**
-     * Loads the wrapping key, creating it on first use. Creation is exclusive
-     * (`Files.createFile`): the app and the `BOSS llm-token` CLI both reach
+     * Loads the wrapping key, creating it on first use under a shared file lock:
+     * the app and the `BOSS llm-token` CLI both reach
      * [createEncryptedSessionSettings] against the same directory, and a plain
      * last-write-wins would let each process generate its own key and silently orphan the
      * other's store at the next start. An existing key that cannot be used no longer
@@ -178,8 +179,18 @@ internal class EncryptedSessionSettings(
      * (the old ciphertext then reads as empty and the user signs in again) rather than
      * disabling the whole Supabase client over a truncated or half-synced key file.
      */
-    @Suppress("ReturnCount") // Every unusable-key shape must resolve to a usable key; guards.
-    private fun loadOrCreateKey(keyFile: File): SecretKeySpec {
+    private fun loadOrCreateKey(keyFile: File): SecretKeySpec =
+        synchronized(keyCreationLock) {
+            // Never replace or delete this sidecar: all processes must lock the same inode.
+            // The JVM monitor prevents overlapping FileLocks between threads in this process.
+            val lockFile = File(keyFile.absolutePath + ".lock")
+            createKeyFileExclusively(lockFile)
+            FileChannel.open(lockFile.toPath(), StandardOpenOption.WRITE).use { channel ->
+                channel.lock().use { loadOrCreateKeyLocked(keyFile) }
+            }
+        }
+
+    private fun loadOrCreateKeyLocked(keyFile: File): SecretKeySpec {
         readKeyBytes(keyFile)?.let { return SecretKeySpec(it, "AES") }
         if (keyFile.isFile) {
             logger.warn(
@@ -190,12 +201,6 @@ internal class EncryptedSessionSettings(
             )
         }
         val fresh = ByteArray(KEY_BYTES).also(secureRandom::nextBytes)
-        if (!createKeyFileExclusively(keyFile)) {
-            // Another process created the key between the read and the create; adopt theirs
-            // so both processes' stores decrypt with the same key. If it is the unusable
-            // file from above, fall through and overwrite it.
-            readKeyBytes(keyFile)?.let { return SecretKeySpec(it, "AES") }
-        }
         keyFile.atomicWriteText(base64Encoder.encodeToString(fresh))
         return SecretKeySpec(fresh, "AES")
     }
@@ -211,8 +216,7 @@ internal class EncryptedSessionSettings(
     }
 
     /**
-     * Creates the key file so exactly one of two concurrently starting processes wins; the
-     * loser re-reads instead of overwriting the winner's key.
+     * Creates the persistent lock file owner-only; an existing sidecar is reused as-is.
      */
     private fun createKeyFileExclusively(keyFile: File): Boolean {
         keyFile.parentFile?.mkdirs()
@@ -456,6 +460,7 @@ internal class EncryptedSessionSettings(
     override fun getBooleanOrNull(key: String): Boolean? = read { entries[key] }?.toBooleanStrictOrNull()
 
     private companion object {
+        val keyCreationLock = Any()
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val GCM_TAG_BITS = 128
         const val IV_BYTES = 12

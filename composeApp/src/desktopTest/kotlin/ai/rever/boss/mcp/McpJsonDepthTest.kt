@@ -13,6 +13,11 @@ class McpJsonDepthTest {
     private val limit = 128
 
     @Test
+    fun `unmatched closers cannot hide excessive nesting`() {
+        assertTrue(mcpJsonNestingExceeds("}".repeat(300) + "[".repeat(limit + 1), limit))
+    }
+
+    @Test
     fun `nesting past the limit is caught, and nesting at it is not`() {
         assertTrue(mcpJsonNestingExceeds("[".repeat(limit + 1) + "]".repeat(limit + 1), limit))
         assertFalse(mcpJsonNestingExceeds("[".repeat(limit) + "]".repeat(limit), limit))

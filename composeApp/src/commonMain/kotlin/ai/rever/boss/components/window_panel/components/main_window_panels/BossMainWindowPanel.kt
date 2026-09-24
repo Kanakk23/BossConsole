@@ -2510,23 +2510,6 @@ class BossTabsComponent(
         }
     }
 
-    // Close the most recently opened tab (used for auto-closing download redirects).
-    // Returns whether a tab was closed, so a batch close can stop instead of assuming.
-    fun closeMostRecentTab(): Boolean {
-        val tabs = tabsState.value.tabs
-        if (tabs.isNotEmpty()) {
-            val lastIndex = tabs.size - 1
-            bossMainWindowPanelLogger.debug(LogCategory.UI, "Closing most recent tab", mapOf("index" to lastIndex))
-            // Not reopenable: the only caller is the download-redirect cleanup
-            // (setupDownloadTabCloseCallback), the same automatic closure as closeTabByUrl.
-            // The user did not close it, and reopening would re-run the download.
-            removeTab(lastIndex, recordForReopen = false)
-            return true
-        }
-        bossMainWindowPanelLogger.debug(LogCategory.UI, "No tabs to close")
-        return false
-    }
-
     /**
      * Synchronously dispose all browser tabs in this component.
      * Called when the window is closing to ensure JxBrowser instances
