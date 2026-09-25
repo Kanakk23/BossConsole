@@ -2311,7 +2311,14 @@ applies any broader approval of an escalated call as once, logging the downgrade
 never overridden, so it is the durable answer there (#1624). Shell tools are rated on every
 string in their arguments. Arguments nested past MAX_MCP_ARGUMENT_DEPTH rate CRITICAL without being
 parsed (every parse on the invoke path checks the same depth guard first); arguments too wide to
-scan fully rate CRITICAL on the part that was not inspected.
+scan fully rate CRITICAL on the part that was not inspected. The call's ledger row carries
+`escalated: true` when this gate overrode a saved ALLOW, so a call that YOLO mode then answered
+(`YOLO_ALLOWED`) can be told apart from a routine call under the same ALLOW (#1655). It does not
+mark every destructive call: under the default ASK policy there is no ALLOW to override, and a
+destructive call YOLO answers there records `escalated: false`. `format` counts only as a
+command (the first word of a command, or with a drive such as `d:` anywhere after it, switches
+first or not), not as the text `format ` anywhere, which rated `--format json`, `clang-format` and
+prose typed through `send_input` CRITICAL.
 
 ### Secret references at the governance boundary
 
