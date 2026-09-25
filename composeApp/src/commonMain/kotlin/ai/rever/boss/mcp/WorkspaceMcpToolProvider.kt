@@ -1016,7 +1016,7 @@ object WorkspaceMcpToolProvider : McpToolProvider, McpToolAliasProvider {
         DashboardStatsManager.recordTerminalSession()
 
         val tabId = mountedTab.id
-        // openTerminalInActivePanelNow mints ids as "terminal-<timestamp>" (the only path this
+        // openTerminalInActivePanelNow mints ids as "terminal-<millis>-<entropy>" (the only path this
         // tool uses in production); the terminal's addressing keys on the part after the prefix.
         val terminalId = tabId.removePrefix("terminal-")
 
@@ -1036,7 +1036,7 @@ object WorkspaceMcpToolProvider : McpToolProvider, McpToolAliasProvider {
         }
     }
 
-    @Suppress("ReturnCount")
+    @Suppress("ReturnCount", "CyclomaticComplexMethod")
     private suspend fun handleCloseWorkspace(args: McpToolArgs): McpToolResult {
         val workspaceId = args.string("workspaceId")
         if (workspaceId.isNullOrBlank()) {
@@ -1061,9 +1061,12 @@ object WorkspaceMcpToolProvider : McpToolProvider, McpToolAliasProvider {
                 }
             } else {
                 // Read-only targeting, the same rule list_workspaces uses: closing a workspace
-                // must never mint a window. With exactly one registered window it is the only
-                // possible target; with none or several there is nothing safe to close in.
-                SplitViewStateRegistry.getAllStates().keys.singleOrNull()
+                // must never mint a window. Exactly one registered window is the only possible
+                // target; with none there is nothing to close in, though the disposable-file
+                // delete below can still run.
+                val openWindowIds = SplitViewStateRegistry.getAllStates().keys
+                ambiguousWindowError(workspaceId, openWindowIds)?.let { return it }
+                openWindowIds.singleOrNull()
             }
 
         // Stop the Space where it is running: clears its tabs and drops any preserved copy,
@@ -1084,10 +1087,13 @@ object WorkspaceMcpToolProvider : McpToolProvider, McpToolAliasProvider {
         }
 
         // Saying "success" when neither happened leaves the agent unable to tell "closed"
-        // from "that id does not exist anywhere".
+        // from "that id does not exist anywhere". Zero registered windows is said plainly so
+        // the agent knows there is no windowId it could pass - "(none)" alone read like a
+        // missing target.
         if (!releasedHere && !fileDeleted) {
+            val where = targetWindowId?.let { "in window '$it'" } ?: "in any window (none are open)"
             return McpToolResult(
-                "Workspace '$workspaceId' is not running in window '${targetWindowId ?: "(none)"}' " +
+                "Workspace '$workspaceId' is not running $where " +
                     "and has no disposable file to delete; nothing was closed.",
                 isError = true,
             )
@@ -1105,6 +1111,25 @@ object WorkspaceMcpToolProvider : McpToolProvider, McpToolAliasProvider {
             }
 
         return McpToolResult(response.toString())
+    }
+
+    /**
+     * The actionable refusal for a `close_workspace` call that named no `windowId` while
+     * several windows are open. Ambiguity used to collapse to a null target and surface only
+     * as a generic "nothing was closed", which an agent cannot act on - the error names the
+     * candidates so the caller can retry with one, and nothing has been changed when it fires.
+     * Returns null when zero or one window is open, where targeting is unambiguous.
+     */
+    private fun ambiguousWindowError(
+        workspaceId: String,
+        openWindowIds: Set<String>,
+    ): McpToolResult? {
+        if (openWindowIds.size <= 1) return null
+        return McpToolResult(
+            "Multiple windows are open (${openWindowIds.joinToString(", ")}); " +
+                "pass 'windowId' to choose which window to close '$workspaceId' in.",
+            isError = true,
+        )
     }
 
     /**

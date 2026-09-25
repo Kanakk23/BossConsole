@@ -25,6 +25,7 @@ You can install or update the CLI symlinks inside BossConsole via **Toolbox → 
 | `boss terminal` | Opens a new integrated BossTerm pane | `boss terminal` |
 | `boss status` | Checks running BossConsole health and status | `boss status --json` |
 | `boss doctor` | Reports health problems with suggested next steps (exit `2` when degraded) | `boss doctor --json` |
+| `boss project-detect` | Reports project languages, tools, and frameworks from local files | `boss project-detect --path . --json` |
 | `boss mcp <action>` | Discovers and invokes MCP tools | `boss mcp list` |
 | `boss pack <action>` | Plans and applies plugin packs (exit `2` when an apply is partial) | `boss pack plan team.json` |
 | `boss plugin <action>` | Developer CLI: scaffold, validate, and link plugins | `boss plugin init my-tool` |
@@ -286,7 +287,7 @@ The CLI adheres to strict UNIX process exit codes and standard stream separation
 - **Exit Code `0`**: Operation succeeded. `stdout` contains the tool output or JSON response.
 - **Exit Code `1`**: Tool execution failed (`isError == true`), invalid tool arguments, or desktop app offline. Clikt usage errors also use exit code `1`. The error description is written strictly to `stderr`, leaving `stdout` clean so shell pipelines do not ingest corrupted data.
 - **Output encoding**: Piped or redirected output, including every `--json` response and `boss mcp invoke` tool output, is UTF-8 on every platform; a Windows console keeps its own code page. Windows PowerShell 5.1 decodes a native command's output with `[Console]::OutputEncoding`, so set it to UTF-8 (`[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`) before capturing output that contains non-ASCII text.
-- **Exit Code `2`**: `boss doctor` only. BOSS is running but reported at least one health finding. `stdout` still contains the report, so a script can branch on the code and read the details. `boss status` never uses this code.
+- **Exit Code `2`**: `boss doctor` reports at least one health finding, or `boss pack apply --wait` completes partially. `stdout` still contains the report so a script can read the details. `boss project-detect` uses exit code `1` for an invalid path.
 
 ### Offline Fail-Fast
 If BossConsole is not running, commands fail immediately without hanging:
