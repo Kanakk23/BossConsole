@@ -19,7 +19,8 @@ import kotlinx.serialization.json.put
  * ([DownloadHistoryManager]) to AI agents and automation clients, so an agent that triggered a
  * download can confirm what landed and where.
  *
- * `downloads_history_list` declares `readOnly = true` (left at ALLOW by the mutating gate);
+ * `downloads_history_list` declares `readOnly = true`, but the host's sensitive-read catalog
+ * routes it through the approval-requiring default because URLs can contain bearer tokens;
  * `downloads_history_clear` declares `readOnly = false` (classified mutating and routed through
  * the usual ASK approval), matching the posture of the other host providers.
  */

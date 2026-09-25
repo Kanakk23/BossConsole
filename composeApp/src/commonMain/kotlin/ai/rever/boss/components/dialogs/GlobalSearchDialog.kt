@@ -557,7 +557,7 @@ private fun SearchDialogHeader(
                 }
                 Text(
                     text =
-                        indexError?.let { "File index unavailable: $it" }
+                        indexError?.let { "File index: $it" }
                             ?: if (isIndexing) "Indexing files..." else "$fileCount files indexed",
                     color = BossTheme.colors.textSecondary,
                     fontSize = 11.sp,

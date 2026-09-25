@@ -192,6 +192,9 @@ object McpMutatingToolCatalog {
             "helm_uninstall",
             // Secrets
             "secret_get",
+            // Sensitive reads use the approval-requiring default too: download URLs can
+            // contain bearer tokens. A read-only declaration must not bypass that default.
+            "downloads_history_list",
             // File & OS Execution
             "codebase_write",
             "run_command",

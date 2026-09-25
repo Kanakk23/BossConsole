@@ -1,6 +1,5 @@
 package ai.rever.boss.app
 
-import ai.rever.boss.arcade.rushhour.ui.registerRushHourTab
 import ai.rever.boss.components.plugin.DefaultPlugin
 import ai.rever.boss.components.plugin.PluginUpdateRegistry
 import ai.rever.boss.components.plugin.currentPluginHealth
@@ -103,7 +102,6 @@ internal fun BossAppStartupEffects(state: BossAppState) {
     // header drag-out resolve the same per-panel split zones the tab drag uses.
     LaunchedEffect(state.tabRegistry) {
         state.tabRegistry.registerPanelHostTab(state.panelComponentStore, state.draggablePanelComponent)
-        state.tabRegistry.registerRushHourTab()
         state.draggablePanelComponent.panelDropZonesProvider = { state.tabDragComponent.panelDropZones }
     }
 

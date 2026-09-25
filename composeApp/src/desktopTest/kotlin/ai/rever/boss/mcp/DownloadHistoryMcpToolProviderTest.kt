@@ -3,7 +3,10 @@ package ai.rever.boss.mcp
 import ai.rever.boss.downloads.DownloadHistoryManager
 import ai.rever.boss.plugin.api.McpToolArgs
 import ai.rever.boss.plugin.api.McpToolResult
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -59,6 +62,39 @@ class DownloadHistoryMcpToolProviderTest {
         assertEquals(true, readOnly["downloads_history_list"])
         assertEquals(false, readOnly["downloads_history_clear"])
     }
+
+    @Test
+    fun `sensitive history requires approval despite its read-only declaration`() {
+        val tool = DownloadHistoryMcpToolProvider.tools().first { it.name == "downloads_history_list" }
+        val engine = McpPolicyEngine(policyFile = null)
+        assertEquals(McpPolicyAction.ASK, engine.policyFor(tool.name, "boss-downloads", tool.readOnly))
+        assertTrue(McpMutatingToolCatalog.isMutating(tool.name, tool.readOnly))
+    }
+
+    @Test
+    fun `denied history invocation never returns a signed download URL`() =
+        runBlocking {
+            DownloadHistoryManager.record("https://example.test/file?token=private-token", "/private/download.zip")
+            val bus = McpApprovalBus(defaultTimeoutMs = 5000L)
+            val core =
+                McpToolRegistryCore(
+                    disabledFile = null,
+                    policyEngine = McpPolicyEngine(policyFile = null),
+                    approvalBus = bus,
+                )
+            core.registerProvider(DownloadHistoryMcpToolProvider)
+            withTimeout(5000L) {
+                val invocation = async { core.invoke("downloads_history_list", "{}") }
+                val request = bus.pendingList.first { it.isNotEmpty() }.first()
+                assertEquals("downloads_history_list", request.toolName)
+                assertFalse(invocation.isCompleted)
+                bus.deny(request.id, "Private history")
+                val result = invocation.await()
+                assertTrue(result.isError)
+                assertFalse(result.text.contains("private-token"))
+                assertFalse(result.text.contains("/private/download.zip"))
+            }
+        }
 
     @Test
     fun `list returns recorded downloads newest first`() =

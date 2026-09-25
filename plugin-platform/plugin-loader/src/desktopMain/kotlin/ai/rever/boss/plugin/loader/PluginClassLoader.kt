@@ -208,6 +208,9 @@ class PluginClassLoader(
                 "javax.",
                 "sun.",
                 "com.sun.",
+                // JDK 17 generates reflection accessors after repeated invocations. Their
+                // superclass must resolve through the parent, even for plugin-owned classes.
+                "jdk.internal.reflect.",
                 // Logging
                 "org.slf4j.",
                 "ai.rever.boss.plugin.logging.",
