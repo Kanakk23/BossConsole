@@ -1,6 +1,7 @@
 package ai.rever.boss.components.workspaces
 
 import ai.rever.boss.components.plugin.TabUpdateRegistry
+import ai.rever.boss.components.window_panel.SplitNode
 import ai.rever.boss.components.window_panel.SplitViewState
 import ai.rever.boss.plugin.api.TabComponentWithUI
 import ai.rever.boss.plugin.api.TabInfo
@@ -12,7 +13,6 @@ import ai.rever.boss.plugin.workspace.SplitConfig
 import androidx.compose.runtime.Composable
 import com.arkivanov.decompose.ComponentContext
 import kotlinx.coroutines.runBlocking
-import org.junit.jupiter.api.Disabled
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -156,14 +156,29 @@ class WorkspaceApplierTreeRestoreTest {
         )
     }
 
+    private sealed interface RestoredTree {
+        data class Panel(val titles: List<String>) : RestoredTree
+        data class VerticalSplit(val left: RestoredTree, val right: RestoredTree) : RestoredTree
+        data class HorizontalSplit(val top: RestoredTree, val bottom: RestoredTree) : RestoredTree
+    }
+
+    private fun restoredTree(state: SplitViewState): RestoredTree =
+        state.rootNode.toRestoredTree()
+
+    private fun SplitNode.toRestoredTree(): RestoredTree =
+        when (this) {
+            is SplitNode.Panel ->
+                RestoredTree.Panel(tabsComponent.tabsState.value.tabs.map { it.title })
+            is SplitNode.VerticalSplit ->
+                RestoredTree.VerticalSplit(left.toRestoredTree(), right.toRestoredTree())
+            is SplitNode.HorizontalSplit ->
+                RestoredTree.HorizontalSplit(top.toRestoredTree(), bottom.toRestoredTree())
+        }
+
+    private fun treePanel(vararg titles: String) = RestoredTree.Panel(titles.toList())
+
     @Test
-    @Disabled("restores [[A],[C],[B]] instead of the saved order - tracked in #1610")
     fun `a nested split on the left restores in saved order`() {
-        // The mirror of the first case with the nest on the LEFT: the inner recursion
-        // splits "main" for its own right side, so the outer split for C splits the
-        // already-split panel again and the panels come back out of saved order
-        // ([[A],[C],[B]] instead of the saved [[A],[B],[C]]). Disabled until #1610
-        // lands, so the suite does not claim coverage it lacks.
         val layout =
             SplitConfig.VerticalSplit(
                 left =
@@ -174,6 +189,54 @@ class WorkspaceApplierTreeRestoreTest {
                 right = panel(editorTab("C.kt")),
             )
 
+        val state = appliedState(layout)
+
+        assertEquals(
+            RestoredTree.VerticalSplit(
+                left =
+                    RestoredTree.VerticalSplit(
+                        left = treePanel("A.kt"),
+                        right = treePanel("B.kt"),
+                    ),
+                right = treePanel("C.kt"),
+            ),
+            restoredTree(state),
+        )
+        assertEquals(
+            listOf(
+                listOf("A.kt"),
+                listOf("B.kt"),
+                listOf("C.kt"),
+            ),
+            restoredTitles(layout),
+        )
+    }
+
+    @Test
+    fun `a nested split on the top restores in saved order`() {
+        val layout =
+            SplitConfig.HorizontalSplit(
+                top =
+                    SplitConfig.HorizontalSplit(
+                        top = panel(editorTab("A.kt")),
+                        bottom = panel(editorTab("B.kt")),
+                    ),
+                bottom = panel(editorTab("C.kt")),
+            )
+
+        val state = appliedState(layout)
+
+        assertEquals(
+            RestoredTree.HorizontalSplit(
+                top =
+                    RestoredTree.HorizontalSplit(
+                        top = treePanel("A.kt"),
+                        bottom = treePanel("B.kt"),
+                    ),
+                bottom = treePanel("C.kt"),
+            ),
+            restoredTree(state),
+        )
         assertEquals(
             listOf(
                 listOf("A.kt"),
