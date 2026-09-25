@@ -1,9 +1,12 @@
 package ai.rever.boss.utils
 
+import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.LogCategory
 import java.io.File
 import java.io.IOException
 import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -190,5 +193,74 @@ private fun Path.throwIfNotOwnedByCurrentUser() {
     val foreignPrivate = owner != currentUser && PosixFilePermission.OTHERS_WRITE !in attributes.permissions()
     if (foreignPrivate) {
         throw IOException("Refusing to write into $this: owned by $owner, this process runs as $currentUser")
+    }
+}
+
+/**
+ * Rename this file aside as `<name>.corrupt-<millis>`, so a settings file that fails to *decode*
+ * (as opposed to fresh state simply not existing yet) is preserved for inspection rather than
+ * re-read - and re-failed - on every future launch, or silently overwritten by the next save.
+ *
+ * Call this only once the content is known to be corrupt (a decode/deserialization failure), not
+ * for an ordinary read/IO error: a transient permission or disk fault says nothing about whether
+ * the bytes on disk are good, and renaming a possibly-fine file away would be data loss the read
+ * failure alone does not justify.
+ *
+ * The move uses `Files.move` without `REPLACE_EXISTING` (see [atomicMoveFrom] for why `renameTo`
+ * is the wrong call), so an aside from an earlier recovery is never replaced: a name that is
+ * already taken - two recoveries inside one millisecond, or a clock that stepped back - is retried
+ * with a `-<n>` suffix. The aside keeps the corrupt file's bytes but is narrowed to owner-only
+ * where the filesystem has POSIX modes, because a torn file written before [atomicWriteText]
+ * pinned its temp files may have been created world-readable and it is never pruned.
+ *
+ * Best-effort: a failed move (another process holding the file, a read-only volume) is logged with
+ * its cause and reported via the return value rather than thrown, because the caller's own
+ * fallback - fresh defaults, written back with [atomicWriteText] - is what keeps the app usable
+ * either way. **When this returns `false` the caller's write-back overwrites the corrupt bytes.**
+ *
+ * `.corrupt-*` files are never pruned. They do not end in `.json`, so no settings scan picks them
+ * up, and the file self-heals, so there is at most one per corruption event.
+ */
+fun File.renameAsideCorrupt(): Boolean {
+    val stamp = System.currentTimeMillis()
+    var lastFailure: IOException? = null
+    var attempt = 0
+    while (attempt < MAX_ASIDE_ATTEMPTS) {
+        val suffix = if (attempt == 0) "" else "-$attempt"
+        val aside = resolveSibling("$name.corrupt-$stamp$suffix").toPath()
+        try {
+            Files.move(toPath(), aside)
+            aside.restrictToOwner()
+            return true
+        } catch (e: FileAlreadyExistsException) {
+            // Name taken: try the next suffix.
+            lastFailure = e
+            attempt++
+        } catch (e: IOException) {
+            // Not a name clash (a lock, a read-only volume, the source vanished): retrying cannot help.
+            lastFailure = e
+            attempt = MAX_ASIDE_ATTEMPTS
+        }
+    }
+    asideLogger.warn(
+        LogCategory.FILE,
+        "Could not move a corrupt file aside",
+        mapOf("path" to path),
+        error = lastFailure,
+    )
+    return false
+}
+
+private const val MAX_ASIDE_ATTEMPTS = 100
+
+private val asideLogger = BossLogger.forComponent("AtomicFileWrite")
+
+private fun Path.restrictToOwner() {
+    try {
+        Files.setPosixFilePermissions(this, OWNER_ONLY_FILE_PERMISSIONS)
+    } catch (_: UnsupportedOperationException) {
+        // No POSIX modes here; the aside keeps whatever ACL it had, which is all there is to keep.
+    } catch (e: IOException) {
+        asideLogger.warn(LogCategory.FILE, "Could not restrict a corrupt-file aside to its owner", error = e)
     }
 }
