@@ -344,7 +344,7 @@ class SecretReferenceInvariantTest {
         }
 
     @Test
-    fun `INV2 - malformed JSON with an ordinary backslash and no marker still runs`() =
+    fun `INV2 - malformed JSON and non-object payloads are refused before execution`() =
         runBlocking {
             val h = Harness(CountingVault(listOf(record)))
             var called = false
@@ -355,17 +355,21 @@ class SecretReferenceInvariantTest {
                 },
             )
             val op = with(h) { operator() }
-            // A lowercase \u followed by non-hex makes the parse genuinely fail, so these calls
-            // survive on the no-marker fallback rather than on the raw-scan gate.
+            // The registry now requires object-shaped JSON even without a secret marker.
             val result = h.core.invoke("write", """{"path":"C:\users\me\notes.txt"}""")
             val listResult = h.core.invoke("write", """["C:\users\me"]""")
-            // A payload that parses but is not an object runs raw, with no resolution attempted.
+            // A payload that parses but is not an object is refused too.
             val arrayResult = h.core.invoke("write", """["\u0041"]""")
             op.cancel()
-            assertFalse(result.isError)
-            assertFalse(listResult.isError)
-            assertFalse(arrayResult.isError)
-            assertTrue(called)
+            assertTrue(result.isError)
+            assertTrue(listResult.isError)
+            assertTrue(arrayResult.isError)
+            assertFalse(called)
+            assertTrue(
+                h.ledger.recentOperations.value.all {
+                    it.approvalDisposition == McpApprovalDisposition.INVALID_ARGUMENTS
+                },
+            )
         }
 
     @Test
@@ -384,7 +388,7 @@ class SecretReferenceInvariantTest {
             assertTrue(result.isError)
             assertFalse(called)
             assertEquals(
-                McpApprovalDisposition.SECRET_UNRESOLVED,
+                McpApprovalDisposition.INVALID_ARGUMENTS,
                 h.ledger.recentOperations.value
                     .single()
                     .approvalDisposition,
@@ -493,7 +497,7 @@ class SecretReferenceInvariantTest {
         }
 
     @Test
-    fun `INV7 - a deeply nested payload still leaves its ledger record`() =
+    fun `INV7 - a deeply nested payload is refused and still leaves its ledger record`() =
         runBlocking {
             val h = Harness(CountingVault(listOf(record)))
             var called = false
@@ -505,9 +509,15 @@ class SecretReferenceInvariantTest {
             )
             val deep = """{"a":"\u0041","b":""" + "[".repeat(8_000) + "]".repeat(8_000) + "}"
             val result = h.core.invoke("write", deep)
-            assertFalse(result.isError, result.text)
-            assertTrue(called)
+            assertTrue(result.isError)
+            assertFalse(called)
             assertEquals(1, h.ledger.recentOperations.value.size)
+            assertEquals(
+                McpApprovalDisposition.INVALID_ARGUMENTS,
+                h.ledger.recentOperations.value
+                    .single()
+                    .approvalDisposition,
+            )
         }
 
     @Test
@@ -528,7 +538,7 @@ class SecretReferenceInvariantTest {
             val rec =
                 h.ledger.recentOperations.value
                     .single()
-            assertEquals(McpApprovalDisposition.SECRET_UNRESOLVED, rec.approvalDisposition)
+            assertEquals(McpApprovalDisposition.INVALID_ARGUMENTS, rec.approvalDisposition)
         }
 
     @Test
