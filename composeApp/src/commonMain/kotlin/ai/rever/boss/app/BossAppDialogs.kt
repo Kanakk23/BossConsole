@@ -883,6 +883,29 @@ internal fun BossAppDialogs(state: BossAppState) {
     // The same question for a Space whose terminal tabs carry commands.
     SpaceLoadPrompt(state)
 
+    // A URL that reached BOSS from outside the operator's own `boss`
+    // invocation (`boss://url`, a link forwarded over the single-instance
+    // channel). Same shape as the terminal prompt above: the request carries
+    // no evidence of who made it, so the operator sees the exact URL before a
+    // tab is opened for it.
+    state.urlOpenApprovals.current?.let { pending ->
+        UrlOpenApprovalDialog(
+            request = pending,
+            pendingCount = state.urlOpenApprovals.size,
+            onDismiss = { state.urlOpenApprovals.consume(pending) },
+            onConfirm = confirm@{
+                // Consume before opening; the dialog also calls onDismiss after onConfirm.
+                // A stale callback must never open or dismiss the next request.
+                if (!state.urlOpenApprovals.consume(pending)) return@confirm
+                logger.info(
+                    LogCategory.BROWSER,
+                    "Operator confirmed an externally requested URL",
+                    mapOf("windowId" to windowId),
+                )
+                splitViewState.openUrlInActivePanel(pending.url, pending.title)
+            },
+        )
+    }
     // A plugin action that reached BOSS from outside the operator's own `boss`
     // invocation. Nothing has been dispatched yet: this prompt is the only path
     // from such a link to the plugin's registered handler.

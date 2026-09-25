@@ -1,11 +1,13 @@
 package ai.rever.boss.app
 
+import ai.rever.boss.arcade.rushhour.ui.registerRushHourTab
 import ai.rever.boss.components.plugin.DefaultPlugin
 import ai.rever.boss.components.plugin.PluginUpdateRegistry
 import ai.rever.boss.components.plugin.currentPluginHealth
 import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
 import ai.rever.boss.components.plugin.tab_types.registerPanelHostTab
 import ai.rever.boss.components.registery.PanelComponentStoreRegistry
+import ai.rever.boss.components.window_panel.RegisterSplitViewState
 import ai.rever.boss.components.window_panel.SplitNode
 import ai.rever.boss.components.window_panel.SplitViewStateRegistry
 import ai.rever.boss.components.wizard.plugin.PluginWizardIntegration
@@ -101,26 +103,28 @@ internal fun BossAppStartupEffects(state: BossAppState) {
     // header drag-out resolve the same per-panel split zones the tab drag uses.
     LaunchedEffect(state.tabRegistry) {
         state.tabRegistry.registerPanelHostTab(state.panelComponentStore, state.draggablePanelComponent)
+        state.tabRegistry.registerRushHourTab()
         state.draggablePanelComponent.panelDropZonesProvider = { state.tabDragComponent.panelDropZones }
-    }
-
-    // Register this window's state in the global registry for multi-window features
-    LaunchedEffect(splitViewState, windowId) {
-        SplitViewStateRegistry.register(windowId, splitViewState)
     }
 
     // Cancel the split state's deferred-open scope when the state itself goes.
     //
-    // Keyed on `splitViewState` ALONE, deliberately. The obvious place for this
-    // was `SplitViewStateRegistry.unregister`, which is called from the big
-    // DisposableEffect below - and that one is keyed on seven values, only one of
-    // which is the split state. A change to any of the other six would have
-    // cancelled the scope of a state that is still live, after which every
-    // deferred open in that window silently did nothing for the rest of the
-    // session, with no error anywhere.
+    // Keyed on `splitViewState` ALONE, deliberately. Neighbouring effects are keyed on
+    // more than the split state (the plugin effect below is keyed on seven values), and
+    // riding along on one of those would cancel the scope of a state that is still live,
+    // after which every deferred open in that window silently did nothing for the rest of
+    // the session, with no error anywhere.
     DisposableEffect(splitViewState) {
         onDispose { splitViewState.dispose() }
     }
+
+    // Register this window's state in the global registry for multi-window features.
+    // RegisterSplitViewState pairs the register with its unregister on the same keys, so
+    // the entry's lifetime is exactly this window's composition lifetime - an onDispose in
+    // a distant multi-keyed effect could strand a live window or leak a dead one. Declared
+    // after the state-dispose effect so teardown still unregisters before the state dies:
+    // Compose forgets sibling effects in reverse order.
+    RegisterSplitViewState(windowId, splitViewState)
 
     // Register this window's panel component store so the plugin reload path can
     // reset open sidebar panel slots across all windows (see PanelComponentStoreRegistry).
@@ -431,7 +435,9 @@ internal fun BossAppStartupEffects(state: BossAppState) {
             // Panels must release resources before this window's plugin classloaders close,
             // during window teardown. Store disposal is idempotent.
             state.panelComponentStore.dispose()
-            // Cleanup plugin coroutines
+            // Cleanup plugin coroutines. dispose() returns immediately - the teardown runs on
+            // the plugin's own background scope and must not be joined here: this is the UI
+            // thread, and blocking it is exactly the stall it exists to prevent.
             plugin.dispose()
             // NOTE: the updater is NOT torn down here. It is process-wide; the
             // first window to close used to cancel periodic checks and in-flight
@@ -439,8 +445,10 @@ internal fun BossAppStartupEffects(state: BossAppState) {
             // handle is released by rememberBossAppState, which also acquired it,
             // and app-level teardown is UpdateCoordinator.shutdown() in main.kt.
 
-            // Unregister this window's state from the global registries
-            SplitViewStateRegistry.unregister(windowId)
+            // Unregister this window's state from the global registries.
+            // SplitViewStateRegistry is not here: RegisterSplitViewState owns that pair on
+            // the (windowId, splitViewState) keys, so an unrelated key change above cannot
+            // drop a live window and a throw above cannot leak a dead one.
             WindowProjectStateRegistry.unregister(windowId)
             WindowRunnerStateRegistry.unregister(windowId)
             WindowGitStateRegistry.unregister(windowId)

@@ -76,12 +76,19 @@ object DashboardStatsManager {
     private val _sessionStartTime = MutableStateFlow(System.currentTimeMillis())
     val sessionStartTime: StateFlow<Long> = _sessionStartTime.asStateFlow()
 
-    init {
+    private val initialLoadJob: Job =
         scope.launch {
             loadAsync()
             // Reset daily activity if it's a new day
             checkAndResetDailyActivity()
         }
+
+    /**
+     * Lets desktop tests establish their persisted-state baseline after the singleton's
+     * asynchronous startup load has settled. Production callers must not wait for this work.
+     */
+    internal suspend fun awaitInitialLoadForTesting() {
+        initialLoadJob.join()
     }
 
     /**
