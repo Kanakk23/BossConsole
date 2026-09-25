@@ -213,41 +213,45 @@ class PluginPackGovernanceTest {
             awaitJob(h.jobs, runningId)
         }
 
+    private fun planChangeFixture(): FakePackEffects {
+        val gatewayListing = StoreListing.Published(latest = "1.0.0", versions = setOf("1.0.0"), latestSha256 = "sha-gateway-1.0")
+        val editorListing = StoreListing.Published(latest = "2.0.0", versions = setOf("2.0.0"), latestSha256 = "sha-editor-2.0")
+        val telemetryListing = StoreListing.Published(latest = "1.0.0", versions = setOf("1.0.0"), latestSha256 = "sha-telemetry-1.0")
+
+        val fakeEffects =
+            FakePackEffects(
+                store =
+                    mutableMapOf(
+                        "ai.rever.boss.gateway" to gatewayListing,
+                        "ai.rever.boss.editor" to editorListing,
+                        "ai.rever.boss.telemetry" to telemetryListing,
+                    ),
+            )
+        fakeEffects.closures["ai.rever.boss.gateway"] =
+            InstallClosure(
+                order = listOf("ai.rever.boss.gateway"),
+                alsoInstalls = emptyList(),
+                unresolved = emptySet(),
+                cyclic = false,
+                truncated = false,
+                artifacts = listOf(ApprovedArtifact("ai.rever.boss.gateway", "1.0.0", "sha-gateway-1.0")),
+            )
+        fakeEffects.closures["ai.rever.boss.editor"] =
+            InstallClosure(
+                order = listOf("ai.rever.boss.editor"),
+                alsoInstalls = emptyList(),
+                unresolved = emptySet(),
+                cyclic = false,
+                truncated = false,
+                artifacts = listOf(ApprovedArtifact("ai.rever.boss.editor", "2.0.0", "sha-editor-2.0")),
+            )
+        return fakeEffects
+    }
+
     @Test
     fun `plan change before execution starts reports plan_changed and performs zero mutations`() =
         runBlocking<Unit> {
-            val gatewayListing = StoreListing.Published(latest = "1.0.0", versions = setOf("1.0.0"), latestSha256 = "sha-gateway-1.0")
-            val editorListing = StoreListing.Published(latest = "2.0.0", versions = setOf("2.0.0"), latestSha256 = "sha-editor-2.0")
-            val telemetryListing = StoreListing.Published(latest = "1.0.0", versions = setOf("1.0.0"), latestSha256 = "sha-telemetry-1.0")
-
-            val fakeEffects =
-                FakePackEffects(
-                    store =
-                        mutableMapOf(
-                            "ai.rever.boss.gateway" to gatewayListing,
-                            "ai.rever.boss.editor" to editorListing,
-                            "ai.rever.boss.telemetry" to telemetryListing,
-                        ),
-                )
-            fakeEffects.closures["ai.rever.boss.gateway"] =
-                InstallClosure(
-                    order = listOf("ai.rever.boss.gateway"),
-                    alsoInstalls = emptyList(),
-                    unresolved = emptySet(),
-                    cyclic = false,
-                    truncated = false,
-                    artifacts = listOf(ApprovedArtifact("ai.rever.boss.gateway", "1.0.0", "sha-gateway-1.0")),
-                )
-            fakeEffects.closures["ai.rever.boss.editor"] =
-                InstallClosure(
-                    order = listOf("ai.rever.boss.editor"),
-                    alsoInstalls = emptyList(),
-                    unresolved = emptySet(),
-                    cyclic = false,
-                    truncated = false,
-                    artifacts = listOf(ApprovedArtifact("ai.rever.boss.editor", "2.0.0", "sha-editor-2.0")),
-                )
-
+            val fakeEffects = planChangeFixture()
             val h = Harness(fakeEffects)
             val devPackArgs = """{"pack":"dev","plugins":["ai.rever.boss.gateway@1.0.0","ai.rever.boss.editor@2.0.0"]}"""
 
@@ -340,7 +344,11 @@ class PluginPackGovernanceTest {
             val result = h.core.invoke("pack_apply", packArgs)
             assertTrue(result.isError)
             assertTrue("dependency cycle detected" in result.text, result.text)
-            assertTrue(h.bus.pendingList.value.isEmpty(), "Cyclic closure must not request approval")
+            assertTrue(
+                h.bus.pendingList.value
+                    .isEmpty(),
+                "Cyclic closure must not request approval",
+            )
             assertTrue(h.effects.calls.isEmpty())
             assertEquals(null, h.jobs.status(null))
         }
@@ -361,7 +369,10 @@ class PluginPackGovernanceTest {
             val result = h.core.invoke("pack_apply", packArgs)
             assertTrue(result.isError)
             assertTrue("was truncated" in result.text, result.text)
-            assertTrue(h.bus.pendingList.value.isEmpty())
+            assertTrue(
+                h.bus.pendingList.value
+                    .isEmpty(),
+            )
             assertTrue(h.effects.calls.isEmpty())
             assertEquals(null, h.jobs.status(null))
         }
@@ -383,7 +394,10 @@ class PluginPackGovernanceTest {
             assertTrue(result.isError)
             assertTrue("unresolved dependencies" in result.text, result.text)
             assertTrue("missing.plugin.dep" in result.text, result.text)
-            assertTrue(h.bus.pendingList.value.isEmpty())
+            assertTrue(
+                h.bus.pendingList.value
+                    .isEmpty(),
+            )
             assertTrue(h.effects.calls.isEmpty())
             assertEquals(null, h.jobs.status(null))
         }
@@ -405,7 +419,10 @@ class PluginPackGovernanceTest {
             val result = h.core.invoke("pack_apply", packArgs)
             assertTrue(result.isError)
             assertTrue("too large to display" in result.text, result.text)
-            assertTrue(h.bus.pendingList.value.isEmpty())
+            assertTrue(
+                h.bus.pendingList.value
+                    .isEmpty(),
+            )
             assertTrue(h.effects.calls.isEmpty())
             assertEquals(null, h.jobs.status(null))
         }

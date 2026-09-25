@@ -30,7 +30,8 @@ import kotlinx.serialization.json.put
 class PluginPackMcpToolProvider(
     private val effects: PluginPackEffects,
     private val jobs: PluginPackJobs,
-) : McpToolProvider, McpToolPreparer {
+) : McpToolProvider,
+    McpToolPreparer {
     override val providerId: String = PluginPackParser.PACK_PROVIDER_ID
 
     override fun tools(): List<McpToolDefinition> =
@@ -81,9 +82,10 @@ class PluginPackMcpToolProvider(
             )
         }
 
-        val pack = PluginPackParser.parse(args.raw).getOrElse {
-            return McpPreparationResult.Rejected(invalid(it))
-        }
+        val pack =
+            PluginPackParser.parse(args.raw).getOrElse {
+                return McpPreparationResult.Rejected(invalid(it))
+            }
 
         val snapshot = effects.snapshot(pack)
         val plan = PluginPackPlanner.plan(pack, snapshot)
@@ -110,7 +112,9 @@ class PluginPackMcpToolProvider(
             if (closure.unresolved.isNotEmpty()) {
                 return McpPreparationResult.Rejected(
                     McpToolResult(
-                        "Cannot apply pack '${pack.id}': unresolved dependencies for plugin '${step.plugin.pluginId}': ${closure.unresolved.sorted().joinToString(", ")}.",
+                        "Cannot apply pack '${pack.id}': unresolved dependencies for plugin '${step.plugin.pluginId}': ${closure.unresolved.sorted().joinToString(
+                            ", ",
+                        )}.",
                         isError = true,
                     ),
                 )
@@ -129,7 +133,8 @@ class PluginPackMcpToolProvider(
             plan.plugins.map { step ->
                 val extraArtifacts =
                     step.closure?.let { closure ->
-                        closure.artifacts.filterNot { it.pluginId == step.plugin.pluginId }
+                        closure.artifacts
+                            .filterNot { it.pluginId == step.plugin.pluginId }
                             .ifEmpty {
                                 closure.alsoInstalls.map { id ->
                                     val listing = snapshot.store[id] as? StoreListing.Published
@@ -153,7 +158,9 @@ class PluginPackMcpToolProvider(
         val rulesDisplay =
             plan.rules.map { step ->
                 PackRuleDisplay(
-                    scope = step.rule.scope.name.lowercase(),
+                    scope =
+                        step.rule.scope.name
+                            .lowercase(),
                     subject = step.rule.subject,
                     action = step.rule.action.name,
                     outcome = step.kind.name.lowercase(),

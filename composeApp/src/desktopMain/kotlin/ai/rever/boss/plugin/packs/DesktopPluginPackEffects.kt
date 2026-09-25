@@ -156,8 +156,8 @@ class DesktopPluginPackEffects(
             if (lookup != null && lookup.sha256.isNotBlank() && !lookup.sha256.equals(expectedSha, ignoreCase = true)) {
                 return Result.failure(
                     IllegalStateException(
-                        "Store SHA-256 for $pluginId (${lookup.sha256}) does not match approved hash $expectedSha."
-                    )
+                        "Store SHA-256 for $pluginId (${lookup.sha256}) does not match approved hash $expectedSha.",
+                    ),
                 )
             }
         }
