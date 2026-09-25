@@ -6,6 +6,7 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 import kotlin.concurrent.thread
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -259,5 +260,61 @@ class AtomicFileWriteTest {
             Regex("writer-\\d+-round-\\d+").matches(published),
             "expected one writer's whole snapshot, got torn bytes: <$published>",
         )
+    }
+
+    @Test
+    fun `renameAsideCorrupt preserves the bad file under a distinct name and empties the original path`() {
+        val target = File(tempDir, "settings.json").apply { writeText("{ not valid json") }
+
+        assertTrue(target.renameAsideCorrupt())
+
+        assertFalse(target.exists(), "the original path must be free for a fresh write")
+        val survivors = tempDir.listFiles().orEmpty().toList()
+        assertEquals(1, survivors.size, "the corrupt bytes must not simply vanish")
+        val corrupt = survivors.single()
+        assertTrue(corrupt.name.startsWith("settings.json.corrupt-"), "unexpected name: ${corrupt.name}")
+        assertEquals("{ not valid json", corrupt.readText(), "content must survive the rename untouched")
+    }
+
+    // Two recoveries of the same path must never replace the earlier aside, however close together
+    // they land (the millisecond stamp alone would collide, and silently overwrite on POSIX).
+    @Test
+    fun `renameAsideCorrupt keeps every earlier aside when called repeatedly on the same name`() {
+        val target = File(tempDir, "settings.json")
+        val bodies = (1..5).map { "corrupt #$it" }
+
+        bodies.forEach { body ->
+            target.writeText(body)
+            assertTrue(target.renameAsideCorrupt())
+        }
+
+        val kept =
+            tempDir
+                .listFiles()
+                .orEmpty()
+                .map { it.readText() }
+                .sorted()
+        assertEquals(bodies.sorted(), kept, "every corrupt copy must survive under its own name")
+    }
+
+    @Test
+    fun `renameAsideCorrupt narrows the aside to owner-only where the filesystem has POSIX modes`() {
+        val target = File(tempDir, "settings.json").apply { writeText("{ torn") }
+        val posix = Files.getFileAttributeView(target.toPath(), PosixFileAttributeView::class.java)
+        assumeTrue(posix != null, "needs POSIX file permissions")
+        Files.setPosixFilePermissions(target.toPath(), PosixFilePermissions.fromString("rw-r--r--"))
+
+        assertTrue(target.renameAsideCorrupt())
+
+        val aside = tempDir.listFiles().orEmpty().single()
+        assertEquals(
+            PosixFilePermissions.fromString("rw-------"),
+            Files.getPosixFilePermissions(aside.toPath()),
+        )
+    }
+
+    @Test
+    fun `renameAsideCorrupt reports failure rather than throwing when there is nothing to rename`() {
+        assertFalse(File(tempDir, "missing.json").renameAsideCorrupt())
     }
 }
