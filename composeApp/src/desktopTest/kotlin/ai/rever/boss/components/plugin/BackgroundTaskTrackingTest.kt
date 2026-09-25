@@ -20,6 +20,22 @@ import kotlin.test.assertEquals
  * No sleeps and no timeouts.
  */
 class BackgroundTaskTrackingTest {
+    @Test
+    fun `every launched task remains reachable when many start together`() {
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val gate = CompletableDeferred<Unit>()
+        try {
+            val provider = DefaultBackgroundTaskProvider(scope)
+            repeat(100) { provider.launchTask("sync") { gate.await() } }
+
+            assertEquals(100, provider.getRunningTasks().size)
+            assertEquals(100, provider.cancelAll())
+        } finally {
+            gate.complete(Unit)
+            scope.cancel()
+        }
+    }
+
     /**
      * The handle was stored after `scope.launch`, and the release was a `finally` inside the
      * coroutine. A task that reaches the end of its body before the launching thread stores the

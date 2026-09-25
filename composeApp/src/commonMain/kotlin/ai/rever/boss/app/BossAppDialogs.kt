@@ -431,18 +431,34 @@ internal fun BossAppDialogs(state: BossAppState) {
                 if (prompt.placeOnPick) placeProjectHere(state, windowProjectState, prompt.project)
                 if (prompt.showCodebase) state.draggablePanelComponent.setPanelVisible(left.top, true)
                 coroutineScope.launch {
-                    // Preserve, load, apply: the same three steps the top bar's workspace
-                    // switch takes, so a workspace opened from here can be switched away
-                    // from and back with its tabs intact.
+                    // Preserve, apply, load: the same steps the top bar's workspace switch
+                    // takes, in the order that leaves nothing destroyed when the apply is
+                    // refused - the leaving tree is restored out of the snapshot just taken.
                     val currentWorkspace = workspaceManager.currentWorkspace.value
-                    if (currentWorkspace != null && currentWorkspace.id.isNotEmpty()) {
-                        splitViewState.preserveCurrentState(currentWorkspace.id, currentWorkspace.name)
+                    val leavingId = currentWorkspace?.id?.takeIf { it.isNotEmpty() }
+                    if (leavingId != null) {
+                        splitViewState.preserveCurrentState(leavingId, currentWorkspace?.name.orEmpty())
                     }
                     // A template picked here is materialised into a Space first - see
                     // `spaceToOpen`, which every pick in the app goes through.
                     val opened = spaceToOpen(workspace, prompt.project.path)
-                    workspaceManager.loadWorkspace(opened)
-                    applyWorkspace(opened, splitViewState, windowProjectState)
+                    if (applyWorkspace(opened, splitViewState, windowProjectState)) {
+                        workspaceManager.loadWorkspace(opened)
+                    } else {
+                        if (leavingId != null) {
+                            splitViewState.restorePreservedState(leavingId)
+                            splitViewState.discardPreservedState(leavingId)
+                        }
+                        // `spaceToOpen` enters a materialised template itself, so a refusal can
+                        // leave the manager claiming a Space that was never applied - point it
+                        // back at what is on screen.
+                        if (
+                            currentWorkspace != null &&
+                            workspaceManager.currentWorkspace.value?.id != currentWorkspace.id
+                        ) {
+                            workspaceManager.loadWorkspace(currentWorkspace)
+                        }
+                    }
                 }
                 state.focusRequester.requestFocus()
             },
@@ -867,6 +883,29 @@ internal fun BossAppDialogs(state: BossAppState) {
     // The same question for a Space whose terminal tabs carry commands.
     SpaceLoadPrompt(state)
 
+    // A URL that reached BOSS from outside the operator's own `boss`
+    // invocation (`boss://url`, a link forwarded over the single-instance
+    // channel). Same shape as the terminal prompt above: the request carries
+    // no evidence of who made it, so the operator sees the exact URL before a
+    // tab is opened for it.
+    state.urlOpenApprovals.current?.let { pending ->
+        UrlOpenApprovalDialog(
+            request = pending,
+            pendingCount = state.urlOpenApprovals.size,
+            onDismiss = { state.urlOpenApprovals.consume(pending) },
+            onConfirm = confirm@{
+                // Consume before opening; the dialog also calls onDismiss after onConfirm.
+                // A stale callback must never open or dismiss the next request.
+                if (!state.urlOpenApprovals.consume(pending)) return@confirm
+                logger.info(
+                    LogCategory.BROWSER,
+                    "Operator confirmed an externally requested URL",
+                    mapOf("windowId" to windowId),
+                )
+                splitViewState.openUrlInActivePanel(pending.url, pending.title)
+            },
+        )
+    }
     // A plugin action that reached BOSS from outside the operator's own `boss`
     // invocation. Nothing has been dispatched yet: this prompt is the only path
     // from such a link to the plugin's registered handler.

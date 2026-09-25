@@ -197,6 +197,7 @@ internal class BossAppState(
 
     // Keep every external request until the operator answers its own prompt.
     val terminalCommandApprovals = TerminalCommandApprovalQueue()
+    val urlOpenApprovals = UrlOpenApprovalQueue()
 
     // A Space an external request asked to load, held until the operator sees the terminal
     // commands it would start. One at a time: a second arrival is refused, not queued.
@@ -242,6 +243,8 @@ internal class BossAppState(
     // Track if workspace restoration has completed (for first window only)
     // New windows don't restore Last Session, so start as complete
     var workspaceRestorationComplete by mutableStateOf(!isFirstWindow)
+    var workspaceRestorationStarted by mutableStateOf(false)
+    var sessionRestoreRefused by mutableStateOf(false)
 
     /**
      * The project path startup restored from Last Session, if any.
@@ -321,6 +324,20 @@ internal class PendingSpaceLoad(
     val workspace: LayoutWorkspace,
     val workspacePath: String,
     val commands: List<String>,
+)
+
+/**
+ * A URL held back for the operator's confirmation.
+ *
+ * BOSS reaches this state when a `boss://url?url=` request arrives over a path
+ * any program can drive, rather than from the operator's own `boss` invocation
+ * (see `DeepLinkOrigin`). The URL is carried verbatim so the prompt shows
+ * exactly what a tab would open. Keep identity equality: two requests for the
+ * same URL must still get separate arming intervals and consume callbacks.
+ */
+internal class PendingUrlOpen(
+    val url: String,
+    val title: String,
 )
 
 /**

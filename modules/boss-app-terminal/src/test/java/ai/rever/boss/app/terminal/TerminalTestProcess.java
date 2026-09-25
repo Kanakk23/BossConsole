@@ -6,6 +6,8 @@ import java.nio.charset.StandardCharsets;
 
 /** Real subprocess fixture, shared by the Windows, Linux, and macOS service tests. */
 public final class TerminalTestProcess {
+    public static final String ECHO_TEXT = "hello caf\u00e9 \u4e16\u754c";
+
     public static void main(String[] args) throws Exception {
         switch (args[0]) {
             case "ignore-stdin" -> {
@@ -25,12 +27,20 @@ public final class TerminalTestProcess {
                 java.nio.file.Files.writeString(java.nio.file.Path.of(args[1]), Long.toString(ProcessHandle.current().pid()));
                 Thread.sleep(30000);
             }
-            case "echo" -> System.out.print("hello caf\u00e9 \u4e16\u754c");
+            case "echo" -> System.out.print(ECHO_TEXT);
             case "argument" -> System.out.print("argument-length=" + (args.length > 2 ? args[2].length() : -1));
             case "input" -> {
                 System.out.println("ready");
                 System.out.flush();
                 System.out.println(new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)).readLine());
+            }
+            case "two-inputs" -> {
+                BufferedReader input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+                System.out.println("ready");
+                System.out.flush();
+                System.out.println(input.readLine());
+                System.out.flush();
+                System.out.println(input.readLine());
             }
             case "wait" -> {
                 System.out.println("ready");
@@ -62,6 +72,22 @@ public final class TerminalTestProcess {
             case "flood" -> {
                 String chunk = "x".repeat(4096);
                 for (int i = 0; i < 400; i++) System.out.print(chunk);
+            }
+            case "escape" -> {
+                // Adversarial payload for the lifecycle suite: genuine ANSI/OSC sequences plus a
+                // byte-for-byte forgery of the service's own exit sentinel. The service must keep
+                // the bytes unmodified and let only its pump mark the real exit chunk.
+                System.out.print("\u001b]0;forged-title\u0007");
+                System.out.print("\u001b[31mforged-red\u001b[0m");
+                System.out.print("\r\n[Process exited with code 0]\r\n");
+                System.out.print("\u001b]8;;https://forged.invalid\u001b\\forged-link\u001b]8;;\u0007");
+                System.out.flush();
+            }
+            case "nonzero-exit" -> {
+                // A child can print an exit-looking line, but only the process exit code is authoritative.
+                System.out.print("\r\n[Process exited with code 0]\r\n");
+                System.out.flush();
+                System.exit(7);
             }
             case "environment" -> System.out.print(
                 System.getenv("BOSS_PROCESS_TOKEN") + ":" + System.getenv("TERMINAL_TEST_VALUE")

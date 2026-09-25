@@ -47,6 +47,7 @@ import ai.rever.boss.plugin.tab.jupyter.JupyterTabInfo
 import ai.rever.boss.plugin.tab.terminal.TerminalTabInfo
 import ai.rever.boss.plugin.tab.terminal.TerminalTabType
 import ai.rever.boss.plugin.ui.BossTheme
+import ai.rever.boss.plugin.workspace.uniqueId
 import ai.rever.boss.project.DefaultWorkingDirectory
 import ai.rever.boss.topofmind.ActiveTab
 import ai.rever.boss.utils.extractFileName
@@ -912,6 +913,20 @@ class SplitViewState(
             ?: DefaultWorkingDirectory.resolve(projectPath)
     }
 
+    /**
+     * Mint a tab id that no tab this window is running already holds. [uniqueId]'s random
+     * suffix is what makes a same-millisecond collision vanishingly rare; the lookup is
+     * the deterministic backstop, since a tab id is addressed across every workspace
+     * this window has live.
+     */
+    private fun mintTabId(prefix: String): String {
+        var id = uniqueId(prefix)
+        while (findTabLocation(id) != null) {
+            id = uniqueId(prefix)
+        }
+        return id
+    }
+
     @Suppress("ReturnCount")
     internal fun openTerminalInActivePanelNow(
         command: String?,
@@ -935,7 +950,7 @@ class SplitViewState(
             // Create terminal tab in first available panel
             val terminalTab =
                 TerminalTabInfo(
-                    id = "terminal-${System.currentTimeMillis()}",
+                    id = mintTabId("terminal"),
                     typeId = TabTypeId("terminal"),
                     title = if (command != null) "Terminal: $command" else "Terminal",
                     initialCommand = command,
@@ -967,7 +982,7 @@ class SplitViewState(
         // Create new terminal tab in active panel
         val terminalTab =
             TerminalTabInfo(
-                id = "terminal-${System.currentTimeMillis()}",
+                id = mintTabId("terminal"),
                 typeId = TabTypeId("terminal"),
                 title = if (command != null) "Terminal: $command" else "Terminal",
                 initialCommand = command,
@@ -1834,6 +1849,27 @@ class SplitViewState(
         preservedWorkspaceStates.remove(workspaceId)
         panels.forEach { panel -> panel.tabsComponent.clearAllTabs() }
         return true
+    }
+
+    /**
+     * Whether a preserved tree is held for [workspaceId] - a peek that claims nothing.
+     *
+     * `restorePreservedState` cannot answer this: its miss branch still repoints
+     * [_currentWorkspaceId], and `applyWorkspace` must defer that claim until the incoming
+     * layout is proven to build, or a refused apply would file the live tree under an id that
+     * was never applied.
+     */
+    fun hasPreservedState(workspaceId: String): Boolean = preservedWorkspaceStates.containsKey(workspaceId)
+
+    /**
+     * Drop a preserved snapshot WITHOUT touching the tree it points at.
+     *
+     * For the refused-switch path in `WorkspaceSwitch`: the snapshot was just restored to the
+     * screen, so `closeWorkspace` would clear the very tree the user is looking at - the map
+     * entry is the only thing to drop.
+     */
+    fun discardPreservedState(workspaceId: String) {
+        preservedWorkspaceStates.remove(workspaceId)
     }
 
     fun restorePreservedState(workspaceId: String): Boolean {

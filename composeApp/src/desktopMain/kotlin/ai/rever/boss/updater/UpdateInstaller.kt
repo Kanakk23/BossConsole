@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.net.URL
 import java.nio.file.Paths
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
@@ -73,6 +74,29 @@ internal fun macOSAppBundlePathFromLibraryPath(libraryPath: String): String? =
     libraryPath
         .split(File.pathSeparatorChar)
         .firstNotNullOfOrNull(::macOSAppBundlePathIn)
+
+/** Find a `.app` ancestor of a code-source URL within the six checked levels. */
+internal fun appBundleAncestorOf(location: URL?): File? {
+    var current = CodeSourceLocation.fileOf(location)
+    repeat(6) {
+        if (current?.name?.endsWith(MACOS_APP_BUNDLE_SUFFIX) == true) return current
+        current = current?.parentFile
+    }
+    return null
+}
+
+internal data class AppBundleCandidate(
+    val file: File,
+    val fromCodeSource: Boolean,
+)
+
+/** Prefer the running bundle, then an installed copy when the code source is unavailable. */
+internal fun appBundleFromCodeSourceOrApplications(
+    location: URL?,
+    applicationsBundle: File,
+): AppBundleCandidate? =
+    appBundleAncestorOf(location)?.let { AppBundleCandidate(it, fromCodeSource = true) }
+        ?: applicationsBundle.takeIf(File::exists)?.let { AppBundleCandidate(it, fromCodeSource = false) }
 
 /**
  * Resolve a macOS app bundle path without coupling the decision logic to the
@@ -907,24 +931,35 @@ object UpdateInstaller {
                 return resolveRealAppPath(bundlePath)
             }
 
-            // Method 2: Try to find app bundle from current JAR/class location
-            val jarPath = UpdateInstaller::class.java.protectionDomain.codeSource.location.path
-            logger.trace(LogCategory.SYSTEM, "Current code source", mapOf("path" to jarPath))
+            // Method 2: Try to find app bundle from current JAR/class location.
+            //
+            // URL.path is encoded, so paths with spaces cannot be used directly.
+            // The shared resolver also preserves network-share authorities.
+            val codeSourceLocation =
+                runCatching {
+                    UpdateInstaller::class.java.protectionDomain
+                        ?.codeSource
+                        ?.location
+                }.getOrNull()
+            logger.trace(
+                LogCategory.SYSTEM,
+                "Current code source",
+                mapOf("url" to (codeSourceLocation?.toString() ?: "<unavailable>")),
+            )
 
-            var currentFile = File(jarPath)
-            // Walk up the directory tree looking for .app bundle
-            for (i in 0..5) {
-                logger.trace(LogCategory.SYSTEM, "Checking parent", mapOf("index" to i, "path" to currentFile.absolutePath))
-                if (currentFile.name.endsWith(".app")) {
-                    logger.debug(LogCategory.SYSTEM, "Found app bundle via directory traversal", mapOf("path" to currentFile.absolutePath))
-                    return resolveRealAppPath(currentFile.absolutePath)
-                }
-                currentFile = currentFile.parentFile ?: break
+            val applicationsPath = "$MACOS_APPLICATIONS_DIRECTORY/$BOSS_MACOS_APP_BUNDLE_NAME"
+            val appBundle = appBundleFromCodeSourceOrApplications(codeSourceLocation, File(applicationsPath))
+            if (appBundle?.fromCodeSource == true) {
+                logger.debug(
+                    LogCategory.SYSTEM,
+                    "Found app bundle via directory traversal",
+                    mapOf("path" to appBundle.file.absolutePath),
+                )
+                return resolveRealAppPath(appBundle.file.absolutePath)
             }
 
             // Method 3: Check if running from Applications folder
-            val applicationsPath = "$MACOS_APPLICATIONS_DIRECTORY/$BOSS_MACOS_APP_BUNDLE_NAME"
-            if (File(applicationsPath).exists()) {
+            if (appBundle != null) {
                 logger.debug(LogCategory.SYSTEM, "Found BOSS in Applications folder", mapOf("path" to applicationsPath))
                 return applicationsPath
             }

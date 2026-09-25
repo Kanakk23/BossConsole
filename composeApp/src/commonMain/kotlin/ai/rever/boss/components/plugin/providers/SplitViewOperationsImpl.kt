@@ -4,6 +4,8 @@ import ai.rever.boss.components.events.FileEventBus
 import ai.rever.boss.components.events.PanelEventBus
 import ai.rever.boss.components.window_panel.SplitOrientation
 import ai.rever.boss.components.window_panel.SplitViewState
+import ai.rever.boss.components.workspaces.extractRunningWorkspaces
+import ai.rever.boss.components.workspaces.workspaceManager
 import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.api.TabInfo
 import ai.rever.boss.plugin.api.TabsComponent
@@ -123,29 +125,48 @@ class SplitViewOperationsImpl(
                     ?.value
                     ?.path
                     .orEmpty()
+            val onScreen =
+                extractRunningWorkspaces(splitViewState, projectPath) { id ->
+                    workspaceManager.currentWorkspace.value?.takeIf { it.id == id }
+                        ?: workspaceManager.savedCopyOf(id)
+                }.firstOrNull { it.id == splitViewState.currentWorkspaceId }
             val opened =
                 ai.rever.boss.components.workspaces.spaceToOpen(
                     picked = workspace,
                     projectPath = projectPath,
                 )
-            ai.rever.boss.components.workspaces
-                .applyWorkspace(
-                    workspace = opened,
-                    splitViewState = splitViewState,
-                    // A workspace REMEMBERS its project (LayoutWorkspace.projectPath), and
-                    // applyWorkspace restores it - but only when handed a windowProjectState, and
-                    // this call passed none. So the host's own switch carried the project across
-                    // and a plugin's did not: switching workspace from a panel left the previous
-                    // workspace's project selected, which is what everything project-scoped then
-                    // kept answering from.
-                    //
-                    // Resolved from the registry rather than taken as a constructor parameter:
-                    // BossAppState builds this provider BEFORE it builds its own
-                    // windowProjectState, so a parameter would mean reordering that. `get`, not
-                    // `getOrCreate` - a window with no project state has no project to restore,
-                    // and creating one here would be inventing state from a workspace switch.
-                    windowProjectState = WindowProjectStateRegistry.get(windowId),
-                )
+            val applied =
+                ai.rever.boss.components.workspaces
+                    .applyWorkspace(
+                        workspace = opened,
+                        splitViewState = splitViewState,
+                        // A workspace REMEMBERS its project (LayoutWorkspace.projectPath), and
+                        // applyWorkspace restores it - but only when handed a windowProjectState, and
+                        // this call passed none. So the host's own switch carried the project across
+                        // and a plugin's did not: switching workspace from a panel left the previous
+                        // workspace's project selected, which is what everything project-scoped then
+                        // kept answering from.
+                        //
+                        // Resolved from the registry rather than taken as a constructor parameter:
+                        // BossAppState builds this provider BEFORE it builds its own
+                        // windowProjectState, so a parameter would mean reordering that. `get`, not
+                        // `getOrCreate` - a window with no project state has no project to restore,
+                        // and creating one here would be inventing state from a workspace switch.
+                        windowProjectState = WindowProjectStateRegistry.get(windowId),
+                    )
+            if (applied) {
+                workspaceManager.loadWorkspace(opened)
+            } else {
+                // Refused: the live tree was kept, but the manager was already moved - the
+                // plugin loaded the workspace it picked before calling, and spaceToOpen enters
+                // a materialised template. Point it back at the workspace whose tree is on
+                // screen, looked up by the id the split state still claims.
+                if (onScreen == null) {
+                    workspaceManager.resetToDefault()
+                } else {
+                    workspaceManager.loadWorkspace(onScreen)
+                }
+            }
         }
     }
 
