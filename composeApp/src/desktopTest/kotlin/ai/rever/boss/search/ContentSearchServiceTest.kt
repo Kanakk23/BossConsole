@@ -382,6 +382,13 @@ class ContentSearchServiceTest {
     }
 
     @Test
+    fun `bounded reader distinguishes valid replacement character from malformed bytes`() {
+        val valid = "\uFFFD needle".toByteArray(Charsets.UTF_8)
+        assertEquals(BoundedText.Text("\uFFFD needle"), readUtf8AtMost(valid.inputStream(), valid.size.toLong()))
+        assertEquals(BoundedText.InvalidEncoding, readUtf8AtMost(byteArrayOf(0xff.toByte()).inputStream(), 1))
+    }
+
+    @Test
     fun `search excludes undecodable UTF8 instead of matching replacement text`(
         @TempDir dir: File,
     ) = runBlocking {
@@ -393,6 +400,43 @@ class ContentSearchServiceTest {
                 .searchInProject(query = "needle")
                 .map { it.path }
         assertEquals(listOf("valid.txt"), paths)
+    }
+
+    @Test
+    fun `search includes valid UTF8 replacement characters`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        File(dir, "valid.txt").writeText("\uFFFD needle")
+
+        val paths =
+            ContentSearchService(projectPathProvider = { dir.absolutePath })
+                .searchInProject(query = "needle")
+                .map { it.path }
+        assertEquals(listOf("valid.txt"), paths)
+    }
+
+    @Test
+    fun `replace preserves valid replacement characters and refuses malformed bytes`(
+        @TempDir dir: File,
+    ) = runBlocking {
+        val valid = File(dir, "valid.txt").apply { writeText("\uFFFD needle") }
+        val invalid =
+            File(dir, "invalid.txt").apply {
+                writeBytes(byteArrayOf(0xff.toByte()) + "needle".toByteArray())
+            }
+
+        val summary =
+            ContentSearchService(projectPathProvider = { dir.absolutePath }).replaceInProject(
+                query = "needle",
+                replacement = "found",
+                files = listOf("valid.txt", "invalid.txt"),
+                dryRun = false,
+            )
+
+        assertEquals("\uFFFD found", valid.readText())
+        assertEquals(1, summary.totalReplacements)
+        assertTrue(summary.files.any { it.error == "not valid UTF-8" })
+        assertEquals(0xff, invalid.readBytes().first().toInt() and 0xff)
     }
 
     @Test
@@ -649,7 +693,7 @@ class ContentSearchServiceTest {
                     if (path == open) {
                         ai.rever.boss.plugin.api.BufferSnapshot(
                             path = path,
-                            content = "val unsavedNeedle = 2\n",
+                            content = "\uFFFD val unsavedNeedle = 2\n",
                             version = 1L,
                             isModified = true,
                         )

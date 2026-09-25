@@ -17,6 +17,9 @@ import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.security.MessageDigest
@@ -515,7 +518,7 @@ class ContentSearchService(
         isCancelled: () -> Boolean,
     ): List<FileMatch>? {
         return try {
-            if ('\u0000' in text || '\uFFFD' in text) return null
+            if ('\u0000' in text) return null
             val lineMap = LineMap(text)
             val matches = mutableListOf<FileMatch>()
             // The matcher reads through [InterruptibleText] rather than the raw
@@ -643,11 +646,8 @@ class ContentSearchService(
                 // distinct inodes - this lock cannot make that pre-existing behavior
                 // coherent, only prevent the two callers from racing each other's writes.
                 FileReplaceCoordination.withFileLock(canonicalOrPath(file)) {
-                    // UTF-8 in, UTF-8 out. A file in another single-byte encoding has no NUL
-                    // bytes, so it passes the binary check, and round-tripping it through
-                    // readText/writeText replaces its undecodable bytes with U+FFFD - a
-                    // silent rewrite of bytes the user never asked to touch. Detect that the
-                    // decode was lossy and refuse, rather than corrupting the file.
+                    // UTF-8 in, UTF-8 out. The bounded reader rejects malformed bytes before
+                    // they can be silently rewritten as replacement characters.
                     val text =
                         when (val read = readTextAtMost(file)) {
                             is BoundedText.Text -> {
@@ -658,12 +658,15 @@ class ContentSearchService(
                                 return@withFileLock FileReplaceResult(file.path, 0, "file too large")
                             }
 
+                            BoundedText.InvalidEncoding -> {
+                                return@withFileLock FileReplaceResult(file.path, 0, "not valid UTF-8")
+                            }
+
                             BoundedText.Unreadable -> {
                                 return@withFileLock FileReplaceResult(file.path, 0, "could not read file")
                             }
                         }
                     if ('\u0000' in text) return@withFileLock FileReplaceResult(file.path, 0, "binary file")
-                    if ('\uFFFD' in text) return@withFileLock FileReplaceResult(file.path, 0, "not valid UTF-8")
                     val outcome = computeReplaced(text, regex, replacement, isRegex, isCancelled)
                     if (!dryRun && outcome.count > 0) writeAtomically(file, outcome.text)
                     FileReplaceResult(file.path, outcome.count, null)
@@ -972,6 +975,8 @@ internal sealed class BoundedText {
 
     data object TooLarge : BoundedText()
 
+    data object InvalidEncoding : BoundedText()
+
     data object Unreadable : BoundedText()
 
     fun textOrNull(): String? = (this as? Text)?.value
@@ -986,19 +991,34 @@ internal fun readUtf8AtMost(
     maxBytes: Long,
 ): BoundedText {
     val bytes = ByteArrayOutputStream()
+
+    fun decoded(): BoundedText =
+        try {
+            BoundedText.Text(
+                StandardCharsets.UTF_8
+                    .newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes.toByteArray()))
+                    .toString(),
+            )
+        } catch (_: CharacterCodingException) {
+            BoundedText.InvalidEncoding
+        }
+
     val buffer = ByteArray(8 * 1024)
     var total = 0L
     while (true) {
         val remaining = maxBytes - total
         if (remaining == 0L) {
             return if (input.read() == -1) {
-                BoundedText.Text(bytes.toString(StandardCharsets.UTF_8))
+                decoded()
             } else {
                 BoundedText.TooLarge
             }
         }
         val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
-        if (read == -1) return BoundedText.Text(bytes.toString(StandardCharsets.UTF_8))
+        if (read == -1) return decoded()
         bytes.write(buffer, 0, read)
         total += read
     }
