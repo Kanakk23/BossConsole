@@ -1,5 +1,6 @@
 package ai.rever.boss.utils
 
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -128,6 +129,45 @@ class AtomicFileWriteTest {
     }
 
     @Test
+    fun `atomicWriteText refuses a symlinked parent`() {
+        // The redirect shape: the declared parent is a link to another directory, so an
+        // unverified write lands the temp file and the moved-in target on the far side.
+        val attackerDir = File(tempDir, "attacker").apply { mkdirs() }
+        val link = File(tempDir, "linked-parent")
+        try {
+            Files.createSymbolicLink(link.toPath(), attackerDir.toPath())
+        } catch (e: UnsupportedOperationException) {
+            assumeTrue(false, "Filesystem does not support symlinks: ${e.message}")
+        } catch (e: IOException) {
+            assumeTrue(false, "Could not create a symlink (Windows needs privileges): ${e.message}")
+        }
+
+        assertFailsWith<IOException> { File(link, "stolen.json").atomicWriteText("payload") }
+
+        assertFalse(
+            File(attackerDir, "stolen.json").exists(),
+            "the write must not land in the directory the link points at",
+        )
+        assertTrue(
+            attackerDir.listFiles().orEmpty().none { it.name.endsWith(".tmp") },
+            "no temp file may be created through the link either",
+        )
+    }
+
+    @Test
+    fun `ownership validation does not trust the overridable user name`() {
+        val previous = System.getProperty("user.name")
+        try {
+            System.setProperty("user.name", "not-the-process-owner")
+            val target = File(tempDir, "numeric-owner.json")
+            target.atomicWriteText("owned")
+            assertEquals("owned", target.readText())
+        } finally {
+            if (previous == null) System.clearProperty("user.name") else System.setProperty("user.name", previous)
+        }
+    }
+
+    @Test
     fun `atomicWriteText flushes the temp bytes before publishing them`() {
         // The durability contract, observed from inside the flush step: the temp sibling must
         // already hold the new bytes while the live file still holds the previous ones. Reversed,
@@ -151,6 +191,27 @@ class AtomicFileWriteTest {
             tempNameAtFlush?.startsWith("startup-settings.json.") == true,
             "the flush must run on the temp sibling, got: $tempNameAtFlush",
         )
+    }
+
+    @Test
+    fun `atomicWriteText still writes when an ancestor is a symlink`() {
+        // macOS temp dirs live under /var -> /private/var, and users legitimately symlink
+        // their config home elsewhere; only the immediate parent is refused as a link.
+        val real = File(tempDir, "real-ancestor").apply { mkdirs() }
+        val link = File(tempDir, "linked-ancestor")
+        try {
+            Files.createSymbolicLink(link.toPath(), real.toPath())
+        } catch (e: UnsupportedOperationException) {
+            assumeTrue(false, "Filesystem does not support symlinks: ${e.message}")
+        } catch (e: IOException) {
+            assumeTrue(false, "Could not create a symlink (Windows needs privileges): ${e.message}")
+        }
+
+        File(link, "nested").let { it.mkdirs() }
+        val target = File(link, "nested/state.json")
+        target.atomicWriteText("value")
+
+        assertEquals("value", File(real, "nested/state.json").readText())
     }
 
     @Test
