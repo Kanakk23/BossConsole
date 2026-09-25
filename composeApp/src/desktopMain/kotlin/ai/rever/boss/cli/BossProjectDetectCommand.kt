@@ -11,6 +11,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 
 /**
@@ -23,15 +24,13 @@ import java.nio.file.Files
  * network, no `git` invocations.
  *
  * The output is a JSON-friendly shape so an agent or CI step can decide
- * "is this a Kotlin project" without parsing free text. The order of
- * detected items reflects confidence: a marker file like `build.gradle.kts`
- * is stronger evidence than counting `.kt` source files (the latter can
- * be generated, vendored, or just snippets).
+ * "is this a Kotlin project" without parsing free text. Findings are
+ * sorted alphabetically, with marker paths included as evidence.
  *
  * Usage:
  *   boss project-detect [--path <dir>] [--json]
  *
- * Exit codes: 0 for a report (including no findings). 3 if the path is
+ * Exit codes: 0 for a report (including no findings). 1 if the path is
  * missing or not a directory.
  */
 class BossProjectDetectCommand : CliktCommand(name = "project-detect") {
@@ -39,28 +38,34 @@ class BossProjectDetectCommand : CliktCommand(name = "project-detect") {
 
     private val detector = ProjectDetector()
 
-    val path by option("--path", help = "Directory to inspect (defaults to current directory)").default(".")
-    val json by option("--json", help = "Output the report as JSON").flag(default = false)
+    private val path by option("--path", help = "Directory to inspect (defaults to current directory)").default(".")
+    private val json by option("--json", help = "Output the report as JSON").flag(default = false)
 
     override fun run() {
-        val root = File(path).absoluteFile
+        val root =
+            try {
+                File(path).canonicalFile
+            } catch (_: IOException) {
+                echo("Error: cannot resolve path: $path", err = true)
+                throw ProgramResult(1)
+            }
         if (!root.exists()) {
             echo("Error: path does not exist: $path", err = true)
-            throw ProgramResult(INVALID_PATH_EXIT)
+            throw ProgramResult(1)
         }
         if (!root.isDirectory) {
             echo("Error: not a directory: $path", err = true)
-            throw ProgramResult(INVALID_PATH_EXIT)
+            throw ProgramResult(1)
         }
         val report = detector.detect(root)
-        renderAndExit(report, json)
+        render(report, json)
     }
 
-    private fun renderAndExit(
+    private fun render(
         report: ProjectReport,
-        json: Boolean,
+        asJson: Boolean,
     ) {
-        if (json) {
+        if (asJson) {
             echo(ProjectDetectJson.encode(report))
         } else {
             echo("Project at ${report.root}")
@@ -94,15 +99,13 @@ class BossProjectDetectCommand : CliktCommand(name = "project-detect") {
                 echo("  frameworks:")
                 for (fw in report.frameworks) echo("    - $fw")
             }
-            if (report.markers.isNotEmpty()) {
+            if (report.markers.isEmpty()) {
+                echo("  marker files: (none detected)")
+            } else {
                 echo("  marker files:")
                 for (m in report.markers) echo("    - $m")
             }
         }
-    }
-
-    private companion object {
-        const val INVALID_PATH_EXIT = 3
     }
 }
 
@@ -117,10 +120,9 @@ data class ProjectReport(
 )
 
 /**
- * Pure detector. The [Marker] table is the single source of truth: every
- * finding is keyed off a file at a known path, and the same file can
- * drive multiple categories (a `build.gradle.kts` is both a Kotlin
- * marker and a Gradle marker).
+ * Pure detector. The [Marker] table maps known filenames to findings,
+ * while source extensions and package dependencies add language and
+ * framework findings.
  *
  * A path that exists at any depth within the project is counted; we do
  * not require the marker to be at the root, because a Gradle project
@@ -131,15 +133,17 @@ class ProjectDetector {
     private companion object {
         const val MAX_SCAN_DEPTH = 24
         const val MAX_SCAN_ENTRIES = 20_000
+        const val MAX_PACKAGE_JSON_BYTES = 1_048_576L
+        val IGNORED_DIRECTORIES =
+            setOf(".git", ".gradle", ".venv", "build", "dist", "node_modules", "out", "target", "vendor")
     }
 
     /**
-     * Each entry pairs a path glob against a list of contributions.
-     * The glob is matched against the project's file tree; contributions
+     * Each entry pairs a filename against a list of contributions.
+     * The name is matched against the project's file tree; contributions
      * accumulate in [ProjectReport] in the order they are encountered.
      */
     private data class Marker(
-        val id: String,
         val path: String,
         val contributes: List<Contribution>,
     )
@@ -157,32 +161,30 @@ class ProjectDetector {
         listOf(
             // Kotlin / Java ecosystem
             Marker(
-                id = "build.gradle.kts",
                 path = "build.gradle.kts",
                 contributes =
                     listOf(
                         Contribution("languages", "Kotlin"),
-                        Contribution("languages", "Java"),
                         Contribution("buildTools", "Gradle (Kotlin DSL)"),
                     ),
             ),
             Marker(
-                id = "build.gradle",
                 path = "build.gradle",
                 contributes =
                     listOf(
-                        Contribution("languages", "Java"),
                         Contribution("languages", "Groovy"),
                         Contribution("buildTools", "Gradle (Groovy DSL)"),
                     ),
             ),
             Marker(
-                id = "settings.gradle.kts",
                 path = "settings.gradle.kts",
                 contributes = listOf(Contribution("buildTools", "Gradle (Kotlin DSL)")),
             ),
             Marker(
-                id = "pom.xml",
+                path = "settings.gradle",
+                contributes = listOf(Contribution("buildTools", "Gradle (Groovy DSL)")),
+            ),
+            Marker(
                 path = "pom.xml",
                 contributes =
                     listOf(
@@ -192,13 +194,11 @@ class ProjectDetector {
                     ),
             ),
             Marker(
-                id = "gradle.lockfile",
                 path = "gradle.lockfile",
                 contributes = listOf(Contribution("packageManagers", "Gradle dependency lock")),
             ),
             // Node / TypeScript
             Marker(
-                id = "package.json",
                 path = "package.json",
                 contributes =
                     listOf(
@@ -207,28 +207,23 @@ class ProjectDetector {
                     ),
             ),
             Marker(
-                id = "package-lock.json",
                 path = "package-lock.json",
                 contributes = listOf(Contribution("packageManagers", "npm")),
             ),
             Marker(
-                id = "yarn.lock",
                 path = "yarn.lock",
                 contributes = listOf(Contribution("packageManagers", "Yarn")),
             ),
             Marker(
-                id = "pnpm-lock.yaml",
                 path = "pnpm-lock.yaml",
                 contributes = listOf(Contribution("packageManagers", "pnpm")),
             ),
             Marker(
-                id = "tsconfig.json",
                 path = "tsconfig.json",
                 contributes = listOf(Contribution("languages", "TypeScript")),
             ),
             // Rust
             Marker(
-                id = "Cargo.toml",
                 path = "Cargo.toml",
                 contributes =
                     listOf(
@@ -239,7 +234,6 @@ class ProjectDetector {
             ),
             // Go
             Marker(
-                id = "go.mod",
                 path = "go.mod",
                 contributes =
                     listOf(
@@ -249,7 +243,6 @@ class ProjectDetector {
             ),
             // Python
             Marker(
-                id = "pyproject.toml",
                 path = "pyproject.toml",
                 contributes =
                     listOf(
@@ -258,7 +251,6 @@ class ProjectDetector {
                     ),
             ),
             Marker(
-                id = "requirements.txt",
                 path = "requirements.txt",
                 contributes =
                     listOf(
@@ -267,7 +259,6 @@ class ProjectDetector {
                     ),
             ),
             Marker(
-                id = "setup.py",
                 path = "setup.py",
                 contributes =
                     listOf(
@@ -276,7 +267,6 @@ class ProjectDetector {
                     ),
             ),
             Marker(
-                id = "Pipfile",
                 path = "Pipfile",
                 contributes =
                     listOf(
@@ -285,7 +275,6 @@ class ProjectDetector {
                     ),
             ),
             Marker(
-                id = "poetry.lock",
                 path = "poetry.lock",
                 contributes =
                     listOf(
@@ -295,7 +284,6 @@ class ProjectDetector {
             ),
             // Ruby
             Marker(
-                id = "Gemfile",
                 path = "Gemfile",
                 contributes =
                     listOf(
@@ -305,79 +293,68 @@ class ProjectDetector {
             ),
             // JavaScript / TypeScript frameworks (common ones, picked up from package.json deps)
             Marker(
-                id = "next.config.js",
                 path = "next.config.js",
                 contributes = listOf(Contribution("frameworks", "Next.js")),
             ),
             Marker(
-                id = "next.config.ts",
                 path = "next.config.ts",
                 contributes = listOf(Contribution("frameworks", "Next.js")),
             ),
             Marker(
-                id = "nuxt.config.ts",
                 path = "nuxt.config.ts",
                 contributes = listOf(Contribution("frameworks", "Nuxt")),
             ),
             Marker(
-                id = "angular.json",
                 path = "angular.json",
                 contributes = listOf(Contribution("frameworks", "Angular")),
             ),
             Marker(
-                id = "vue.config.js",
                 path = "vue.config.js",
                 contributes = listOf(Contribution("frameworks", "Vue")),
             ),
             Marker(
-                id = "svelte.config.js",
                 path = "svelte.config.js",
                 contributes = listOf(Contribution("frameworks", "Svelte")),
             ),
             // Test frameworks (marker-based; reading the manifest for the
             // test runner is in [detectFromPackageJson] below)
             Marker(
-                id = "pytest.ini",
                 path = "pytest.ini",
                 contributes = listOf(Contribution("testFrameworks", "pytest")),
             ),
             Marker(
-                id = "conftest.py",
                 path = "conftest.py",
                 contributes = listOf(Contribution("testFrameworks", "pytest")),
-            ),
-            Marker(
-                id = "go test (any *_test.go)",
-                path = "go-test",
-                contributes = listOf(Contribution("testFrameworks", "Go testing")),
-            ),
-            Marker(
-                id = "cargo test (any tests/ dir)",
-                path = "cargo-test",
-                contributes = listOf(Contribution("testFrameworks", "Cargo test")),
             ),
         )
 
     fun detect(root: File): ProjectReport {
         val tree = scan(root)
+        val sources = tree.filter { it.isFile }
+        val filesByName = sources.groupBy { it.name }
         val contributions = mutableMapOf<String, MutableSet<String>>()
         val foundMarkers = mutableListOf<String>()
 
         for (marker in markers) {
-            applyMarker(marker, root, tree, contributions, foundMarkers)
+            applyMarker(marker, root, filesByName, contributions, foundMarkers)
         }
+
+        val languages = contributions.getOrPut("languages") { mutableSetOf() }
+        if (sources.any { it.extension == "kt" || it.extension == "kts" }) languages.add("Kotlin")
+        if (sources.any { it.extension == "java" }) languages.add("Java")
+        if (sources.any { it.extension == "ts" || it.extension == "tsx" }) languages.add("TypeScript")
+        val hasJavaScript = sources.any { it.extension in setOf("js", "jsx", "mjs", "cjs") }
+        if (hasJavaScript) languages.add("JavaScript")
+        if (sources.any { it.name == "tsconfig.json" } && !hasJavaScript) languages.remove("JavaScript")
 
         // Special-case: package.json dependencies are inspected for known
         // test runners and frameworks that don't have a marker of their own.
-        val packageJson = findFile(root, tree, "package.json")
-        if (packageJson != null) {
+        for (packageJson in filesByName["package.json"].orEmpty()) {
             contributionsOfPackageJson(packageJson, contributions)
         }
 
-        // Test framework detection by source files: Go test is the only
-        // one without a marker file at the project root, so we look for
-        // any *_test.go file as a Go test indicator.
-        applyFileBasedTestFrameworks(root, tree, contributions)
+        // Test files and Cargo test directories supply additional evidence.
+        applyFileBasedTestFrameworks(tree, contributions)
 
         return ProjectReport(
             root = root.absolutePath,
@@ -393,29 +370,34 @@ class ProjectDetector {
     private fun applyMarker(
         marker: Marker,
         root: File,
-        tree: List<File>,
+        filesByName: Map<String, List<File>>,
         contributions: MutableMap<String, MutableSet<String>>,
         foundMarkers: MutableList<String>,
     ) {
-        if (findMatchingFiles(root, tree, marker).isEmpty()) return
-        val pathKey = marker.path
-        foundMarkers += pathKey
+        val matches = filesByName[marker.path].orEmpty()
+        if (matches.isEmpty()) return
+        foundMarkers += matches.map { it.relativePath(root) }
         for (c in marker.contributes) {
             contributions.getOrPut(c.bucket) { mutableSetOf() }.add(c.value)
         }
     }
 
     private fun applyFileBasedTestFrameworks(
-        root: File,
         tree: List<File>,
         contributions: MutableMap<String, MutableSet<String>>,
     ) {
-        if (rootHasFileMatching(root, tree, "*_test.go")) {
+        if (tree.any { it.isFile && it.name.endsWith("_test.go") }) {
             contributions.getOrPut("testFrameworks") { mutableSetOf() }.add("Go testing")
         }
+        val cargoProjects =
+            tree
+                .filter { it.isFile && it.name == "Cargo.toml" }
+                .map { it.parentFile.toPath() }
+        val testDirectories = tree.filter { it.isDirectory && it.name == "tests" }
         val hasCargoTests =
-            rootHasFileMatching(root, tree, "Cargo.toml") &&
-                (rootHasDirMatching(tree, "tests") || rootHasFileMatching(root, tree, "**/tests/*.rs"))
+            cargoProjects.any { project ->
+                testDirectories.any { it.toPath().startsWith(project) }
+            }
         if (hasCargoTests) {
             contributions.getOrPut("testFrameworks") { mutableSetOf() }.add("Cargo test")
         }
@@ -423,136 +405,28 @@ class ProjectDetector {
 
     private fun sorted(set: MutableSet<String>?): List<String> = set?.sorted() ?: emptyList()
 
-    private fun findMatchingFiles(
-        root: File,
-        tree: List<File>,
-        marker: Marker,
-    ): List<File> {
-        // For most markers, look at the exact filename at any depth.
-        val name = File(marker.path).name
-        if (marker.path.contains("/")) return findFilesByRelativePath(root, tree, marker.path)
-        return tree.filter { it.isFile && it.name == name }
-    }
-
-    private fun findFile(
-        root: File,
-        tree: List<File>,
-        relativePath: String,
-    ): File? = tree.firstOrNull { it.isFile && it.relativePath(root) == relativePath }
-
-    private fun findFilesByRelativePath(
-        root: File,
-        tree: List<File>,
-        relativePath: String,
-    ): List<File> = tree.filter { it.isFile && it.relativePath(root) == relativePath }
-
     private fun File.relativePath(root: File): String =
-        if (this.absolutePath.startsWith(root.absolutePath)) {
-            this.absolutePath
-                .removePrefix(root.absolutePath)
-                .trimStart('/', '\\')
-                .replace('\\', '/')
-        } else {
-            this.name
-        }
-
-    private fun rootHasFileMatching(
-        root: File,
-        tree: List<File>,
-        glob: String,
-    ): Boolean =
-        tree.any { file ->
-            if (!file.isFile) return@any false
-            val name = file.name
-            matchGlob(name, glob) || matchGlob(file.relativePath(root), glob)
-        }
-
-    private fun rootHasDirMatching(
-        tree: List<File>,
-        name: String,
-    ): Boolean = tree.any { it.isDirectory && it.name == name }
+        root
+            .toPath()
+            .relativize(toPath())
+            .toString()
+            .replace('\\', '/')
 
     /** One bounded snapshot serves every marker, avoiding repeated traversal and symlink loops. */
-    private fun scan(root: File): List<File> {
-        val entered = mutableSetOf<String>()
-        return root
+    private fun scan(root: File): List<File> =
+        root
             .walkTopDown()
             .maxDepth(MAX_SCAN_DEPTH)
             .onEnter { directory ->
-                !Files.isSymbolicLink(directory.toPath()) && entered.add(directory.canonicalPath)
+                directory == root ||
+                    (!Files.isSymbolicLink(directory.toPath()) && directory.name !in IGNORED_DIRECTORIES)
             }.take(MAX_SCAN_ENTRIES)
             .toList()
-    }
-
-    /**
-     * Tiny glob matcher: `*` matches any chars except `/`, `**` matches
-     * any chars including `/`, `?` matches a single char. Same shape as
-     * the secrets scanner's matcher, kept separate because the inputs
-     * here are very short and the cost of a regex compile per call would
-     * dominate the walk.
-     */
-    private fun matchGlob(
-        input: String,
-        glob: String,
-    ): Boolean {
-        if (!glob.contains('*') && !glob.contains('?')) return input == glob
-        val regex = StringBuilder("^")
-        var i = 0
-        while (i < glob.length) {
-            i = appendGlobClass(regex, glob, i)
-        }
-        regex.append('$')
-        return Regex(regex.toString()).matches(input)
-    }
-
-    /**
-     * Translate one glob token at [i] in [glob] into the corresponding
-     * regex fragment in [out], and return the index of the next glob
-     * position to consume. Split out so [matchGlob] stays a linear
-     * scan with one branch per character.
-     */
-    private fun appendGlobClass(
-        out: StringBuilder,
-        glob: String,
-        i: Int,
-    ): Int {
-        val c = glob[i]
-        return when {
-            c == '*' && i + 1 < glob.length && glob[i + 1] == '*' -> {
-                out.append(".*")
-                i + 2
-            }
-
-            c == '*' -> {
-                out.append("[^/]*")
-                i + 1
-            }
-
-            c == '?' -> {
-                out.append("[^/]")
-                i + 1
-            }
-
-            isRegexMeta(c) -> {
-                out.append('\\').append(c)
-                i + 1
-            }
-
-            else -> {
-                out.append(c)
-                i + 1
-            }
-        }
-    }
-
-    private fun isRegexMeta(c: Char): Boolean =
-        c == '.' || c == '(' || c == ')' || c == '+' || c == '|' ||
-            c == '^' || c == '$' || c == '{' || c == '}' || c == '\\'
 
     /**
      * Inspect package.json for test runners and frameworks that don't
-     * ship a marker file of their own. The file is read in lenient mode
-     * because real-world package.jsons routinely have undeclared fields.
+     * ship a marker file of their own. Invalid or oversized manifests
+     * contribute no dependency-based findings.
      */
     private fun contributionsOfPackageJson(
         file: File,
@@ -565,9 +439,12 @@ class ProjectDetector {
 
     private fun readPackageJsonDependencies(file: File): Set<String>? =
         try {
+            if (file.length() > MAX_PACKAGE_JSON_BYTES) return null
+            val bytes = file.inputStream().use { it.readNBytes(MAX_PACKAGE_JSON_BYTES.toInt() + 1) }
+            if (bytes.size > MAX_PACKAGE_JSON_BYTES) return null
             val obj =
                 kotlinx.serialization.json.Json
-                    .parseToJsonElement(file.readText(Charsets.UTF_8))
+                    .parseToJsonElement(bytes.toString(Charsets.UTF_8))
                     .let { it as? kotlinx.serialization.json.JsonObject ?: return null }
             obj["dependencies"].let { (it as? kotlinx.serialization.json.JsonObject)?.keys.orEmpty() } +
                 obj["devDependencies"].let { (it as? kotlinx.serialization.json.JsonObject)?.keys.orEmpty() }
@@ -581,14 +458,16 @@ class ProjectDetector {
         deps: Set<String>,
         sink: MutableMap<String, MutableSet<String>>,
     ) {
-        if (deps.any { it.startsWith("jest") || it == "vitest" }) {
-            val name = if (deps.any { it.startsWith("jest") }) "Jest" else "Vitest"
-            sink.getOrPut("testFrameworks") { mutableSetOf() }.add(name)
+        if ("jest" in deps) {
+            sink.getOrPut("testFrameworks") { mutableSetOf() }.add("Jest")
+        }
+        if ("vitest" in deps || deps.any { it.startsWith("@vitest/") }) {
+            sink.getOrPut("testFrameworks") { mutableSetOf() }.add("Vitest")
         }
         if (deps.contains("mocha")) {
             sink.getOrPut("testFrameworks") { mutableSetOf() }.add("Mocha")
         }
-        if (deps.any { it.startsWith("@playwright/test") }) {
+        if ("@playwright/test" in deps) {
             sink.getOrPut("testFrameworks") { mutableSetOf() }.add("Playwright")
         }
         if (deps.contains("cypress")) {
