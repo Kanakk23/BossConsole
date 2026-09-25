@@ -40,8 +40,8 @@ enum class ClassLoaderState {
  * This ensures plugins get their own dependencies while sharing common APIs
  * with the host application.
  *
- * Parent delegation is confined to [sharedPackages]: a child-first miss is
- * refused in every state, never handed to the host classloader. Without that
+ * Parent delegation is confined to [sharedPackages] and explicit host-provided
+ * library fallbacks while ACTIVE. Other child-first misses are refused. Without that
  * boundary any side-loaded plugin could resolve host internals - credentials,
  * process control - by class name alone. Once the loader leaves
  * [ClassLoaderState.ACTIVE] the refusal is logged as a lifecycle violation:
@@ -215,6 +215,11 @@ class PluginClassLoader(
                 "ai.rever.boss.plugin.ui.",
                 "ai.rever.boss.plugin.scrollbar.",
             )
+
+        // Thin plugins compile against these host-provided libraries. Plugins that bundle
+        // their own versions must still win (notably Terminal's Ktor server). Never expose
+        // arbitrary host implementation packages or delegate new misses after teardown.
+        private val hostLibraryFallbackPackages = setOf("io.github.jan.supabase.", "io.ktor.", "compose.icons.")
     }
 
     /**
@@ -369,9 +374,8 @@ class PluginClassLoader(
     /**
      * Load a class with child-first strategy.
      *
-     * Only names inside [sharedPackages] may resolve against the parent, and
-     * those are routed parent-first by [loadClass] before this runs — so a
-     * child-first miss is always the end of the line. While ACTIVE the miss
+     * Shared names are routed parent-first by [loadClass]. Explicit host-provided
+     * library names may fall back after a child miss while ACTIVE. Any other miss
      * propagates as the plain [ClassNotFoundException]; once the loader is
      * unloading or closed the same miss is also a lifecycle violation, so the
      * refusal is wrapped and logged — see the comment in the catch block.
@@ -400,13 +404,10 @@ class PluginClassLoader(
             // and the message must not disagree with the structured field.
             val stateAtRefusal = state
             if (stateAtRefusal == ClassLoaderState.ACTIVE) {
-                // No parent fallback: every name reaching this catch is outside
-                // sharedPackages (shared names went parent-first in loadClass),
-                // so the only honest answers are the plugin jar - already
-                // missed - and nothing. Re-throwing the findClass miss keeps
-                // the plain ClassNotFoundException contract that
-                // optional-dependency probes already handle; the class the
-                // plugin cannot have is a host class it named but may not see.
+                if (hostLibraryFallbackPackages.any { name.startsWith(it) }) {
+                    return parent.loadClass(name)
+                }
+                // Host implementation classes remain inaccessible even while ACTIVE.
                 throw notInPluginJar
             }
 
