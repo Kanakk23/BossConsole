@@ -472,7 +472,7 @@ actual object GitService {
 
             try {
                 // Use porcelain v1 format for stable parsing
-                val result = runGitCommand(projectPath, "status", "--porcelain=v1", "-z")
+                val result = runGitCommand(projectPath, "status", "--porcelain=v1", "-z", "--untracked-files=all")
                 if (result.exitCode != 0) {
                     _lastError.value = result.error.ifEmpty { result.output }
                     return@withContext emptyList()
@@ -744,6 +744,14 @@ actual object GitService {
         amend: Boolean,
         windowId: String?,
         projectPathOverride: String?,
+    ): GitOperationResult = commit(message, amend, windowId, projectPathOverride, signOff = false)
+
+    actual suspend fun commit(
+        message: String,
+        amend: Boolean,
+        windowId: String?,
+        projectPathOverride: String?,
+        signOff: Boolean,
     ): GitOperationResult =
         withContext(Dispatchers.IO) {
             val projectPath =
@@ -753,10 +761,12 @@ actual object GitService {
             _isLoading.value = true
             try {
                 val args =
-                    if (amend) {
-                        listOf("commit", "--amend", "-m", message)
-                    } else {
-                        listOf("commit", "-m", message)
+                    buildList {
+                        add("commit")
+                        if (amend) add("--amend")
+                        if (signOff) add("--signoff")
+                        add("-m")
+                        add(message)
                     }
 
                 val result = runGitCommand(projectPath, *args.toTypedArray())
@@ -776,9 +786,11 @@ actual object GitService {
             }
         }
 
-    actual suspend fun getLastCommitMessage(): String? =
+    actual suspend fun getLastCommitMessage(): String? = getLastCommitMessage(projectPathOverride = null)
+
+    actual suspend fun getLastCommitMessage(projectPathOverride: String?): String? =
         withContext(Dispatchers.IO) {
-            val projectPath = currentProjectPath ?: return@withContext null
+            val projectPath = projectPathOverride ?: currentProjectPath ?: return@withContext null
 
             try {
                 val result = runGitCommand(projectPath, "log", "-1", "--format=%B")

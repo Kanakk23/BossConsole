@@ -2497,6 +2497,23 @@ update it with the pinned distribution checksum and scaffold validation together
 - Chromium's constructed GitHub backup URL uses the catalog checksum. Primary and backup must contain identical artifact bytes; checksum mismatch fails closed. No pinned catalog hash means no install, and the version picker offers only checksum-backed archives for the current platform. See `docs/dev-935-release-checklist.md` for deployment checks.
 - Browser print is a direct-native exception to the usual AWT ownership rule after macOS manual verification. Pending AWT cancellation is best-effort, not a cross-thread exactly-once guarantee; do not copy this pattern for destructive actions.
 
+## Native Commit dialog repository binding
+
+`CommitDialogRepository` captures the owning window's project when the native Commit dialog
+opens. All its stage, unstage, commit and amend-message reads pass that explicit path. A
+`windowId` only selects which status UI to refresh; it does not select the repository for
+Git commands. Never replace the path with the process-global Git project. A changed or missing
+window project refuses commands, preserving the draft until the dialog is closed. Keep the
+local in-flight guard so a pending command cannot be submitted twice or have its draft edited.
+`CommitDialogRepositoryTest` exercises the dialog adapter with two real disposable repositories
+and the global deliberately pointed at the other one.
+
+Commit dialog sign-off is Git-owned: pass the checkbox flag to `git commit --signoff`,
+never construct a trailer from the OS username. This uses the selected repository
+committer identity and Git trailer deduplication for ordinary commits and amend.
+Keep the original four-argument suspend `GitService.commit` overload and its defaults
+for already compiled callers; it delegates with sign-off disabled.
+
 ## Recent-page loads respect dismissal
 
 RecentBrowserPagesManager registers a load ticket before launching startup IO. Clear and removal
