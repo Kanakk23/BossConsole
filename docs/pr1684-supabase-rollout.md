@@ -58,6 +58,11 @@ flow or an interactive passkey login. Those require the account holder.
   internal authentication (`verify_jwt=false`).
 - Post-deployment checks: passkey health 200; unauthenticated AI model listing
   and token minting both 401; existing OAuth health 200 and invalid callback 400.
-- Fluck OAuth remains on v7, intentionally not deployed until `FLUCK_USER_ID`
-  is supplied. Its new code is tested and pushed, but its production hardening
-  is not complete. Do not interpret this partial rollout as release approval.
+- Fluck OAuth initially remained on v7 pending the account binding. The operator
+  subsequently confirmed the sole owner of the existing `fluck-state-key` record.
+  Set `FLUCK_USER_ID` to that confirmed account without reading or rotating the
+  signing key, then deployed Fluck OAuth v9 (ACTIVE, `verify_jwt=false`).
+- Post-deployment OAuth health returns 200 with all four required configuration
+  flags true; an invalid callback returns 400 and a POST callback returns 405.
+  A real Google consent flow remains an account-holder smoke test. Backend
+  deployment is not approval of the separate desktop release blockers.
