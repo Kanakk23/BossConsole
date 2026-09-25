@@ -132,6 +132,26 @@ class RelocatedDownloadsAccessTest {
     }
 
     @Test
+    fun `a dangling link inside the Downloads folder is refused, and nothing is created at its target`() {
+        // Linked while the target exists (a junction needs that), then the target is removed.
+        val target = File(outside, "not-yet").apply { mkdirs() }
+        val link = File(downloads, "dangling")
+        assumeTrue(linkOut(link, target), "neither a symlink nor a junction can be created here")
+        assertTrue(target.delete(), "could not remove the link target to leave the link dangling")
+
+        assertRefused(write(link), "a write through a dangling link")
+        assertFalse(target.exists(), "the write went through the link to $target")
+    }
+
+    @Test
+    fun `a Downloads folder that cannot be resolved refuses rather than failing with an I-O error`() {
+        // A NUL character makes canonicalFile throw an IOException on every platform.
+        val unresolvable = FileSystemDataProviderImpl { File(outside, "Down\u0000loads").path }
+
+        assertRefused(runBlocking { unresolvable.writeFile(File(sibling, "note.txt").path, "saved") }, "a write")
+    }
+
+    @Test
     fun `a Downloads folder at a filesystem root admits nothing outside home`() {
         val rootProvider = FileSystemDataProviderImpl { outside.toPath().root.toString() }
 

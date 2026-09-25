@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -155,7 +156,13 @@ class WindowsDownloadsFolderTest {
             )
 
             try {
-                assertNull(WindowsDownloadsFolder.runRegQuery(listOf(java, sleeper.path), timeoutMillis = 1_000))
+                val start = System.nanoTime()
+                val output = WindowsDownloadsFolder.runRegQuery(listOf(java, sleeper.path), timeoutMillis = 1_000)
+                val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)
+
+                assertNull(output)
+                // A child that failed at once also gives null; only the timeout takes this long.
+                assertTrue(elapsedMillis >= 1_000, "returned after $elapsedMillis ms, before the 1000 ms timeout")
             } finally {
                 dir.deleteRecursively()
             }
