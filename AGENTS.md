@@ -766,6 +766,13 @@ logger.error(LogCategory.NETWORK, "Request failed", error = exception)
 
 **Security**: Always use `LogSanitizer` for sensitive data:
 - `maskEmail()`, `maskToken()`, `maskCredentialId()`, `maskUserId()`, `maskUriParams()`
+- A local file that fails to decode: log `decodeFailure(e)` as the data, never the decoder's
+  message by any route (`error = e`, `e.message`, `e.toString()`). kotlinx puts the file's content in
+  the exception message, and `decodeFailure` keeps only the exception type, the offset and the JSON
+  path, with map keys masked. Catch `SerializationException` before `Exception` or
+  `IllegalArgumentException`, which it extends. Supabase payloads use `sanitizeSupabaseFailure`
+  (see below). This is the rule for new and converted call sites; older decode sites that still log
+  the exception are tracked in #1711.
 
 **Config**: Set `BOSS_LOG_LEVEL` env var or `boss.log.level` system property (TRACE/DEBUG/INFO/WARN/ERROR)
 
