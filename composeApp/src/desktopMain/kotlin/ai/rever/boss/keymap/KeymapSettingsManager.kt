@@ -57,6 +57,14 @@ actual object KeymapSettingsManager {
             // renames the file aside, lose the user's whole keymap. Coercion falls back to the
             // declared default for an unknown enum value. A field whose *type* changed still
             // fails to decode and is unrecoverable, so keep edits to these models additive.
+            //
+            // The coercion is not a round trip (#1694). The older build holds the default in
+            // memory, and its next write of this file - the migration write-back in
+            // loadSettingsSync, or any keymap change the user makes - persists the default over
+            // the newer value. Going back to the newer build then reads the default, so a
+            // downgrade still loses that one field; for a ShortcutContext the default is GLOBAL,
+            // which widens a shortcut that was scoped. Losing one field, not the whole keymap,
+            // is the trade this makes.
             coerceInputValues = true
         }
 

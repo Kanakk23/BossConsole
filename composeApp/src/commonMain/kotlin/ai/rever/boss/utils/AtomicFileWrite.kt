@@ -8,6 +8,7 @@ import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
+import java.nio.file.InvalidPathException
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
@@ -213,22 +214,27 @@ private fun Path.throwIfNotOwnedByCurrentUser() {
  * where the filesystem has POSIX modes, because a torn file written before [atomicWriteText]
  * pinned its temp files may have been created world-readable and it is never pruned.
  *
- * Best-effort: a failed move (another process holding the file, a read-only volume) is logged with
- * its cause and reported via the return value rather than thrown, because the caller's own
- * fallback - fresh defaults, written back with [atomicWriteText] - is what keeps the app usable
- * either way. **When this returns `false` the caller's write-back overwrites the corrupt bytes.**
+ * Best-effort: a failed move (another process holding the file, a read-only volume, a name the
+ * filesystem cannot represent, a security manager's refusal) is logged with its cause and reported
+ * via the return value rather than thrown. The three settings managers call this from recovery
+ * paths their object initializers reach, so an escape would fail the whole object rather than leave
+ * it on defaults (#1692); the caller's own fallback - fresh defaults, written back with
+ * [atomicWriteText] - is what keeps the app usable either way. **When this returns `false` the
+ * caller's write-back overwrites the corrupt bytes.**
  *
  * `.corrupt-*` files are never pruned. They do not end in `.json`, so no settings scan picks them
  * up, and the file self-heals, so there is at most one per corruption event.
  */
-fun File.renameAsideCorrupt(): Boolean {
-    val stamp = System.currentTimeMillis()
-    var lastFailure: IOException? = null
+fun File.renameAsideCorrupt(): Boolean = renameAsideCorrupt(System.currentTimeMillis())
+
+/** [renameAsideCorrupt] with the stamp supplied, so a test can make the names collide on purpose (#1693). */
+internal fun File.renameAsideCorrupt(stamp: Long): Boolean {
+    var lastFailure: Exception? = null
     var attempt = 0
     while (attempt < MAX_ASIDE_ATTEMPTS) {
         val suffix = if (attempt == 0) "" else "-$attempt"
-        val aside = resolveSibling("$name.corrupt-$stamp$suffix").toPath()
         try {
+            val aside = resolveSibling("$name.corrupt-$stamp$suffix").toPath()
             Files.move(toPath(), aside)
             aside.restrictToOwner()
             return true
@@ -238,6 +244,13 @@ fun File.renameAsideCorrupt(): Boolean {
             attempt++
         } catch (e: IOException) {
             // Not a name clash (a lock, a read-only volume, the source vanished): retrying cannot help.
+            lastFailure = e
+            attempt = MAX_ASIDE_ATTEMPTS
+        } catch (e: InvalidPathException) {
+            // A name the filesystem cannot represent; every suffix would fail the same way.
+            lastFailure = e
+            attempt = MAX_ASIDE_ATTEMPTS
+        } catch (e: SecurityException) {
             lastFailure = e
             attempt = MAX_ASIDE_ATTEMPTS
         }
@@ -251,7 +264,7 @@ fun File.renameAsideCorrupt(): Boolean {
     return false
 }
 
-private const val MAX_ASIDE_ATTEMPTS = 100
+internal const val MAX_ASIDE_ATTEMPTS = 100
 
 private val asideLogger = BossLogger.forComponent("AtomicFileWrite")
 
@@ -261,6 +274,9 @@ private fun Path.restrictToOwner() {
     } catch (_: UnsupportedOperationException) {
         // No POSIX modes here; the aside keeps whatever ACL it had, which is all there is to keep.
     } catch (e: IOException) {
+        asideLogger.warn(LogCategory.FILE, "Could not restrict a corrupt-file aside to its owner", error = e)
+    } catch (e: SecurityException) {
+        // The move itself succeeded, so the bytes are preserved; only the narrowing was refused.
         asideLogger.warn(LogCategory.FILE, "Could not restrict a corrupt-file aside to its owner", error = e)
     }
 }

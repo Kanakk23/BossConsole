@@ -317,4 +317,41 @@ class AtomicFileWriteTest {
     fun `renameAsideCorrupt reports failure rather than throwing when there is nothing to rename`() {
         assertFalse(File(tempDir, "missing.json").renameAsideCorrupt())
     }
+
+    // #1693: the repeated-call test above reaches the suffix branch only when two calls share a
+    // millisecond. A fixed stamp and an aside already at that name make the collision certain.
+    @Test
+    fun `renameAsideCorrupt retries a taken name with a suffix and keeps both copies`() {
+        val target = File(tempDir, "settings.json").apply { writeText("second corruption") }
+        val earlier = File(tempDir, "settings.json.corrupt-1234").apply { writeText("first corruption") }
+
+        assertTrue(target.renameAsideCorrupt(stamp = 1234))
+
+        assertEquals("first corruption", earlier.readText(), "the earlier aside must not be replaced")
+        assertEquals("second corruption", File(tempDir, "settings.json.corrupt-1234-1").readText())
+        assertFalse(target.exists())
+    }
+
+    @Test
+    fun `renameAsideCorrupt gives up without overwriting anything once every suffix is taken`() {
+        val target = File(tempDir, "settings.json").apply { writeText("torn") }
+        val taken =
+            (0 until MAX_ASIDE_ATTEMPTS).map { attempt ->
+                val suffix = if (attempt == 0) "" else "-$attempt"
+                File(tempDir, "settings.json.corrupt-1234$suffix").apply { writeText("taken $attempt") }
+            }
+
+        assertFalse(target.renameAsideCorrupt(stamp = 1234))
+
+        assertEquals("torn", target.readText(), "the file stays where it was")
+        taken.forEachIndexed { attempt, file -> assertEquals("taken $attempt", file.readText()) }
+    }
+
+    // #1692: the managers call this from recovery paths their object initializers reach, so
+    // anything it throws fails the whole manager instead of leaving it on defaults. A NUL in the
+    // name is a path java.nio refuses to represent; toPath() throws InvalidPathException for it.
+    @Test
+    fun `renameAsideCorrupt reports a name the filesystem cannot represent instead of throwing`() {
+        assertFalse(File(tempDir, "bad\u0000name.json").renameAsideCorrupt())
+    }
 }

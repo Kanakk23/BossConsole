@@ -8,6 +8,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -64,6 +65,23 @@ class KeymapSettingsCorruptFileTest {
         assertEquals("Mine", loaded.presetName)
         assertEquals(TabSwitchMode.MRU, loaded.tabSwitchMode)
         assertEquals(emptyList(), corruptSiblings(), "a readable file must not be treated as corrupt")
+    }
+
+    // #1694: coercion keeps the keymap but is not a round trip. The default the older build holds
+    // is what its next write persists, so the newer value is gone for good from that file.
+    // Pinned so that changing this - preserving the unknown value instead - is a decision.
+    @Test
+    fun `a coerced enum value is written back as the default, so a downgrade loses that field`() {
+        val fixture = """{"presetName":"Mine","customized":true,"tabSwitchMode":"A_FUTURE_MODE","version":1}"""
+        settingsFile.writeText(fixture)
+
+        KeymapSettingsManager.resetForTesting(settingsFile)
+
+        val onDisk = settingsFile.readText()
+        // Premise: loading this file writes it back, because the migration adds the preset's actions.
+        assertTrue(onDisk != fixture, "the load did not write the file back")
+        assertFalse("A_FUTURE_MODE" in onDisk, "the newer value does not survive the write-back: $onDisk")
+        assertTrue("\"Mine\"" in onDisk, "the rest of the keymap does: $onDisk")
     }
 
     // Only a decode failure may rename a file away. A read error (here: the path is a directory, so
