@@ -673,13 +673,19 @@ class KernelBootstrap(
         val restartCount = registry.getRestartCount(processId)
 
         val config =
-            if (jvmArgsOverride != null) process.config.copy(jvmArgs = jvmArgsOverride) else process.config
+            if (jvmArgsOverride != null) {
+                // Tuning is additive: the process keeps its own JVM args with the tuned flags
+                // merged in, rather than being respawned on a replacement command line.
+                process.config.copy(jvmArgs = mergeTunedJvmArgs(process.config.jvmArgs, jvmArgsOverride))
+            } else {
+                process.config
+            }
         logger.info(
             "Respawning process {} (attempt {}/{}{})",
             processId,
             restartCount + 1,
             process.config.maxRestarts,
-            if (jvmArgsOverride != null) ", tuned: $jvmArgsOverride" else "",
+            if (jvmArgsOverride != null) ", JVM tuning applied: ${config.jvmArgs != process.config.jvmArgs}" else "",
         )
         try {
             // spawn() registers the replacement itself. The manifest survives because a respawn

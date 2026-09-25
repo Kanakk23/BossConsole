@@ -39,6 +39,13 @@ enum class McpApprovalDisposition {
     QUEUE_FULL,
 
     /**
+     * The call was refused before authorization because its arguments were malformed or
+     * failed the tool's declared inputSchema - the handler never ran and no approval was
+     * requested.
+     */
+    INVALID_ARGUMENTS,
+
+    /**
      * The operator chose "Trust this plugin" and the persisted, provider-wide grant actually
      * saved - every other tool from [ai.rever.boss.mcp.McpApprovalRequest.providerId] is now
      * ALLOW too, across restarts, with no further prompts for this provider.
@@ -185,6 +192,9 @@ object McpMutatingToolCatalog {
             "helm_uninstall",
             // Secrets
             "secret_get",
+            // Sensitive reads use the approval-requiring default too: download URLs can
+            // contain bearer tokens. A read-only declaration must not bypass that default.
+            "downloads_history_list",
             // File & OS Execution
             "codebase_write",
             "run_command",

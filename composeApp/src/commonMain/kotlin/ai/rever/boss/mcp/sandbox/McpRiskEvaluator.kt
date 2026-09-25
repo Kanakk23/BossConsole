@@ -74,6 +74,13 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
                 )
             }
 
+            normalizedName == "downloads_history_list" -> {
+                McpRiskAssessment(
+                    McpRiskLevel.HIGH,
+                    "Download history can disclose credential-bearing URLs and local paths",
+                )
+            }
+
             // Read-only / safe tools
             normalizedName in READ_ONLY_TOOLS -> {
                 McpRiskAssessment(McpRiskLevel.LOW, "Read-only tool (returned data may be sensitive) '$toolName'")

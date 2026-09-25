@@ -4,7 +4,6 @@ import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.utils.VersionConstants
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
-import ai.rever.boss.utils.sha256Of
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
@@ -454,11 +453,19 @@ object ChromiumAutoDownloader {
         version: String,
         staged: Boolean = false,
         onProgress: (DownloadProgress) -> Unit,
+    ): Result<Path> = downloadChromium(version, staged, onProgress, ChromiumReleaseSource::downloadCandidates)
+
+    internal suspend fun downloadChromium(
+        version: String,
+        staged: Boolean,
+        onProgress: (DownloadProgress) -> Unit,
+        resolveCandidates: suspend (String, String) -> List<EngineDownloadCandidate>,
     ): Result<Path> =
         withContext(Dispatchers.IO) {
             val archiveName = "boss-chromium-${detectPlatform()}.zip"
+            val candidates = resolveCandidates(version, archiveName)
             installFromCandidates(
-                candidates = ChromiumReleaseSource.downloadCandidates(version, archiveName),
+                candidates = candidates,
                 version = version,
                 targetDir = if (staged) getPendingChromiumDir() else getChromiumDir(),
                 staged = staged,
@@ -467,9 +474,9 @@ object ChromiumAutoDownloader {
         }
 
     /**
-     * Try each download candidate in order: fetch, verify checksum (when the
-     * catalog provides one), extract, stamp version. The transfer and extract
-     * steps are injectable for tests.
+     * Try each download candidate in order: fetch, verify integrity (fail
+     * closed via [EngineArchiveIntegrityVet]), extract, stamp version. The
+     * transfer and extract steps are injectable for tests.
      */
     internal suspend fun installFromCandidates(
         candidates: List<EngineDownloadCandidate>,
@@ -493,6 +500,10 @@ object ChromiumAutoDownloader {
             )
 
             try {
+                // A hashless archive cannot pass the integrity gate. Refuse it
+                // before creating a temp file or fetching hundreds of MB.
+                EngineArchiveIntegrityVet.requirePinnedHash(candidate).getOrThrow()
+
                 // Create parent directories
                 Files.createDirectories(targetDir.parent)
 
@@ -501,35 +512,15 @@ object ChromiumAutoDownloader {
                 try {
                     fetch(candidate.url, tempFile)
 
-                    // Integrity check before extracting a native binary we will
-                    // execute. Like the app updater, this guards against
-                    // Storage/CDN corruption. Both candidates carry the catalog
-                    // hash when lookup provides one; a failed or hashless lookup
-                    // leaves the backup unverified.
-                    if (candidate.sha256 != null) {
-                        val actualSha = sha256Of(tempFile.toFile())
-                        if (!candidate.sha256.equals(actualSha, ignoreCase = true)) {
-                            throw IllegalStateException(
-                                "Engine archive checksum mismatch from ${candidate.sourceName} " +
-                                    "(expected ${candidate.sha256}, got $actualSha)",
-                            )
-                        }
-                        logger.info(
-                            LogCategory.BROWSER,
-                            "Engine archive checksum verified",
-                            mapOf(
-                                "source" to candidate.sourceName,
-                            ),
-                        )
-                    } else {
-                        logger.debug(
-                            LogCategory.BROWSER,
-                            "No checksum available for engine archive",
-                            mapOf(
-                                "source" to candidate.sourceName,
-                            ),
-                        )
-                    }
+                    // Integrity gate before extracting a native binary we will
+                    // execute: the bytes must match the catalog sha256 pinned on
+                    // the candidate, and a candidate that pins no hash at all
+                    // is refused too, fail closed like the plugin update jar
+                    // identity vet. The engine this installs is EXECUTED, so an
+                    // archive nothing can vouch for must never reach the
+                    // extract; a refusal falls through to the next candidate and
+                    // leaves the installed engine untouched.
+                    EngineArchiveIntegrityVet.vet(candidate, tempFile.toFile()).getOrThrow()
 
                     // Update status to extracting
                     onProgress(DownloadProgress(0, 0, isExtracting = true))

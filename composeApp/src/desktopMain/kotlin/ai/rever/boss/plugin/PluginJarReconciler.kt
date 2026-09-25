@@ -3,10 +3,14 @@ package ai.rever.boss.plugin
 import ai.rever.boss.components.plugin.MicrokernelRuntime
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.loader.ApiClassLoader
+import ai.rever.boss.plugin.loader.FileHashing
 import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginClassLoader
 import ai.rever.boss.plugin.loader.PluginManifestReader
+import ai.rever.boss.plugin.loader.PluginSignatureEnforcement
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
+import ai.rever.boss.plugin.loader.PluginSignatureVerifier
+import ai.rever.boss.plugin.loader.PluginStoreTrust
 import ai.rever.boss.utils.Version
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -56,10 +60,19 @@ object PluginJarReconciler {
         val deferred: List<String> = emptyList(),
     )
 
+    /** Load-time-equivalent signature check. Injectable because the pinned key is unavailable to tests. */
+    @Volatile
+    internal var signatureVerifier: PluginSignatureVerifier =
+        PluginSignatureVerifier(PluginStoreTrust.TRUSTED_KEYS)
+
     private data class Candidate(
         val file: File,
         val manifest: PluginManifest,
-    )
+    ) {
+        val trust: CandidateTrust by lazy { candidateTrust(file, manifest) }
+    }
+
+    private enum class CandidateTrust { INVALID, UNKNOWN, UNSIGNED, TRUSTED }
 
     /**
      * Scan [pluginDir] and remove stale duplicate plugin JARs. Does NOT load
@@ -106,6 +119,12 @@ object PluginJarReconciler {
             }
             val unordered = group.any { Version.parse(it.manifest.version) == null }
             val persistedCandidate = group.firstOrNull { it.file.absolutePath == installedPath }
+            // A failed sidecar read or JAR hash is not proof of an invalid signature.
+            // Leave the whole group untouched until a later scan can classify it.
+            if (group.any { it.trust == CandidateTrust.UNKNOWN }) {
+                winners.add((persistedCandidate ?: group.first()).file)
+                return@forEach
+            }
             val winner =
                 if (unordered && persistedCandidate != null) persistedCandidate else pickWinner(group, installedPath)
             winners.add(winner.file)
@@ -116,7 +135,6 @@ object PluginJarReconciler {
             for (loser in group.filterNot { it.file == winner.file }) {
                 reconcileLoser(pluginId, loser, winner, deleted, deferred)
             }
-
             repointInstalledEntry(pluginId, installedByPluginId[pluginId], winner)
         }
 
@@ -152,6 +170,40 @@ object PluginJarReconciler {
         deleted: MutableList<String>,
         deferred: MutableList<String>,
     ) {
+        if (loser.trust == CandidateTrust.UNKNOWN) return
+        val loserVersion = Version.parse(loser.manifest.version)
+        val winnerVersion = Version.parse(winner.manifest.version)
+        // During the warn-only signature rollout, a newer unsigned store update can
+        // legitimately win. Preserve the older signed artifact for recovery. Under
+        // strict enforcement, preserve a newer unsigned artifact for investigation.
+        val preserveTrustedFallback = loser.trust == CandidateTrust.TRUSTED && winner.trust == CandidateTrust.UNSIGNED
+        val preserveNewerUnsigned =
+            winner.trust == CandidateTrust.TRUSTED &&
+                loser.trust == CandidateTrust.UNSIGNED &&
+                loserVersion != null && winnerVersion != null && loserVersion > winnerVersion
+        if (preserveTrustedFallback || preserveNewerUnsigned) {
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Preserved plugin JAR across signature rollout",
+                mapOf("pluginId" to pluginId, "file" to loser.file.name, "kept" to winner.file.name),
+            )
+            return
+        }
+
+        deleteOrDeferLoser(pluginId, loser, winner, deleted, deferred)
+    }
+
+    /**
+     * The ordinary superseded-jar path once the trust guard has passed: defer while
+     * a live classloader holds the loser open, otherwise delete it with its markers.
+     */
+    private fun deleteOrDeferLoser(
+        pluginId: String,
+        loser: Candidate,
+        winner: Candidate,
+        deleted: MutableList<String>,
+        deferred: MutableList<String>,
+    ) {
         if (PluginClassLoader.isPathOpenByLiveLoader(loser.file.absolutePath)) {
             deferred.add(loser.file.name)
             logger.info(
@@ -181,6 +233,65 @@ object PluginJarReconciler {
                 "deleted" to removed,
             ),
         )
+    }
+
+    /**
+     * Classify [file] for reconciliation: a store sidecar
+     * signature that verifies for `pluginId|version|sha256` of these exact
+     * bytes (the same anchor the load path verifies), or a bundled-trust
+     * marker bound to them. A present-but-invalid signature is NOT trust -
+     * it is exactly the artifact this check exists to demote. Mirrors the
+     * loader: bundled trust only exempts a MISSING sidecar, never an invalid
+     * one. An I/O failure leaves the group untouched because it cannot justify deletion.
+     */
+    private fun candidateTrust(
+        file: File,
+        manifest: PluginManifest,
+    ): CandidateTrust {
+        // A sidecar that exists but cannot be read is not "missing" - the load
+        // path propagates that failure, so it must not fall through to the
+        // bundled-trust exemption here either.
+        val signature =
+            runCatching { PluginSignatureSidecar.read(file.absolutePath) }
+                .onFailure { e ->
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "Could not read plugin signature sidecar - treating candidate as untrusted",
+                        mapOf("file" to file.name, "error" to (e.message ?: "unknown")),
+                    )
+                }
+        val sidecar = signature.getOrNull()
+        return when {
+            signature.isFailure -> {
+                CandidateTrust.UNKNOWN
+            }
+
+            sidecar == null -> {
+                if (PluginBundledTrust.isTrusted(file.absolutePath)) CandidateTrust.TRUSTED else CandidateTrust.UNSIGNED
+            }
+
+            else -> {
+                when (verifiesAnchor(file, manifest, sidecar)) {
+                    true -> CandidateTrust.TRUSTED
+                    false -> CandidateTrust.INVALID
+                    null -> CandidateTrust.UNKNOWN
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether the sidecar [signature] verifies for `pluginId|version|sha256` of
+     * [file]'s current bytes - the same anchor the load path verifies.
+     */
+    private fun verifiesAnchor(
+        file: File,
+        manifest: PluginManifest,
+        signature: String,
+    ): Boolean? {
+        val sha256 = runCatching { FileHashing.sha256(file) }.getOrNull() ?: return null
+        val anchor = PluginStoreTrust.versionAnchor(manifest.pluginId, manifest.version, sha256)
+        return signatureVerifier.verifySignedMessage(anchor, signature).isVerified
     }
 
     private fun readCandidates(
@@ -279,22 +390,33 @@ object PluginJarReconciler {
     }
 
     /**
-     * Highest manifest version wins; ties (or unparseable versions, treated as
-     * lowest) fall back to the installed.json path, then newest mtime, then
-     * filename — always deterministic.
+     * Invalid signatures always lose. While unsigned store releases are allowed,
+     * version wins over trust so updates cannot be rolled back on every launch.
+     * When enforcement is strict, trust wins over version. Ties prefer trust,
+     * the installed path, modification time, then filename.
      */
     private fun pickWinner(
         group: List<Candidate>,
         installedPath: String?,
-    ): Candidate =
-        group.maxWithOrNull(
+    ): Candidate {
+        val enforceUnsigned = PluginSignatureEnforcement.enforceUnsigned
+        return group.maxWithOrNull(
             compareBy<Candidate>(
+                {
+                    when {
+                        it.trust == CandidateTrust.INVALID -> -1
+                        enforceUnsigned && it.trust == CandidateTrust.TRUSTED -> 1
+                        else -> 0
+                    }
+                },
                 { Version.parse(it.manifest.version) ?: Version(0, 0, 0) },
+                { it.trust.ordinal },
                 { it.file.absolutePath == installedPath },
                 { it.file.lastModified() },
                 { it.file.name },
             ),
         ) ?: group.first()
+    }
 
     private fun isMicrokernelRuntimeName(fileName: String): Boolean =
         fileName.startsWith(MicrokernelRuntime.ARTIFACT_PREFIX) ||

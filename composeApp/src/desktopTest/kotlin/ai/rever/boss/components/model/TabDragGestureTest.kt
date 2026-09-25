@@ -93,7 +93,7 @@ class TabDragGestureTest {
                 assertFalse(component.isDragging)
                 assertNull(component.getCurrentPosition())
                 assertNull(component.dropTarget)
-                assertEquals(0, drops)
+                assertEquals(1, drops)
             }
         }
 

@@ -19,6 +19,9 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.SaveableStateHolder
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -47,7 +50,17 @@ fun CloneProjectDialog(
     onDismiss: () -> Unit,
     onProjectCloned: (String) -> Unit,
 ) {
+    CloneProjectDialog(onDismiss, onProjectCloned, GitService::cloneRepository)
+}
+
+@Composable
+internal fun CloneProjectDialog(
+    onDismiss: () -> Unit,
+    onProjectCloned: (String) -> Unit,
+    cloneRepository: suspend (String, String, (String) -> Unit) -> GitOperationResult,
+) {
     var cloneStep by remember { mutableStateOf<CloneStep>(CloneStep.Configuration) }
+    val configurationState = rememberSaveableStateHolder()
 
     BossDialog(
         onDismissRequest = {
@@ -63,60 +76,70 @@ fun CloneProjectDialog(
                 usePlatformDefaultWidth = false,
             ),
     ) {
-        Surface(
-            modifier =
-                Modifier
-                    .width(600.dp)
-                    .wrapContentHeight(),
-            shape = RoundedCornerShape(8.dp),
-            color = BossTheme.colors.panel,
-            elevation = 8.dp,
-        ) {
-            when (val step = cloneStep) {
-                is CloneStep.Configuration -> {
+        CloneProjectStepContent(cloneStep, configurationState, cloneRepository, onDismiss, onProjectCloned) {
+            cloneStep = it
+        }
+    }
+}
+
+@Composable
+private fun CloneProjectStepContent(
+    step: CloneStep,
+    configurationState: SaveableStateHolder,
+    cloneRepository: suspend (String, String, (String) -> Unit) -> GitOperationResult,
+    onDismiss: () -> Unit,
+    onProjectCloned: (String) -> Unit,
+    onStepChange: (CloneStep) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.width(600.dp).wrapContentHeight(),
+        shape = RoundedCornerShape(8.dp),
+        color = BossTheme.colors.panel,
+        elevation = 8.dp,
+    ) {
+        when (step) {
+            is CloneStep.Configuration -> {
+                configurationState.SaveableStateProvider("configuration") {
                     ConfigurationStep(
                         onDismiss = onDismiss,
                         onClone = { url, directory ->
-                            cloneStep = CloneStep.Cloning(url, directory, "Initializing...")
+                            onStepChange(CloneStep.Cloning(url, directory, "Initializing..."))
                         },
                     )
                 }
+            }
 
-                is CloneStep.Cloning -> {
-                    CloningStep(
-                        repositoryUrl = step.repositoryUrl,
-                        targetDirectory = step.targetDirectory,
-                        progressMessage = step.progressMessage,
-                        onProgress = { progress ->
-                            cloneStep = CloneStep.Cloning(step.repositoryUrl, step.targetDirectory, progress)
-                        },
-                        onSuccess = { projectPath ->
-                            cloneStep = CloneStep.Success(projectPath)
-                        },
-                        onError = { message ->
-                            cloneStep = CloneStep.Error(message)
-                        },
-                    )
-                }
+            is CloneStep.Cloning -> {
+                CloningStep(
+                    cloneRepository = cloneRepository,
+                    repositoryUrl = step.repositoryUrl,
+                    targetDirectory = step.targetDirectory,
+                    progressMessage = step.progressMessage,
+                    onProgress = { progress ->
+                        onStepChange(CloneStep.Cloning(step.repositoryUrl, step.targetDirectory, progress))
+                    },
+                    onSuccess = { projectPath -> onStepChange(CloneStep.Success(projectPath)) },
+                    onError = { message -> onStepChange(CloneStep.Error(message)) },
+                )
+            }
 
-                is CloneStep.Success -> {
-                    SuccessStep(
-                        projectPath = step.projectPath,
-                        onOpenProject = {
-                            onProjectCloned(step.projectPath)
-                            onDismiss()
-                        },
-                        onClose = onDismiss,
-                    )
-                }
+            is CloneStep.Success -> {
+                SuccessStep(
+                    projectPath = step.projectPath,
+                    onOpenProject = {
+                        onProjectCloned(step.projectPath)
+                        onDismiss()
+                    },
+                    onClose = onDismiss,
+                )
+            }
 
-                is CloneStep.Error -> {
-                    ErrorStep(
-                        message = step.message,
-                        onRetry = { cloneStep = CloneStep.Configuration },
-                        onClose = onDismiss,
-                    )
-                }
+            is CloneStep.Error -> {
+                ErrorStep(
+                    message = step.message,
+                    onRetry = { onStepChange(CloneStep.Configuration) },
+                    onClose = onDismiss,
+                )
             }
         }
     }
@@ -130,12 +153,12 @@ private fun ConfigurationStep(
     onDismiss: () -> Unit,
     onClone: (url: String, directory: String) -> Unit,
 ) {
-    var repositoryUrl by remember { mutableStateOf("") }
-    var targetDirectory by remember { mutableStateOf(ProjectCreationService.getDefaultProjectsDirectory()) }
-    var customDirectoryName by remember { mutableStateOf("") }
+    var repositoryUrl by rememberSaveable { mutableStateOf("") }
+    var targetDirectory by rememberSaveable { mutableStateOf(ProjectCreationService.getDefaultProjectsDirectory()) }
+    var customDirectoryName by rememberSaveable { mutableStateOf("") }
     var urlError by remember { mutableStateOf<String?>(null) }
-    var lastAutoFilledName by remember { mutableStateOf("") }
-    var userManuallyEdited by remember { mutableStateOf(false) }
+    var lastAutoFilledName by rememberSaveable { mutableStateOf("") }
+    var userManuallyEdited by rememberSaveable { mutableStateOf(false) }
 
     // Directory picker
     val directoryPicker =
@@ -474,6 +497,7 @@ private fun Char.isLogForgingControlChar(): Boolean =
  */
 @Composable
 private fun CloningStep(
+    cloneRepository: suspend (String, String, (String) -> Unit) -> GitOperationResult,
     repositoryUrl: String,
     targetDirectory: String,
     progressMessage: String,
@@ -496,11 +520,7 @@ private fun CloningStep(
             )
 
             val result =
-                GitService.cloneRepository(
-                    repositoryUrl = repositoryUrl,
-                    targetDirectory = targetDirectory,
-                    onProgress = onProgress,
-                )
+                cloneRepository(repositoryUrl, targetDirectory, onProgress)
 
             when (result) {
                 is GitSuccess -> {
@@ -516,45 +536,7 @@ private fun CloningStep(
         }
     }
 
-    Column(
-        modifier =
-            Modifier
-                .padding(16.dp)
-                .heightIn(min = 200.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(48.dp),
-            color = BossTheme.colors.signal,
-            strokeWidth = 3.dp,
-        )
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        Text(
-            text = "Cloning Repository",
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = BossTheme.colors.textPrimary,
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            text = progressMessage,
-            fontSize = 13.sp,
-            color = BossTheme.colors.textSecondary,
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Text(
-            text = "This may take a few moments...",
-            fontSize = 12.sp,
-            color = BossTheme.colors.textSecondary.copy(alpha = 0.6f),
-        )
-    }
+    CloningProgressContent(progressMessage)
 }
 
 /**

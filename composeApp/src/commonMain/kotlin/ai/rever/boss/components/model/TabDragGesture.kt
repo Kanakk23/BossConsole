@@ -9,40 +9,28 @@ internal suspend fun PointerInputScope.detectTabDragGestures(
     component: TabDraggableComponent,
     onStart: (Offset) -> Unit,
     onEnd: (TabDropResult?) -> Unit,
+    sourceIndex: () -> Int? = { null },
 ) {
-    var ownedDrag: DraggingTabInfo? = null
-
-    fun ownsDrag(): Boolean = ownedDrag != null && component.draggingTab === ownedDrag
-
-    try {
-        detectDragGestures(
-            onDragStart = { offset ->
-                if (!component.isDragging) {
-                    try {
-                        onStart(offset)
-                    } finally {
-                        ownedDrag = component.draggingTab
+    component.withDragSession { session ->
+        try {
+            detectDragGestures(
+                onDragStart = { offset -> session.start { onStart(offset) } },
+                onDrag = { change, amount ->
+                    if (session.isOwner) {
+                        change.consume()
+                        session.update(amount)
                     }
-                }
-            },
-            onDrag = { change, amount ->
-                if (ownsDrag()) {
-                    change.consume()
-                    component.updateDrag(amount)
-                }
-            },
-            onDragEnd = {
-                if (ownsDrag()) onEnd(component.endDrag())
-                ownedDrag = null
-            },
-            onDragCancel = {
-                if (ownsDrag()) component.cancelDrag()
-                ownedDrag = null
-            },
-        )
-    } finally {
-        // Removal, pointerInput key changes and exceptions do not necessarily call onDragCancel.
-        // Identity prevents an obsolete handler from cancelling a replacement drag.
-        if (ownsDrag()) component.cancelDrag()
+                },
+                onDragEnd = {
+                    if (session.isOwner) onEnd(session.end(sourceIndex()))
+                },
+                onDragCancel = {
+                    if (session.cancel()) onEnd(null)
+                },
+            )
+        } finally {
+            // Teardown and callback failures terminate only this gesture and notify once.
+            if (session.cancel()) onEnd(null)
+        }
     }
 }

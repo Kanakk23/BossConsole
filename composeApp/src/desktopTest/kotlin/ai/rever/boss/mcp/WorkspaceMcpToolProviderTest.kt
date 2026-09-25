@@ -89,6 +89,7 @@ class WorkspaceMcpToolProviderTest {
         WorkspaceMcpToolProvider.splitViewStateResolver = null
         WorkspaceMcpToolProvider.terminalTabOpener = null
         WorkspaceMcpToolProvider.splitViewWaitTimeoutMs = 5000L
+        WorkspaceMcpToolProvider.coldStartWindowWaitTimeoutMs = 30_000L
         registeredManagerIds.forEach { unregisterFromManager(it) }
         registeredManagerIds.clear()
         SplitViewStateRegistry.getAllStates().keys.forEach {
@@ -195,19 +196,38 @@ class WorkspaceMcpToolProviderTest {
     }
 
     @Test
-    fun `tools exposes workspace and terminal lifecycle operations and aliases`() {
-        val tools = WorkspaceMcpToolProvider.tools().map { it.name }.toSet()
-        assertTrue(tools.contains("list_workspaces"))
-        assertTrue(tools.contains("workspace_list"))
-        assertTrue(tools.contains("open_workspace"))
-        assertTrue(tools.contains("workspace_open"))
-        assertTrue(tools.contains("create_workspace"))
-        assertTrue(tools.contains("workspace_create"))
-        assertTrue(tools.contains("open_terminal"))
-        assertTrue(tools.contains("terminal_open"))
-        assertTrue(tools.contains("close_workspace"))
-        assertTrue(tools.contains("workspace_close"))
+    fun `tools advertises exactly one canonical name per workspace action`() {
+        val tools = WorkspaceMcpToolProvider.tools().map { it.name }
+        assertEquals(
+            listOf(
+                "list_workspaces",
+                "open_workspace",
+                "create_workspace",
+                "open_terminal",
+                "close_workspace",
+            ),
+            tools,
+        )
+        // The reversed legacy spellings stay invocable through the alias map but
+        // are never advertised: two names per action doubled every list_tools.
+        for ((alias, canonical) in WorkspaceMcpToolProvider.toolAliases) {
+            assertFalse(tools.contains(alias), "$alias must not be advertised")
+            assertTrue(tools.contains(canonical), "$alias must resolve to advertised $canonical")
+        }
     }
+
+    @Test
+    fun `list_tools exposes five workspace tools while the alias still resolves on invoke`() =
+        runBlocking {
+            val core = createTestCore()
+            assertEquals(5, core.allTools.value.count { it.providerId == "boss-workspace" })
+            assertEquals(5, core.tools.value.count { it.providerId == "boss-workspace" })
+
+            val result = core.invoke("workspace_list", "{}")
+            assertFalse(result.isError, "Alias workspace_list must resolve: ${result.text}")
+            val json = Json.parseToJsonElement(result.text).jsonObject
+            assertTrue(json["success"]?.jsonPrimitive?.booleanOrNull == true)
+        }
 
     @Test
     fun `registered in McpToolRegistryImpl by default`() {
@@ -593,10 +613,11 @@ class WorkspaceMcpToolProviderTest {
     @Test
     fun `resolveTargetWindow refuses targeting when multiple windows are open and windowId omitted`() =
         runBlocking {
-            val tabReg1 = TabRegistry()
-            val tabReg2 = TabRegistry()
-            val state1 = SplitViewState(tabReg1, "window-multi-1")
-            val state2 = SplitViewState(tabReg2, "window-multi-2")
+            // Both windows share the stub registry: what is being measured is which window the
+            // workspace lands in, and Dual Terminal only builds at all when "terminal" has a
+            // factory - an empty registry now gets the apply refused rather than applied empty.
+            val state1 = SplitViewState(stubTabRegistry, "window-multi-1")
+            val state2 = SplitViewState(stubTabRegistry, "window-multi-2")
             createdSplitViewStates.add(state1)
             createdSplitViewStates.add(state2)
 
@@ -643,6 +664,48 @@ class WorkspaceMcpToolProviderTest {
         runBlocking {
             val resolved = WorkspaceMcpToolProvider.awaitSplitViewState("window-nonexistent", timeoutMillis = 50L)
             assertTrue(resolved == null, "Should return null if window state never registers within timeout")
+        }
+
+    @Test
+    fun `open_terminal opens in a cold-start window that registers past the short bound`() =
+        runBlocking {
+            // A window this call mints still has to compose and register. Model a slow
+            // register landing well past splitViewWaitTimeoutMs (50ms in setUp) but inside
+            // the cold-start bound - the fixed wait used to give up first and report a
+            // generic failure while the window was moments from ready.
+            val windowId = "mcp-cold-start-window"
+            val state = SplitViewState(stubTabRegistry, windowId)
+            createdSplitViewStates.add(state)
+            WorkspaceMcpToolProvider.windowCreator = { windowId }
+            WorkspaceMcpToolProvider.coldStartWindowWaitTimeoutMs = 2_000L
+            launch {
+                delay(300)
+                SplitViewStateRegistry.register(windowId, state)
+            }
+
+            val result = createTestCore().invoke("open_terminal", "{}")
+
+            assertFalse(result.isError, result.text)
+            val json = Json.parseToJsonElement(result.text).jsonObject
+            assertTrue(json["success"]?.jsonPrimitive?.booleanOrNull == true, result.text)
+            assertEquals(windowId, json["windowId"]?.jsonPrimitive?.content)
+        }
+
+    @Test
+    fun `open_terminal reports an unready cold-start window as a retryable timeout`() =
+        runBlocking {
+            // Nothing ever registers for the minted id: the error must say the wait timed
+            // out and that a retry is worthwhile, not the generic "Failed to open" that
+            // told the agent nothing about what went wrong.
+            WorkspaceMcpToolProvider.windowCreator = { "mcp-never-ready-window" }
+            WorkspaceMcpToolProvider.coldStartWindowWaitTimeoutMs = 150L
+
+            val result = createTestCore().invoke("open_terminal", "{}")
+
+            assertTrue(result.isError, result.text)
+            assertTrue(result.text.contains("Timed out"), result.text)
+            assertTrue(result.text.contains("retry"), result.text)
+            assertFalse(result.text.contains("Failed to open terminal"), result.text)
         }
 
     @Test
@@ -949,6 +1012,9 @@ class WorkspaceMcpToolProviderTest {
             val result = core.invoke("close_workspace", """{"workspaceId":"no-such-space"}""")
             assertTrue(result.isError)
             assertTrue(result.text.contains("nothing was closed"), result.text)
+            // Zero registered windows is said plainly so the agent knows there is no
+            // windowId it could pass - "(none)" alone read like a missing target.
+            assertTrue(result.text.contains("none are open"), result.text)
         }
 
     // ------------------------------------------------------------------
@@ -1367,6 +1433,86 @@ class WorkspaceMcpToolProviderTest {
             assertFalse(closeResult.isError, closeResult.text)
             val json = Json.parseToJsonElement(closeResult.text).jsonObject
             assertTrue(json["releasedHere"]?.jsonPrimitive?.booleanOrNull == true, closeResult.text)
+        }
+
+    @Test
+    fun `close_workspace without windowId closes in the single open window`() =
+        runBlocking {
+            val windowId = "ws-close-sole-window"
+            val state = SplitViewState(stubTabRegistry, windowId)
+            createdSplitViewStates.add(state)
+            SplitViewStateRegistry.register(windowId, state)
+
+            val core = createTestCore()
+            val openResult =
+                core.invoke(
+                    "open_workspace",
+                    """{"workspaceId":"${PredefinedWorkspaces.DUAL_TERMINAL_ID}","windowId":"$windowId"}""",
+                )
+            assertFalse(openResult.isError, openResult.text)
+
+            // One window is the only possible target, so no windowId is needed - the call
+            // used to work here and must keep working.
+            val closeResult =
+                core.invoke(
+                    "close_workspace",
+                    """{"workspaceId":"${PredefinedWorkspaces.DUAL_TERMINAL_ID}"}""",
+                )
+            assertFalse(closeResult.isError, closeResult.text)
+            val json = Json.parseToJsonElement(closeResult.text).jsonObject
+            assertTrue(json["releasedHere"]?.jsonPrimitive?.booleanOrNull == true, closeResult.text)
+        }
+
+    @Test
+    fun `close_workspace without windowId names the open windows when it cannot pick one`() =
+        runBlocking {
+            val first = SplitViewState(stubTabRegistry, "ws-close-window-a")
+            val second = SplitViewState(stubTabRegistry, "ws-close-window-b")
+            createdSplitViewStates.add(first)
+            createdSplitViewStates.add(second)
+            SplitViewStateRegistry.register("ws-close-window-a", first)
+            SplitViewStateRegistry.register("ws-close-window-b", second)
+
+            val core = createTestCore()
+            val closeResult =
+                core.invoke(
+                    "close_workspace",
+                    """{"workspaceId":"${PredefinedWorkspaces.DUAL_TERMINAL_ID}"}""",
+                )
+
+            // Ambiguous targeting used to surface as a generic "nothing was closed" - an
+            // agent cannot act on that. The error must name the candidates to retry with.
+            assertTrue(closeResult.isError, closeResult.text)
+            assertTrue(closeResult.text.contains("ws-close-window-a"), closeResult.text)
+            assertTrue(closeResult.text.contains("ws-close-window-b"), closeResult.text)
+            assertTrue(closeResult.text.contains("windowId"), closeResult.text)
+        }
+
+    @Test
+    fun `close_workspace ambiguity leaves a disposable file untouched`(): Unit =
+        runBlocking {
+            val first = SplitViewState(stubTabRegistry, "ws-close-disposable-a")
+            val second = SplitViewState(stubTabRegistry, "ws-close-disposable-b")
+            createdSplitViewStates.add(first)
+            createdSplitViewStates.add(second)
+            SplitViewStateRegistry.register("ws-close-disposable-a", first)
+            SplitViewStateRegistry.register("ws-close-disposable-b", second)
+
+            val core = createTestCore()
+            val created = core.invoke("create_workspace", """{"isDisposable":true}""")
+            assertFalse(created.isError, created.text)
+            val workspaceId =
+                Json
+                    .parseToJsonElement(created.text)
+                    .jsonObject["workspaceId"]!!
+                    .jsonPrimitive.content
+            val fileName = WorkspaceFileManagerCommon.fileNameForId(workspaceId)
+            assertNotNull(fileManager.loadWorkspace(fileName))
+
+            val refused = core.invoke("close_workspace", """{"workspaceId":"$workspaceId"}""")
+            assertTrue(refused.isError, refused.text)
+            assertTrue(refused.text.contains("windowId"), refused.text)
+            assertNotNull(fileManager.loadWorkspace(fileName), "an ambiguous close must not delete the file")
         }
 
     @Test

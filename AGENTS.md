@@ -743,6 +743,19 @@ logger.error(LogCategory.NETWORK, "Request failed", error = exception)
 
 **Config**: Set `BOSS_LOG_LEVEL` env var or `boss.log.level` system property (TRACE/DEBUG/INFO/WARN/ERROR)
 
+**Log file**: off unless asked for. `BOSS_LOG_FILE=/path/to/boss.log` (or `boss.log.file`) turns on a
+size-rotated file (10 MB, five backups) that receives entries at `BOSS_LOG_FILE_LEVEL` (or
+`boss.log.file.level`) and above, default ERROR. `BOSS_LOG_FILE=off` or a level of `OFF` disables it even if a
+default is ever switched on. The file threshold is applied after the console level, so it can only narrow: with the
+console at INFO and the file at DEBUG, the file gets INFO. Blank is unset at every step, an
+unrecognised level falls through to the next source rather than to INFO. File and console receive the same
+entries; callers must use `LogSanitizer` before logging sensitive data, since `BossLogger` does not sanitize them.
+`BossLogger.configureFromEnvironment()` in
+`main.kt` is the only host entry point; `configure()` has no host caller. Flipping
+`FILE_LOGGING_ON_BY_DEFAULT` in `BossLogger` makes it default-on at `~/.boss/logs/boss.log` for every
+install; that switch is deliberately one constant, because whether to default on was raised on #394 and
+is a policy call.
+
 ## Browser native disposal
 
 `BrowserHandleImpl.dispose()` invalidates the handle and detaches its UI, then
@@ -953,7 +966,9 @@ is now gated - packaging relies on those.
 `implementation(projects.pluginPlatform.pluginWorkspaceTypes)`, so its POM pins the sibling at the
 current project version. `publish-maven-central.yml` takes a free-form `packages` input, and
 dispatching bookmark-types alone would ship a POM requiring a `plugin-workspace-types` version that
-does not exist on Central. `all` is safe - workspace-types publishes first. BossConsole#81 tracks the
+does not exist on Central. Bookmark id generation also calls `UniqueIdsKt` at runtime, so an older
+workspace-types jar cannot substitute for the sibling version. `all` is safe - workspace-types
+publishes first. BossConsole#81 tracks the
 durable guard: diffing public members against the api jar `plugin-api-core` already downloads,
 covering all eight duplicated packages rather than this one field.
 
@@ -1362,6 +1377,12 @@ it moves; selecting afterwards would need the post-move index, which is what the
 Today the two cannot actually coexist - `showSections` is `!several`, so a multi-pane bar draws no
 separator at all - but the ordering is what makes the rule true if they ever do.
 
+**A tab gesture owns its cleanup (#690).** Both `BossTabButton` and `TabFaviconChip` run
+inside `withDragSession`, whose `finally` clears an interrupted gesture even when pointer input
+is cancelled or restarted without an end/cancel callback. Ownership is the exact `DraggingTabInfo`
+instance, not the tab id: a tab can appear on multiple surfaces and can start a new drag before an
+old handler finishes. Never clear window-wide drag state from a tab-id-only disposal hook.
+
 **A collapsed pane springs open under a dragged tab**, after the same 550ms the Top of Mind panel
 gives its own headers (`SPRING_LOAD_DELAY_MS`, a second constant on purpose: nothing links the two
 repositories at compile time). A pane that is not being worked in shows one row plus a favicon
@@ -1457,7 +1478,7 @@ template picked from the fourth of those is the same gesture as one picked from 
 - **Templates are the SET of built-in ids, and it cannot be a prefix test.**
   `PredefinedWorkspaces.allIds` is derived from `allWorkspaces`, so a ninth built-in joins by
   existing; all eight ids are named constants so one can be referred to. `LayoutWorkspace.generateId()`
-  mints `workspace-<epoch millis>`, so a saved Space carries the same `workspace-` prefix as a
+  mints `workspace-<epoch millis>-<entropy>`, so a saved Space carries the same `workspace-` prefix as a
   built-in and `startsWith("workspace-")` would call every Space a template. The NAME is not the key
   either - a user can save a Space called "Claude Code".
 - **There is deliberately NO `isTemplate` field on `LayoutWorkspace`.** It is the plugin api type,
@@ -1562,7 +1583,7 @@ Three properties of the adoption worth keeping:
   id for the same file on every launch, so nothing could refer to that Space across a restart - the
   session set records ids, and so does every preserved-state key.
 - **It cannot be mistaken for either kind of id.** No built-in id ends in `-saved`, and
-  `generateId()` produces `workspace-<epoch millis>`, so an adopted id is recognisable as one. The
+  `generateId()` produces `workspace-<epoch millis>-<entropy>`, so an adopted id is recognisable as one. The
   plugin's template set is the eight literal ids, so an adopted Space files under Spaces.
 - **Nothing is rewritten on disk.** The migration is in memory, so a launch that reads a legacy file
   cannot half-write anything, and the file keeps the name the user sees in the folder.
@@ -1600,8 +1621,8 @@ into "Save Space..." bypassed `uniqueWorkspaceName` entirely.
 ### The path is the id
 
 `WorkspaceFileManagerCommon.fileNameForId` - copied from `WorkspaceServiceImpl.persistToDisk`, which
-has written `<id>.json` all along. An id is unique by construction, so the collision is impossible
-rather than improbable, and the name is free to be whatever the user wants.
+has written `<id>.json` all along. A generated id has entropy, so accidental collisions are very
+unlikely, and the name is free to be whatever the user wants.
 
 - **Nothing is rewritten or renamed on disk by an upgrade.** `loadAllWorkspaces` already read every
   file's id out of its contents, so it now records an `id -> fileName` map as it scans and
@@ -2479,8 +2500,34 @@ update it with the pinned distribution checksum and scaffold validation together
 
 - MCP ledger hashes detect retained-record edits and broken adjacency, not authenticity: no secret key is used, and complete rewrites or tail truncation are not detectable. Ledger files are owner-only. `boss mcp ledger verify|tail|search` reads local disk; it is not an ungated plugin MCP read surface.
 - `atomicWriteText` pins POSIX files to 0600. The separate `writeModeFile` writer for `env_vars` preserves existing permissions; that rule does not apply to all state writers.
-- Chromium's constructed GitHub backup URL uses the catalog checksum. Primary and backup must contain identical artifact bytes; checksum mismatch fails closed. See `docs/dev-935-release-checklist.md` for deployment checks.
+- Chromium's constructed GitHub backup URL uses the catalog checksum. Primary and backup must contain identical artifact bytes; checksum mismatch fails closed. No pinned catalog hash means no install, and the version picker offers only checksum-backed archives for the current platform. See `docs/dev-935-release-checklist.md` for deployment checks.
 - Browser print is a direct-native exception to the usual AWT ownership rule after macOS manual verification. Pending AWT cancellation is best-effort, not a cross-thread exactly-once guarantee; do not copy this pattern for destructive actions.
+
+## Native Commit dialog repository binding
+
+`CommitDialogRepository` captures the owning window's project when the native Commit dialog
+opens. All its stage, unstage, commit and amend-message reads pass that explicit path. A
+`windowId` only selects which status UI to refresh; it does not select the repository for
+Git commands. Never replace the path with the process-global Git project. A changed or missing
+window project refuses commands, preserving the draft until the dialog is closed. Keep the
+local in-flight guard so a pending command cannot be submitted twice or have its draft edited.
+`CommitDialogRepositoryTest` exercises the dialog adapter with two real disposable repositories
+and the global deliberately pointed at the other one.
+
+Commit dialog sign-off is Git-owned: pass the checkbox flag to `git commit --signoff`,
+never construct a trailer from the OS username. This uses the selected repository
+committer identity and Git trailer deduplication for ordinary commits and amend.
+Keep the original four-argument suspend `GitService.commit` overload and its defaults
+for already compiled callers; it delegates with sign-off disabled.
+
+## Recent-page loads respect dismissal
+
+RecentBrowserPagesManager registers a load ticket before launching startup IO. Clear and removal
+predicates update that ticket alongside the in-memory mutation; publication filters only loaded
+rows, preserving newer recorded visits. Keep the guard lock away from disk IO and pass the same
+ticket through browser-history bootstrap. Release tickets after loading; they are transient
+startup coordination, not permanent URL tombstones. Tests using the singleton must await its
+initial load, drain writes, and restore both page/dismissal flows before restoring settingsFile.
 
 ### Run scan publication ownership
 

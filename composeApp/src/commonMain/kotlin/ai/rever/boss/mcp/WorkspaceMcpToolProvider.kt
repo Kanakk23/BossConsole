@@ -57,11 +57,17 @@ import kotlin.time.Clock
  * from a cold start (zero active workspaces or terminals) without manual UI actions.
  *
  * Tools exposed:
- * - list_workspaces / workspace_list
- * - open_workspace / workspace_open
- * - create_workspace / workspace_create
- * - open_terminal / terminal_open
- * - close_workspace / workspace_close
+ * - list_workspaces
+ * - open_workspace
+ * - create_workspace
+ * - open_terminal
+ * - close_workspace
+ *
+ * The reversed legacy names (workspace_list, workspace_open, workspace_create,
+ * terminal_open, workspace_close) remain invocable as invoke-only aliases via
+ * [toolAliases] but are not advertised in list_tools, the bridge mirror, or
+ * search - advertising both spellings paid a second name + description +
+ * schema per action on every listing.
  *
  * Every tool that mutates on-screen state or runs a command declares
  * `readOnly = false`, so the mutating gate's fail-closed OR classifies it as
@@ -75,7 +81,7 @@ import kotlin.time.Clock
  */
 // One cohesive MCP tool provider; handlers stay beside their tool definitions.
 @Suppress("TooManyFunctions", "LargeClass")
-object WorkspaceMcpToolProvider : McpToolProvider {
+object WorkspaceMcpToolProvider : McpToolProvider, McpToolAliasProvider {
     private val logger = BossLogger.forComponent("WorkspaceMcpToolProvider")
 
     /** Panel id of the terminal panel the bootstrap Space builds. */
@@ -109,6 +115,17 @@ object WorkspaceMcpToolProvider : McpToolProvider {
 
     /** Timeout in milliseconds when awaiting compose readiness on cold start. */
     internal var splitViewWaitTimeoutMs: Long = 5000L
+
+    /**
+     * Bound for awaiting a window THIS call just created. Composing a fresh window and
+     * registering its [SplitViewState] takes far longer than [splitViewWaitTimeoutMs], which
+     * is tuned for windows that are already open - and cold-start automation is exactly the
+     * case these tools exist for, so it gets its own, longer wait.
+     */
+    internal var coldStartWindowWaitTimeoutMs: Long = 30_000L
+
+    internal fun splitViewWaitTimeoutFor(isColdStart: Boolean): Long =
+        if (isColdStart) coldStartWindowWaitTimeoutMs else splitViewWaitTimeoutMs
 
     private fun getFileManager(): WorkspaceFileManager = fileManagerProvider?.invoke() ?: WorkspaceFileManager()
 
@@ -185,18 +202,22 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         )
     }
 
+    override val toolAliases: Map<String, String> =
+        mapOf(
+            "workspace_list" to "list_workspaces",
+            "workspace_open" to "open_workspace",
+            "workspace_create" to "create_workspace",
+            "terminal_open" to "open_terminal",
+            "workspace_close" to "close_workspace",
+        )
+
     override fun tools(): List<McpToolDefinition> =
         listOf(
             createListWorkspacesTool("list_workspaces"),
-            createListWorkspacesTool("workspace_list"),
             createOpenWorkspaceTool("open_workspace"),
-            createOpenWorkspaceTool("workspace_open"),
             createCreateWorkspaceTool("create_workspace"),
-            createCreateWorkspaceTool("workspace_create"),
             createOpenTerminalTool("open_terminal"),
-            createOpenTerminalTool("terminal_open"),
             createCloseWorkspaceTool("close_workspace"),
-            createCloseWorkspaceTool("workspace_close"),
         )
 
     private fun createListWorkspacesTool(name: String): McpToolDefinition =
@@ -466,11 +487,15 @@ object WorkspaceMcpToolProvider : McpToolProvider {
             return openWorkspaceByPath(path, requestedWindowId)
         }
 
-        val targetResolution = resolveTargetWindow(requestedWindowId)
-        val targetWindowId =
-            when (targetResolution) {
-                is TargetWindowResolution.Success -> targetResolution.windowId
-                is TargetWindowResolution.Failure -> return McpToolResult(targetResolution.errorMessage, isError = true)
+        val (targetWindowId, targetIsColdStart) =
+            when (val resolution = resolveTargetWindow(requestedWindowId)) {
+                is TargetWindowResolution.Success -> {
+                    resolution.windowId to resolution.isColdStart
+                }
+
+                is TargetWindowResolution.Failure -> {
+                    return McpToolResult(resolution.errorMessage, isError = true)
+                }
             }
 
         // Locate or create workspace
@@ -552,7 +577,7 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         // path mode: nothing below can run without it, and a "success" that applied nothing would
         // send the agent on to open_terminal in a window that shows no Space.
         val splitViewState =
-            awaitSplitViewState(targetWindowId)
+            awaitSplitViewState(targetWindowId, splitViewWaitTimeoutFor(targetIsColdStart))
                 ?: return McpToolResult(
                     "Window '$targetWindowId' did not register its UI state in time, so workspace " +
                         "'${workspace.id}' was not opened; retry." +
@@ -585,21 +610,33 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         // WorkspaceEventBus collector re-applies every load event aimed at it, so the
         // provider - which is itself the actor here - must not emit one; doing both would
         // apply the layout twice and tear down what the first apply just built.
-        switchWindowToSpace(
-            splitViewState,
-            WindowProjectStateRegistry.getOrCreate(targetWindowId),
-            workspace,
-        )
+        if (
+            !switchWindowToSpace(
+                splitViewState,
+                WindowProjectStateRegistry.getOrCreate(targetWindowId),
+                workspace,
+            )
+        ) {
+            return McpToolResult(
+                "Workspace '${workspace.name}' could not be applied - none of its tabs can be " +
+                    "built. The plugin that provides its tab types may have been removed; the " +
+                    "window was left on whatever it was already showing.",
+                isError = true,
+            )
+        }
 
         var terminalInfo: JsonObject? = null
         if (openTerminal) {
-            terminalInfo =
-                doOpenTerminal(targetWindowId, workspace.id, workspace.projectPath, command = null)
-                    ?: return McpToolResult(
-                        "Workspace '${workspace.id}' is open in window '$targetWindowId', but the terminal " +
-                            "tab it asked for could not be opened; call open_terminal to retry.",
-                        isError = true,
-                    )
+            val outcome = doOpenTerminal(targetWindowId, workspace.id, workspace.projectPath, command = null)
+            if (outcome is TerminalOpenOutcome.Opened) {
+                terminalInfo = outcome.info
+            } else {
+                return McpToolResult(
+                    "Workspace '${workspace.id}' is open in window '$targetWindowId', but the terminal " +
+                        "tab it asked for could not be opened; call open_terminal to retry.",
+                    isError = true,
+                )
+            }
         }
 
         val resultObj =
@@ -652,7 +689,7 @@ object WorkspaceMcpToolProvider : McpToolProvider {
      * (`run_in_panel` and friends). Re-opening a path that is already running re-enters the
      * Space instead of minting a duplicate (see [matchExistingSpace]).
      */
-    @Suppress("ReturnCount")
+    @Suppress("ReturnCount", "LongMethod") // Keep target-window and Space apply decisions in one path.
     private suspend fun openWorkspaceByPath(
         rawPath: String,
         requestedWindowId: String?,
@@ -662,14 +699,18 @@ object WorkspaceMcpToolProvider : McpToolProvider {
             pathCheck.canonicalPath
                 ?: return McpToolResult(pathCheck.error ?: "Invalid path: $rawPath", isError = true)
 
-        val targetResolution = resolveTargetWindow(requestedWindowId)
-        val targetWindowId =
-            when (targetResolution) {
-                is TargetWindowResolution.Success -> targetResolution.windowId
-                is TargetWindowResolution.Failure -> return McpToolResult(targetResolution.errorMessage, isError = true)
+        val (targetWindowId, targetIsColdStart) =
+            when (val resolution = resolveTargetWindow(requestedWindowId)) {
+                is TargetWindowResolution.Success -> {
+                    resolution.windowId to resolution.isColdStart
+                }
+
+                is TargetWindowResolution.Failure -> {
+                    return McpToolResult(resolution.errorMessage, isError = true)
+                }
             }
         val splitViewState =
-            awaitSplitViewState(targetWindowId)
+            awaitSplitViewState(targetWindowId, splitViewWaitTimeoutFor(targetIsColdStart))
                 ?: return McpToolResult(
                     "Window '$targetWindowId' did not register its UI state in time; retry.",
                     isError = true,
@@ -705,7 +746,16 @@ object WorkspaceMcpToolProvider : McpToolProvider {
 
         // applyWorkspace awaits the tab types this layout needs (terminal among them), so the
         // check below is a verification of that wait, not a race against plugin registration.
-        switchWindowToSpace(splitViewState, WindowProjectStateRegistry.getOrCreate(targetWindowId), space)
+        if (
+            !switchWindowToSpace(splitViewState, WindowProjectStateRegistry.getOrCreate(targetWindowId), space)
+        ) {
+            return McpToolResult(
+                "The Space for '$projectPath' could not be applied - none of its tabs can be " +
+                    "built. The plugin that provides its tab types may have been removed; the " +
+                    "window was left on whatever it was already showing.",
+                isError = true,
+            )
+        }
 
         if (!splitViewState.tabRegistry.isRegistered(TerminalTabType.typeId)) {
             return McpToolResult(
@@ -752,23 +802,35 @@ object WorkspaceMcpToolProvider : McpToolProvider {
     }
 
     /**
-     * Preserve, load, apply: the same three steps the Space switcher takes, so re-entering a
+     * Preserve, apply, load: the same three steps the Space switcher takes, so re-entering a
      * previously running Space restores its preserved tree when the window holds one.
+     *
+     * @return false when the apply was refused - the window is left showing whatever it showed
+     *   before, and the manager is left pointing at it too, rather than at a Space that was
+     *   never applied.
      */
     private suspend fun switchWindowToSpace(
         splitViewState: SplitViewState,
         windowProjectState: WindowProjectState,
         space: LayoutWorkspace,
-    ) {
+    ): Boolean =
         withContext(Dispatchers.Main) {
             val currentWorkspace = workspaceManager.currentWorkspace.value
-            if (currentWorkspace != null && currentWorkspace.id.isNotEmpty()) {
-                splitViewState.preserveCurrentState(currentWorkspace.id, currentWorkspace.name)
+            val leavingId = currentWorkspace?.id?.takeIf { it.isNotEmpty() }
+            if (leavingId != null) {
+                splitViewState.preserveCurrentState(leavingId, currentWorkspace?.name.orEmpty())
             }
-            workspaceManager.loadWorkspace(space)
-            applyWorkspace(space, splitViewState, windowProjectState, restoreProject = true)
+            if (applyWorkspace(space, splitViewState, windowProjectState, restoreProject = true)) {
+                workspaceManager.loadWorkspace(space)
+                true
+            } else {
+                if (leavingId != null) {
+                    splitViewState.restorePreservedState(leavingId)
+                    splitViewState.discardPreservedState(leavingId)
+                }
+                false
+            }
         }
-    }
 
     /**
      * Drop the remembered bootstrap Spaces of windows that no longer exist. A window is alive
@@ -919,26 +981,70 @@ object WorkspaceMcpToolProvider : McpToolProvider {
             canonicalWorkingDirectory = check.canonicalPath
         }
 
-        val targetResolution = resolveTargetWindow(requestedWindowId)
-        val targetWindowId =
-            when (targetResolution) {
+        val (targetWindowId, targetIsColdStart) =
+            when (val resolution = resolveTargetWindow(requestedWindowId)) {
                 is TargetWindowResolution.Success -> {
-                    targetResolution.windowId
+                    resolution.windowId to resolution.isColdStart
                 }
 
                 is TargetWindowResolution.Failure -> {
-                    return McpToolResult(targetResolution.errorMessage, isError = true)
+                    return McpToolResult(resolution.errorMessage, isError = true)
                 }
             }
 
-        val terminalInfo =
-            doOpenTerminal(targetWindowId, workspaceId, canonicalWorkingDirectory, command)
-                ?: return McpToolResult(
-                    "Failed to open terminal in window $targetWindowId",
+        return doOpenTerminal(
+            targetWindowId,
+            workspaceId,
+            canonicalWorkingDirectory,
+            command,
+            splitViewWaitTimeoutFor(targetIsColdStart),
+        ).toResult()
+    }
+
+    /**
+     * The tool's reply: a mounted tab's info, or an error that says which kind of no it was.
+     * A slow register is retryable and says so; a mount failure is not, and must not wear the
+     * same message - "Failed" alone used to send agents away from a window that was simply
+     * still starting.
+     */
+    private fun TerminalOpenOutcome.toResult(): McpToolResult =
+        when (this) {
+            is TerminalOpenOutcome.Opened -> {
+                McpToolResult(info.toString())
+            }
+
+            is TerminalOpenOutcome.WindowNotReady -> {
+                McpToolResult(
+                    "Timed out after ${waitedMs}ms waiting for window '$windowId' " +
+                        "to become ready; the window may still be starting - retry the request.",
                     isError = true,
                 )
+            }
 
-        return McpToolResult(terminalInfo.toString())
+            is TerminalOpenOutcome.TabOpenFailed -> {
+                McpToolResult(
+                    "Failed to open terminal in window $windowId",
+                    isError = true,
+                )
+            }
+        }
+
+    /** Result of mounting a terminal tab, so a caller can say WHY an open did not happen. */
+    internal sealed class TerminalOpenOutcome {
+        data class Opened(
+            val info: JsonObject,
+        ) : TerminalOpenOutcome()
+
+        /** The window's UI state never registered inside [waitedMs] - a slow start, retryable. */
+        data class WindowNotReady(
+            val windowId: String,
+            val waitedMs: Long,
+        ) : TerminalOpenOutcome()
+
+        /** The window was ready but no terminal tab could be mounted. */
+        data class TabOpenFailed(
+            val windowId: String,
+        ) : TerminalOpenOutcome()
     }
 
     /**
@@ -961,42 +1067,47 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         workspaceId: String?,
         workingDirectory: String?,
         command: String?,
-    ): JsonObject? {
+        stateWaitTimeoutMs: Long = splitViewWaitTimeoutMs,
+    ): TerminalOpenOutcome {
         val effectiveCwd = workingDirectory ?: DefaultWorkingDirectory.nominalPath()
 
         val mountedTab =
             terminalTabOpener?.invoke(windowId, command, effectiveCwd) ?: run {
-                val splitViewState = awaitSplitViewState(windowId) ?: return null
+                val splitViewState =
+                    awaitSplitViewState(windowId, stateWaitTimeoutMs)
+                        ?: return TerminalOpenOutcome.WindowNotReady(windowId, stateWaitTimeoutMs)
                 withContext(Dispatchers.Main) {
                     splitViewState.tabRegistry.awaitTabTypes(setOf(TerminalTabType.typeId))
                     splitViewState.openTerminalInActivePanelNow(command, effectiveCwd)
                 }
-            } ?: return null
+            } ?: return TerminalOpenOutcome.TabOpenFailed(windowId)
 
         DashboardStatsManager.recordTerminalSession()
 
         val tabId = mountedTab.id
-        // openTerminalInActivePanelNow mints ids as "terminal-<timestamp>" (the only path this
+        // openTerminalInActivePanelNow mints ids as "terminal-<millis>-<entropy>" (the only path this
         // tool uses in production); the terminal's addressing keys on the part after the prefix.
         val terminalId = tabId.removePrefix("terminal-")
 
-        return buildJsonObject {
-            put("success", true)
-            put("tabId", tabId)
-            put("terminalId", terminalId)
-            put("windowId", windowId)
-            if (workspaceId != null) {
-                put("workspaceId", workspaceId)
-            }
-            put("workingDirectory", effectiveCwd)
-            if (command != null) {
-                put("command", command)
-            }
-            put("openedDirectly", true)
-        }
+        return TerminalOpenOutcome.Opened(
+            buildJsonObject {
+                put("success", true)
+                put("tabId", tabId)
+                put("terminalId", terminalId)
+                put("windowId", windowId)
+                if (workspaceId != null) {
+                    put("workspaceId", workspaceId)
+                }
+                put("workingDirectory", effectiveCwd)
+                if (command != null) {
+                    put("command", command)
+                }
+                put("openedDirectly", true)
+            },
+        )
     }
 
-    @Suppress("ReturnCount")
+    @Suppress("ReturnCount", "CyclomaticComplexMethod")
     private suspend fun handleCloseWorkspace(args: McpToolArgs): McpToolResult {
         val workspaceId = args.string("workspaceId")
         if (workspaceId.isNullOrBlank()) {
@@ -1021,9 +1132,12 @@ object WorkspaceMcpToolProvider : McpToolProvider {
                 }
             } else {
                 // Read-only targeting, the same rule list_workspaces uses: closing a workspace
-                // must never mint a window. With exactly one registered window it is the only
-                // possible target; with none or several there is nothing safe to close in.
-                SplitViewStateRegistry.getAllStates().keys.singleOrNull()
+                // must never mint a window. Exactly one registered window is the only possible
+                // target; with none there is nothing to close in, though the disposable-file
+                // delete below can still run.
+                val openWindowIds = SplitViewStateRegistry.getAllStates().keys
+                ambiguousWindowError(workspaceId, openWindowIds)?.let { return it }
+                openWindowIds.singleOrNull()
             }
 
         // Stop the Space where it is running: clears its tabs and drops any preserved copy,
@@ -1044,10 +1158,13 @@ object WorkspaceMcpToolProvider : McpToolProvider {
         }
 
         // Saying "success" when neither happened leaves the agent unable to tell "closed"
-        // from "that id does not exist anywhere".
+        // from "that id does not exist anywhere". Zero registered windows is said plainly so
+        // the agent knows there is no windowId it could pass - "(none)" alone read like a
+        // missing target.
         if (!releasedHere && !fileDeleted) {
+            val where = targetWindowId?.let { "in window '$it'" } ?: "in any window (none are open)"
             return McpToolResult(
-                "Workspace '$workspaceId' is not running in window '${targetWindowId ?: "(none)"}' " +
+                "Workspace '$workspaceId' is not running $where " +
                     "and has no disposable file to delete; nothing was closed.",
                 isError = true,
             )
@@ -1065,6 +1182,25 @@ object WorkspaceMcpToolProvider : McpToolProvider {
             }
 
         return McpToolResult(response.toString())
+    }
+
+    /**
+     * The actionable refusal for a `close_workspace` call that named no `windowId` while
+     * several windows are open. Ambiguity used to collapse to a null target and surface only
+     * as a generic "nothing was closed", which an agent cannot act on - the error names the
+     * candidates so the caller can retry with one, and nothing has been changed when it fires.
+     * Returns null when zero or one window is open, where targeting is unambiguous.
+     */
+    private fun ambiguousWindowError(
+        workspaceId: String,
+        openWindowIds: Set<String>,
+    ): McpToolResult? {
+        if (openWindowIds.size <= 1) return null
+        return McpToolResult(
+            "Multiple windows are open (${openWindowIds.joinToString(", ")}); " +
+                "pass 'windowId' to choose which window to close '$workspaceId' in.",
+            isError = true,
+        )
     }
 
     /**
