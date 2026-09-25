@@ -2,6 +2,7 @@ package ai.rever.boss.components.dialogs
 
 import ai.rever.boss.mcp.McpApprovalRequest
 import ai.rever.boss.mcp.McpMutatingToolCatalog
+import ai.rever.boss.mcp.McpPolicyAction
 import ai.rever.boss.mcp.secrets.SecretDescriptor
 import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.ui.BossTheme
@@ -200,6 +201,7 @@ fun McpApprovalDialog(
     onApprove: (trustForSession: Boolean, persistPolicy: Boolean, trustProvider: Boolean) -> Unit,
     onDeny: (reason: String, persistPolicy: Boolean) -> Unit,
     onDenyAllPending: () -> Unit = {},
+    unresolvedLegacyRules: Map<String, McpPolicyAction> = emptyMap(),
 ) {
     val colors = BossTheme.colors
     val radii = BossTheme.radius
@@ -273,6 +275,11 @@ fun McpApprovalDialog(
                                 .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 16.dp),
                     ) {
                         ToolDetails(request)
+
+                        UnresolvedLegacyRuleBanner(
+                            providerId = request.providerId,
+                            unresolvedLegacyRules = unresolvedLegacyRules,
+                        )
 
                         // What the tool would be handed from the vault. Metadata only - the request
                         // carries descriptors, never values - and above the risk line because it is
