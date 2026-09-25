@@ -13,6 +13,7 @@ import kotlinx.serialization.json.put
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.Path
 
 /**
  * Static project-type detector.
@@ -393,14 +394,29 @@ class ProjectDetector {
             tree
                 .filter { it.isFile && it.name == "Cargo.toml" }
                 .map { it.parentFile.toPath() }
-        val testDirectories = tree.filter { it.isDirectory && it.name == "tests" }
-        val hasCargoTests =
-            cargoProjects.any { project ->
-                testDirectories.any { it.toPath().startsWith(project) }
-            }
+                .toSet()
+        val testDirectories = tree.filter { it.isDirectory && it.name == "tests" }.map { it.toPath() }
+        val hasCargoTests = findCargoTests(cargoProjects, testDirectories).first
         if (hasCargoTests) {
             contributions.getOrPut("testFrameworks") { mutableSetOf() }.add("Cargo test")
         }
+    }
+
+    /** Check test directories against their ancestors, bounded by scan depth rather than crate count. */
+    internal fun findCargoTests(
+        cargoProjects: Set<Path>,
+        testDirectories: List<Path>,
+    ): Pair<Boolean, Int> {
+        var ancestorChecks = 0
+        for (directory in testDirectories) {
+            var ancestor: Path? = directory
+            while (ancestor != null) {
+                ancestorChecks++
+                if (ancestor in cargoProjects) return true to ancestorChecks
+                ancestor = ancestor.parent
+            }
+        }
+        return false to ancestorChecks
     }
 
     private fun sorted(set: MutableSet<String>?): List<String> = set?.sorted() ?: emptyList()

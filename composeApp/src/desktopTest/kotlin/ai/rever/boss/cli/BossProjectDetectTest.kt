@@ -307,6 +307,19 @@ class BossProjectDetectTest {
     }
 
     @Test
+    fun `cargo test lookup stays within a per-directory ancestor budget for many crates`() {
+        val root = File("workspace").toPath()
+        val cargoProjects = (1..2_000).map { root.resolve("crate$it") }.toSet()
+        val testDirectories = (1..2_000).map { root.resolve("other$it/tests") }
+
+        val (found, checks) = detector.findCargoTests(cargoProjects, testDirectories)
+
+        assertFalse(found)
+        assertTrue(checks <= testDirectories.size * 3, "unexpected Cargo lookup work: $checks checks")
+        assertTrue(detector.findCargoTests(cargoProjects, listOf(root.resolve("crate2/tests"))).first)
+    }
+
+    @Test
     fun `malformed and oversized package manifests do not fail detection`() {
         val root = tempDir()
         writeFile(root, "package.json", "{invalid")
