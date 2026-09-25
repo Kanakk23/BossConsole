@@ -1,5 +1,6 @@
 package ai.rever.boss.dashboard
 
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -36,10 +37,9 @@ class DashboardStatsScheduleTest {
         // increments while the file is still empty, and the delta vs. an empty `before`
         // over-counts. resetStats() schedules a save, but the first recordSave below cancels
         // it; the next save to land is the one carrying the test's own 50 increments.
+        runBlocking { DashboardStatsManager.awaitInitialLoadForTesting() }
         DashboardStatsManager.resetStats()
         tempFile.delete()
-        DashboardStatsManager.stats.value
-        Thread.sleep(500L)
         val before = read()
 
         val calls = 50

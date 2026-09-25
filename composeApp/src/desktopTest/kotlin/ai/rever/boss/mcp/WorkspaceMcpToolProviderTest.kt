@@ -969,6 +969,9 @@ class WorkspaceMcpToolProviderTest {
             val result = core.invoke("close_workspace", """{"workspaceId":"no-such-space"}""")
             assertTrue(result.isError)
             assertTrue(result.text.contains("nothing was closed"), result.text)
+            // Zero registered windows is said plainly so the agent knows there is no
+            // windowId it could pass - "(none)" alone read like a missing target.
+            assertTrue(result.text.contains("none are open"), result.text)
         }
 
     // ------------------------------------------------------------------
@@ -1387,6 +1390,86 @@ class WorkspaceMcpToolProviderTest {
             assertFalse(closeResult.isError, closeResult.text)
             val json = Json.parseToJsonElement(closeResult.text).jsonObject
             assertTrue(json["releasedHere"]?.jsonPrimitive?.booleanOrNull == true, closeResult.text)
+        }
+
+    @Test
+    fun `close_workspace without windowId closes in the single open window`() =
+        runBlocking {
+            val windowId = "ws-close-sole-window"
+            val state = SplitViewState(stubTabRegistry, windowId)
+            createdSplitViewStates.add(state)
+            SplitViewStateRegistry.register(windowId, state)
+
+            val core = createTestCore()
+            val openResult =
+                core.invoke(
+                    "open_workspace",
+                    """{"workspaceId":"${PredefinedWorkspaces.DUAL_TERMINAL_ID}","windowId":"$windowId"}""",
+                )
+            assertFalse(openResult.isError, openResult.text)
+
+            // One window is the only possible target, so no windowId is needed - the call
+            // used to work here and must keep working.
+            val closeResult =
+                core.invoke(
+                    "close_workspace",
+                    """{"workspaceId":"${PredefinedWorkspaces.DUAL_TERMINAL_ID}"}""",
+                )
+            assertFalse(closeResult.isError, closeResult.text)
+            val json = Json.parseToJsonElement(closeResult.text).jsonObject
+            assertTrue(json["releasedHere"]?.jsonPrimitive?.booleanOrNull == true, closeResult.text)
+        }
+
+    @Test
+    fun `close_workspace without windowId names the open windows when it cannot pick one`() =
+        runBlocking {
+            val first = SplitViewState(stubTabRegistry, "ws-close-window-a")
+            val second = SplitViewState(stubTabRegistry, "ws-close-window-b")
+            createdSplitViewStates.add(first)
+            createdSplitViewStates.add(second)
+            SplitViewStateRegistry.register("ws-close-window-a", first)
+            SplitViewStateRegistry.register("ws-close-window-b", second)
+
+            val core = createTestCore()
+            val closeResult =
+                core.invoke(
+                    "close_workspace",
+                    """{"workspaceId":"${PredefinedWorkspaces.DUAL_TERMINAL_ID}"}""",
+                )
+
+            // Ambiguous targeting used to surface as a generic "nothing was closed" - an
+            // agent cannot act on that. The error must name the candidates to retry with.
+            assertTrue(closeResult.isError, closeResult.text)
+            assertTrue(closeResult.text.contains("ws-close-window-a"), closeResult.text)
+            assertTrue(closeResult.text.contains("ws-close-window-b"), closeResult.text)
+            assertTrue(closeResult.text.contains("windowId"), closeResult.text)
+        }
+
+    @Test
+    fun `close_workspace ambiguity leaves a disposable file untouched`(): Unit =
+        runBlocking {
+            val first = SplitViewState(stubTabRegistry, "ws-close-disposable-a")
+            val second = SplitViewState(stubTabRegistry, "ws-close-disposable-b")
+            createdSplitViewStates.add(first)
+            createdSplitViewStates.add(second)
+            SplitViewStateRegistry.register("ws-close-disposable-a", first)
+            SplitViewStateRegistry.register("ws-close-disposable-b", second)
+
+            val core = createTestCore()
+            val created = core.invoke("create_workspace", """{"isDisposable":true}""")
+            assertFalse(created.isError, created.text)
+            val workspaceId =
+                Json
+                    .parseToJsonElement(created.text)
+                    .jsonObject["workspaceId"]!!
+                    .jsonPrimitive.content
+            val fileName = WorkspaceFileManagerCommon.fileNameForId(workspaceId)
+            assertNotNull(fileManager.loadWorkspace(fileName))
+
+            val refused = core.invoke("close_workspace", """{"workspaceId":"$workspaceId"}""")
+            assertTrue(refused.isError, refused.text)
+            assertTrue(refused.text.contains("windowId"), refused.text)
+            assertNotNull(fileManager.loadWorkspace(fileName), "an ambiguous close must not delete the file")
         }
 
     @Test

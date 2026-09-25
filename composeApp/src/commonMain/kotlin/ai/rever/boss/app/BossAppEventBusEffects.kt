@@ -1164,7 +1164,26 @@ internal fun BossAppEventBusEffects(state: BossAppState) {
             .filter { event -> event.sourceWindowId == windowId }
             .onEach { event ->
                 // sourceWindowId is required, so we already filtered to the correct window
-                splitViewState.openUrlInActivePanel(event.url, event.title)
+                if (event.requiresConfirmation) {
+                    // Show the operator the URL and let them decide; the
+                    // prompt in BossAppDialogs opens the tab on confirm.
+                    val request = PendingUrlOpen(event.url, event.title)
+                    if (state.urlOpenApprovals.enqueue(request)) {
+                        logger.info(
+                            LogCategory.BROWSER,
+                            "Holding an externally requested URL for confirmation",
+                            mapOf("windowId" to windowId),
+                        )
+                    } else {
+                        logger.warn(
+                            LogCategory.BROWSER,
+                            "External URL open refused: approval queue full",
+                            mapOf("windowId" to windowId),
+                        )
+                    }
+                } else {
+                    splitViewState.openUrlInActivePanel(event.url, event.title)
+                }
             }.launchIn(this)
 
         // Observe tab count AND processing state (URLs + Terminals + Files + Workspace Restoration) reactively
