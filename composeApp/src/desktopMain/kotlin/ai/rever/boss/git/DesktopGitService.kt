@@ -44,6 +44,10 @@ private class GitCloneTimeoutContext(
     companion object Key : CoroutineContext.Key<GitCloneTimeoutContext>
 }
 
+/** Builds the shell command used by [GitService.runInTerminal] without touching shared state. */
+internal fun buildGitTerminalCommand(args: List<String>): String =
+    args.joinToString(" ", prefix = "git ") { CommandProcessor.quotePath(it) }
+
 /**
  * Desktop implementation of GitService using git CLI.
  *
@@ -1165,7 +1169,7 @@ actual object GitService {
         // Every argument lands in a SHELL command string, so each is quoted the same way
         // mergeInTerminal/rebaseInTerminal quote the ref - a bare join would let `;`, `|`
         // or `$()` in any argument become live shell for whichever caller arrives first.
-        val command = args.joinToString(" ", prefix = "git ") { CommandProcessor.quotePath(it) }
+        val command = buildGitTerminalCommand(args.asList())
         GitTerminalEventBus.openGitTerminal(
             command = command,
             workingDirectory = projectPath,
