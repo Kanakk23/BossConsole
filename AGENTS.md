@@ -743,6 +743,19 @@ logger.error(LogCategory.NETWORK, "Request failed", error = exception)
 
 **Config**: Set `BOSS_LOG_LEVEL` env var or `boss.log.level` system property (TRACE/DEBUG/INFO/WARN/ERROR)
 
+**Log file**: off unless asked for. `BOSS_LOG_FILE=/path/to/boss.log` (or `boss.log.file`) turns on a
+size-rotated file (10 MB, five backups) that receives entries at `BOSS_LOG_FILE_LEVEL` (or
+`boss.log.file.level`) and above, default ERROR. `BOSS_LOG_FILE=off` or a level of `OFF` disables it even if a
+default is ever switched on. The file threshold is applied after the console level, so it can only narrow: with the
+console at INFO and the file at DEBUG, the file gets INFO. Blank is unset at every step, an
+unrecognised level falls through to the next source rather than to INFO. File and console receive the same
+entries; callers must use `LogSanitizer` before logging sensitive data, since `BossLogger` does not sanitize them.
+`BossLogger.configureFromEnvironment()` in
+`main.kt` is the only host entry point; `configure()` has no host caller. Flipping
+`FILE_LOGGING_ON_BY_DEFAULT` in `BossLogger` makes it default-on at `~/.boss/logs/boss.log` for every
+install; that switch is deliberately one constant, because whether to default on was raised on #394 and
+is a policy call.
+
 ## Browser native disposal
 
 `BrowserHandleImpl.dispose()` invalidates the handle and detaches its UI, then
@@ -2487,6 +2500,15 @@ update it with the pinned distribution checksum and scaffold validation together
 - `atomicWriteText` pins POSIX files to 0600. The separate `writeModeFile` writer for `env_vars` preserves existing permissions; that rule does not apply to all state writers.
 - Chromium's constructed GitHub backup URL uses the catalog checksum. Primary and backup must contain identical artifact bytes; checksum mismatch fails closed. See `docs/dev-935-release-checklist.md` for deployment checks.
 - Browser print is a direct-native exception to the usual AWT ownership rule after macOS manual verification. Pending AWT cancellation is best-effort, not a cross-thread exactly-once guarantee; do not copy this pattern for destructive actions.
+
+## Recent-page loads respect dismissal
+
+RecentBrowserPagesManager registers a load ticket before launching startup IO. Clear and removal
+predicates update that ticket alongside the in-memory mutation; publication filters only loaded
+rows, preserving newer recorded visits. Keep the guard lock away from disk IO and pass the same
+ticket through browser-history bootstrap. Release tickets after loading; they are transient
+startup coordination, not permanent URL tombstones. Tests using the singleton must await its
+initial load, drain writes, and restore both page/dismissal flows before restoring settingsFile.
 
 ### Run scan publication ownership
 
