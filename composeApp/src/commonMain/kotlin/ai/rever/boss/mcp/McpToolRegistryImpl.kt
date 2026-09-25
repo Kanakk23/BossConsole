@@ -484,8 +484,7 @@ fun McpToolArgs.withExecutionObject(obj: Any): McpToolArgs {
 }
 
 @Suppress("UNCHECKED_CAST")
-fun <T> McpToolArgs.executionObject(): T? =
-    executionObjects[this] as? T
+fun <T> McpToolArgs.executionObject(): T? = executionObjects[this] as? T
 
 /** The outcome of a host-side preparation hook. */
 sealed interface McpPreparationResult {
