@@ -47,3 +47,17 @@ Passkey and BOSS AI can deploy independently after their migrations pass.
 
 Health and refusal probes do not substitute for a real browser Google consent
 flow or an interactive passkey login. Those require the account holder.
+
+## Production result (2026-09-25)
+
+- Applied `20260924230000`, `20260924231000`, and `20260925080000`.
+  A subsequent dry run reports no pending migrations. No seeds or roles applied.
+- Verified all three new/hardened RPCs allow `service_role` execution and deny
+  both `anon` and `authenticated` execution.
+- Deployed BOSS AI v43 and passkey v130; both report ACTIVE with their intended
+  internal authentication (`verify_jwt=false`).
+- Post-deployment checks: passkey health 200; unauthenticated AI model listing
+  and token minting both 401; existing OAuth health 200 and invalid callback 400.
+- Fluck OAuth remains on v7, intentionally not deployed until `FLUCK_USER_ID`
+  is supplied. Its new code is tested and pushed, but its production hardening
+  is not complete. Do not interpret this partial rollout as release approval.
