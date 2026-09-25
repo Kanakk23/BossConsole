@@ -45,6 +45,8 @@ class McpLedgerCliTest {
         toolName: String,
         disposition: McpApprovalDisposition = McpApprovalDisposition.AUTO_ALLOWED,
         isError: Boolean = false,
+        secretRefs: List<String> = emptyList(),
+        escalated: Boolean = false,
     ) {
         ledger.record(
             toolName = toolName,
@@ -54,7 +56,11 @@ class McpLedgerCliTest {
             durationMs = 7L,
             isError = isError,
             rawArgs = mapOf("path" to "/project"),
+            secretRefs = secretRefs,
+            escalated = escalated,
         )
+        // Persistence is asynchronous: drain the writer so file asserts below see it.
+        assertTrue(ledger.awaitIdle(), "ledger writer never drained")
     }
 
     private fun okText(outcome: McpLedgerOutcome): String = assertIs<McpLedgerOutcome.Ok>(outcome).text
@@ -155,6 +161,58 @@ class McpLedgerCliTest {
 
         assertTrue(human.contains("tool_9"), "newest record must be shown: $human")
         assertTrue(human.contains("Showing 3 of 10 matching records."), "truncation must be stated: $human")
+    }
+
+    @Test
+    fun `tail exports secret references in human and JSON audit output`() {
+        val file = createTempLedgerFile()
+        val ledger = McpOperationLedger(ledgerFile = file)
+        val reference = "6f1d2c3e-4b5a-4c6d-8e7f-90a1b2c3d4e5.password"
+        record(ledger, "write", secretRefs = listOf(reference))
+
+        val human = okText(McpLedgerCli.tail(file.absolutePath, 1, McpLedgerQuery(), json = false))
+        val json = okText(McpLedgerCli.tail(file.absolutePath, 1, McpLedgerQuery(), json = true))
+        val exported =
+            Json
+                .parseToJsonElement(json)
+                .jsonObject
+                .getValue("records")
+                .jsonArray
+                .single()
+                .jsonObject
+                .getValue("secretRefs")
+                .jsonArray
+                .single()
+                .jsonPrimitive
+                .content
+
+        assertTrue(human.contains("secrets: $reference"), human)
+        assertEquals(reference, exported)
+    }
+
+    @Test
+    fun `tail shows which calls were escalated in human and JSON audit output`() {
+        val file = createTempLedgerFile()
+        val ledger = McpOperationLedger(ledgerFile = file)
+        record(ledger, "run_command", disposition = McpApprovalDisposition.YOLO_ALLOWED, escalated = true)
+        record(ledger, "run_command", disposition = McpApprovalDisposition.YOLO_ALLOWED)
+
+        val human = okText(McpLedgerCli.tail(file.absolutePath, 2, McpLedgerQuery(), json = false))
+        val json = okText(McpLedgerCli.tail(file.absolutePath, 2, McpLedgerQuery(), json = true))
+        val flags =
+            Json
+                .parseToJsonElement(json)
+                .jsonObject
+                .getValue("records")
+                .jsonArray
+                .map {
+                    it.jsonObject
+                        .getValue("escalated")
+                        .jsonPrimitive.content
+                }
+
+        assertEquals(1, Regex("escalated:").findAll(human).count(), human)
+        assertEquals(listOf("false", "true").sorted(), flags.sorted())
     }
 
     @Test

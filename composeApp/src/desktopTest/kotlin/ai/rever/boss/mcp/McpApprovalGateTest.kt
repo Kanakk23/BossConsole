@@ -1,7 +1,6 @@
 package ai.rever.boss.mcp
 
 import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
@@ -64,7 +63,7 @@ class McpApprovalGateTest {
         }
 
     @Test
-    fun `an approval request carries the tool description, policy, and remaining timeout to the dialog`() =
+    fun `an approval request carries the tool description, policy, and remaining timeout to the dialog`(): Unit =
         runBlocking {
             val bus = McpApprovalBus(defaultTimeoutMs = 5_000L)
 
@@ -92,7 +91,7 @@ class McpApprovalGateTest {
         }
 
     @Test
-    fun `requestApproval times out and fails closed if operator does not respond`() =
+    fun `requestApproval times out and fails closed if operator does not respond`(): Unit =
         runBlocking {
             // Fast timeout of 50ms for testing
             val bus = McpApprovalBus(defaultTimeoutMs = 50L)
@@ -134,16 +133,16 @@ class McpApprovalGateTest {
         }
 
     @Test
-    fun `exceeding pending buffer capacity immediately returns Denied buffer full`() =
+    fun `exceeding pending buffer capacity immediately returns Denied buffer full`(): Unit =
         runBlocking {
             val bus = McpApprovalBus(defaultTimeoutMs = 10_000L, maxPendingRequests = 2)
 
             val d1 = async { bus.requestApproval("tool_1", "p1", emptyMap()) }
             val d2 = async { bus.requestApproval("tool_2", "p1", emptyMap()) }
 
-            // Wait for both to be pending
-            delay(50)
-            assertEquals(2, bus.pendingList.value.size)
+            // Wait for both to be pending: the same deterministic barrier the deny-all test uses,
+            // rather than a sleep that only holds while the machine is idle.
+            bus.pendingList.first { it.size == 2 }
 
             // Third request exceeds capacity (2)
             val overflowDecision = bus.requestApproval("tool_3", "p1", emptyMap())
@@ -158,7 +157,7 @@ class McpApprovalGateTest {
         }
 
     @Test
-    fun `deny all rejects exactly the visible snapshot without persisting policy`() =
+    fun `deny all rejects exactly the visible snapshot without persisting policy`(): Unit =
         runBlocking {
             val bus = McpApprovalBus(defaultTimeoutMs = 10_000L, maxPendingRequests = 4)
             val first = async { bus.requestApproval("tool_1", "provider-a", emptyMap()) }

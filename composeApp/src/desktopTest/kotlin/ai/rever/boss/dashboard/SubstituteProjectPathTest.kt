@@ -41,7 +41,7 @@ class SubstituteProjectPathTest {
     }
 
     @Test
-    fun leavesAlreadyDoubleQuotedTemplateRaw() {
+    fun leavesAlreadyDoubleQuotedTemplateInItsQuoteRegion() {
         // A user who worked around the bug with cd "{projectPath}" must NOT get cd "'…'".
         assertEquals(
             "cd \"$spaced\"",
@@ -50,9 +50,9 @@ class SubstituteProjectPathTest {
     }
 
     @Test
-    fun leavesAlreadySingleQuotedTemplateRaw() {
+    fun escapesApostrophesInAlreadySingleQuotedTemplate() {
         assertEquals(
-            "cd '$spaced'",
+            "cd '${CommandProcessor.escapeInsideQuote(spaced, '\'')}'",
             WorkspacePlaceholders.substituteProjectPath("cd '{projectPath}'", spaced, quote = true),
         )
     }
@@ -98,28 +98,45 @@ class SubstituteProjectPathTest {
         }
     }
 
-    /**
-     * Regression test for issue #1181.
-     *
-     * The command separator " && " should be normalized before the project path
-     * is substituted. Otherwise a literal " && " inside a Windows project path
-     * would also be normalized and corrupted.
-     */
     @Test
-    fun preservesAndInsideWindowsProjectPath() {
-        val projectPath = """C:\Work && Projects\demo"""
-        val separator = CommandProcessor.normalizeCommand(" && ")
-
-        val result =
+    fun projectPathContainingAmpersandsSurvivesSubstitutionAndNormalization() {
+        val ampersandPath =
+            if (ai.rever.boss.run.ShellUtils.isWindows) {
+                """C:\Users\foo\A && B\proj"""
+            } else {
+                "/Users/foo/A && B/proj"
+            }
+        val quotedAmpersand = CommandProcessor.quotePath(ampersandPath)
+        val expected =
+            if (ai.rever.boss.run.ShellUtils.isWindows) {
+                "cd $quotedAmpersand; claude"
+            } else {
+                "cd $quotedAmpersand && claude"
+            }
+        assertEquals(
+            expected,
             WorkspacePlaceholders.processPlaceholders(
                 "cd {projectPath} && claude",
-                projectPath,
+                ampersandPath,
                 quoteProjectPath = true,
-            )
+            ),
+        )
+    }
 
+    @Test
+    fun normalizeCommandPreservesAmpersandsInsideQuotedStrings() {
+        if (!ai.rever.boss.run.ShellUtils.isWindows) return
         assertEquals(
-            "cd ${CommandProcessor.quotePath(projectPath)}${separator}claude",
-            result,
+            "cd 'C:\\A && B'; echo '1 && 2'",
+            CommandProcessor.normalizeCommand("cd 'C:\\A && B' && echo '1 && 2'"),
+        )
+        assertEquals(
+            "echo \"A && B\"; dir",
+            CommandProcessor.normalizeCommand("echo \"A && B\" && dir"),
+        )
+        assertEquals(
+            "cmd1&&cmd2",
+            CommandProcessor.normalizeCommand("cmd1&&cmd2"),
         )
     }
 }

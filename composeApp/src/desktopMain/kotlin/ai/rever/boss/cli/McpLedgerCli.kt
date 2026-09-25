@@ -324,6 +324,12 @@ internal object McpLedgerFormat {
                     append("  hash ")
                     append(record.hash?.take(12) ?: "unverifiable")
                     record.errorSnippet?.let { append("\n    error: ").append(it) }
+                    if (record.secretRefs.isNotEmpty()) {
+                        append("\n    secrets: ").append(record.secretRefs.joinToString())
+                    }
+                    if (record.escalated) {
+                        append("\n    escalated: rated CRITICAL, so a saved allow did not cover it")
+                    }
                 }
             }
         val footer =
@@ -401,6 +407,8 @@ internal object McpLedgerFormat {
                 },
             )
             put("errorSnippet", record.errorSnippet)
+            put("secretRefs", buildJsonArray { record.secretRefs.forEach { add(it) } })
+            put("escalated", record.escalated)
             put("hash", record.hash)
             put("parentHash", record.parentHash)
             put("file", entry.file.name)

@@ -1,18 +1,21 @@
-import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
-import type { PluginStoreContext } from "../types/context.ts"
+import { createRoute, z } from "@hono/zod-openapi"
 import {
   ListPluginsQuerySchema,
   SearchPluginsRequestSchema,
   PluginListResponseSchema,
   PluginDetailResponseSchema,
+  PopularTagsQuerySchema,
   PopularTagsResponseSchema,
   ErrorResponseSchema
 } from "../types/schemas.ts"
 import { listPlugins, searchPlugins, getPlugin, getPopularTags } from "../services/plugins.ts"
 import { getPluginVersions } from "../services/versions.ts"
 import { clientKey, rateLimit } from "../utils/rate-limit.ts"
+import { newRouter } from "../utils/router.ts"
 
-const browse = new OpenAPIHono<{ Variables: PluginStoreContext }>()
+// A request that fails its route's schema is answered by the router itself, before any handler
+// runs, with the ErrorResponseSchema 400 the routes below declare: see newRouter.
+const browse = newRouter()
 
 // Per-client limit on the anonymous catalogue routes (/list, /search,
 // /tags/popular): the same in-isolate token bucket the organisation function
@@ -52,6 +55,14 @@ const listRoute = createRoute({
       content: {
         'application/json': {
           schema: PluginListResponseSchema
+        }
+      }
+    },
+    400: {
+      description: 'Invalid page or pageSize',
+      content: {
+        'application/json': {
+          schema: ErrorResponseSchema
         }
       }
     },
@@ -166,7 +177,9 @@ const searchRoute = createRoute({
 browse.openapi(searchRoute, async (ctx) => {
   try {
     // search_plugins is ILIKE-backed, so an unthrottled anon client burns DB
-    // CPU per request; the limit is consumed before the query is parsed.
+    // CPU per request. The body has already been validated by the time this
+    // runs: a malformed one is refused by the hook above without reaching the
+    // limiter or the database.
     const limit = rateLimit(
       `catalogue:${clientKey(ctx.req.raw.headers)}`,
       CATALOGUE_LIMIT,
@@ -327,9 +340,8 @@ const popularTagsRoute = createRoute({
   summary: 'Get popular tags',
   description: 'Get the most used tags for filtering',
   request: {
-    query: z.object({
-      limit: z.string().optional().default('20').transform(Number)
-    })
+    // BossConsole#1253: see PopularTagsQuerySchema for why each bound is there.
+    query: PopularTagsQuerySchema
   },
   responses: {
     429: {
@@ -348,6 +360,14 @@ const popularTagsRoute = createRoute({
         }
       }
     },
+    400: {
+      description: 'Invalid limit',
+      content: {
+        'application/json': {
+          schema: ErrorResponseSchema
+        }
+      }
+    },
     500: {
       description: 'Internal server error',
       content: {
@@ -361,20 +381,23 @@ const popularTagsRoute = createRoute({
 
 browse.openapi(popularTagsRoute, async (ctx) => {
   try {
-    const limit = rateLimit(
+    // The query has already been validated by the time this runs, so `limit` is an integer in
+    // 1..POPULAR_TAGS_LIMIT_MAX: a value outside that is refused by the hook above, before the
+    // limiter and the database. The limiter's result is `gate`, so it cannot be mistaken for it.
+    const gate = rateLimit(
       `catalogue:${clientKey(ctx.req.raw.headers)}`,
       CATALOGUE_LIMIT,
       CATALOGUE_WINDOW_SECONDS,
     )
-    if (!limit.allowed) {
-      ctx.header("Retry-After", String(limit.retryAfterSeconds))
+    if (!gate.allowed) {
+      ctx.header("Retry-After", String(gate.retryAfterSeconds))
       return ctx.json({ error: 'Too many requests; try again later' }, 429)
     }
 
     const supabase = ctx.get("supabase")
-    const { limit: tagLimit } = ctx.req.valid('query')
+    const { limit } = ctx.req.valid('query')
 
-    const tags = await getPopularTags(supabase, tagLimit)
+    const tags = await getPopularTags(supabase, limit)
 
     return ctx.json({ tags }, 200)
   } catch (error) {

@@ -6,7 +6,9 @@ import ai.rever.boss.services.importer.browser.isImportableUrl
 /**
  * What [NetscapeBookmarkWriter.write] produced.
  *
- * @property collections folders written, one per collection, empty ones included
+ * @property sourceCollections collections at least one bookmark was written from, which is what
+ *   the status message reports. Every collection is still written as a folder, empty ones
+ *   included, so this can be less than the number of folders in [html].
  * @property bookmarks bookmarks written
  * @property skipped bookmarks left out because they are not web pages. A terminal or editor
  *   tab has no URL a browser could open, and a URL the importer refuses (a `javascript:`
@@ -14,7 +16,7 @@ import ai.rever.boss.services.importer.browser.isImportableUrl
  */
 data class NetscapeBookmarkFile(
     val html: String,
-    val collections: Int,
+    val sourceCollections: Int,
     val bookmarks: Int,
     val skipped: Int,
 )
@@ -45,6 +47,7 @@ object NetscapeBookmarkWriter {
     fun write(collections: List<BookmarkCollection>): NetscapeBookmarkFile {
         var bookmarks = 0
         var skipped = 0
+        var sources = 0
         val html =
             buildString {
                 HEADER.forEach(::appendLine)
@@ -53,6 +56,7 @@ object NetscapeBookmarkWriter {
                     append("    <DT><H3 ADD_DATE=\"").append(seconds(collection.createdAt)).append("\">")
                     append(escape(collection.name)).appendLine("</H3>")
                     appendLine("    <DL><p>")
+                    val before = bookmarks
                     for (bookmark in collection.bookmarks) {
                         val url = bookmark.tabConfig.url?.takeIf { isImportableUrl(it) }
                         if (url == null) {
@@ -64,11 +68,12 @@ object NetscapeBookmarkWriter {
                         append(escape(bookmark.tabConfig.title)).appendLine("</A>")
                         bookmarks++
                     }
+                    if (bookmarks > before) sources++
                     appendLine("    </DL><p>")
                 }
                 appendLine("</DL><p>")
             }
-        return NetscapeBookmarkFile(html, collections.size, bookmarks, skipped)
+        return NetscapeBookmarkFile(html, sourceCollections = sources, bookmarks = bookmarks, skipped = skipped)
     }
 
     /** Browsers read ADD_DATE as Unix seconds; BOSS stores milliseconds. */

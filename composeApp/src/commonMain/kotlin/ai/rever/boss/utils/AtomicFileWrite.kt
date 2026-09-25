@@ -1,14 +1,20 @@
 package ai.rever.boss.utils
 
+import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.LogCategory
 import java.io.File
 import java.io.IOException
 import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
+import java.nio.file.InvalidPathException
+import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 
 private val OWNER_ONLY_FILE_PERMISSIONS: Set<PosixFilePermission> =
     setOf(
@@ -92,15 +98,29 @@ private fun forceFileContentsToDisk(file: File) {
  * previously open-coded this dance with a FIXED temp name, which concurrent
  * writers could clobber.
  *
- * @param sync durability step run on the temp file just before it replaces
- * the target; injectable so tests can observe the flush ordering or refuse it.
+ * The parent directory is verified before use: a symlinked parent (or one swapped for a
+ * symlink between the check and the move) would redirect both the temp file and the
+ * destination wherever the link points, so the write refuses one outright and otherwise
+ * runs against the resolved real path.
  */
 fun File.atomicWriteText(
     text: String,
     sync: (File) -> Unit = ::forceFileContentsToDisk,
 ) {
-    parentFile?.mkdirs()
-    val tmp = File.createTempFile("$name.", ".tmp", parentFile)
+    val parent = verifiedWriteParent()
+    val tmp =
+        try {
+            Files.createTempFile(
+                parent,
+                "$name.",
+                ".tmp",
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")),
+            )
+        } catch (_: UnsupportedOperationException) {
+            // A non-POSIX filesystem has no mode to set; the temp still inherits the
+            // directory's ACL, which is the tightest available there.
+            Files.createTempFile(parent, "$name.", ".tmp")
+        }.toFile()
     try {
         if (Files.getFileAttributeView(tmp.toPath(), PosixFileAttributeView::class.java) != null) {
             // Fail closed if a filesystem advertises POSIX permissions but refuses the
@@ -110,9 +130,153 @@ fun File.atomicWriteText(
         }
         tmp.writeText(text)
         sync(tmp)
-        atomicMoveFrom(tmp)
+        parent.resolve(name).toFile().atomicMoveFrom(tmp)
     } finally {
         // No-op when the move took it away; cleans up on failure paths.
         tmp.delete()
+    }
+}
+
+/**
+ * The directory the temp file and the move both run in.
+ *
+ * A swapped or symlinked parent used to redirect the temp file and the destination
+ * together. The declared parent is refused when it is itself a symlink; ancestors that are
+ * links (macOS `/var`, a symlinked home) stay legal because `toRealPath` pins the write to
+ * the directory they resolve to right now - a later swap of the declared path cannot
+ * redirect a write that no longer goes through it. Where the filesystem reports a POSIX
+ * owner, a directory owned by another user is refused unless it is world-writable shared
+ * scratch (`/tmp` and friends are root-owned by convention).
+ *
+ * Closing the last sliver of the swap race - a link landing between the refusal check and
+ * the resolve - needs a held directory fd (O_NOFOLLOW/openat), which java.nio does not
+ * expose; the post-resolve re-check below shrinks that window to the minimum the API
+ * allows rather than pretending it is closed.
+ */
+private fun File.verifiedWriteParent(): Path {
+    val declared =
+        (parentFile ?: absoluteFile.parentFile)
+            ?: throw IOException("Cannot resolve a parent directory for $path")
+    declared.mkdirs()
+    val declaredPath = declared.toPath()
+    declaredPath.throwIfSymlinked()
+    val real = declaredPath.toRealPath()
+    real.throwIfNotDirectory()
+    // Swapped for a link while resolving: real now points wherever the link does.
+    declaredPath.throwIfSymlinked()
+    real.throwIfNotOwnedByCurrentUser()
+    return real
+}
+
+private fun Path.throwIfSymlinked() {
+    if (Files.isSymbolicLink(this)) {
+        throw IOException("Refusing to write through a symlinked directory: $this")
+    }
+}
+
+private fun Path.throwIfNotDirectory() {
+    if (!Files.isDirectory(this)) {
+        throw IOException("Refusing to write into a non-directory: $this")
+    }
+}
+
+private fun Path.throwIfNotOwnedByCurrentUser() {
+    val posix = Files.getFileAttributeView(this, PosixFileAttributeView::class.java) ?: return
+    val attributes = posix.readAttributes()
+    // Numeric identity is independent of passwd entries and the overridable user.name property.
+    val owner = (Files.getAttribute(this, "unix:uid") as Number).toLong()
+    val currentUser =
+        com.sun.security.auth.module
+            .UnixSystem()
+            .uid
+    // Another user's private directory must not absorb our write; a world-writable one
+    // (/tmp and friends, root-owned by convention) is shared scratch space and legal.
+    val foreignPrivate = owner != currentUser && PosixFilePermission.OTHERS_WRITE !in attributes.permissions()
+    if (foreignPrivate) {
+        throw IOException("Refusing to write into $this: owned by $owner, this process runs as $currentUser")
+    }
+}
+
+/**
+ * Rename this file aside as `<name>.corrupt-<millis>`, so a settings file that fails to *decode*
+ * (as opposed to fresh state simply not existing yet) is preserved for inspection rather than
+ * re-read - and re-failed - on every future launch, or silently overwritten by the next save.
+ *
+ * Call this only once the content is known to be corrupt (a decode/deserialization failure), not
+ * for an ordinary read/IO error: a transient permission or disk fault says nothing about whether
+ * the bytes on disk are good, and renaming a possibly-fine file away would be data loss the read
+ * failure alone does not justify.
+ *
+ * The move uses `Files.move` without `REPLACE_EXISTING` (see [atomicMoveFrom] for why `renameTo`
+ * is the wrong call), so an aside from an earlier recovery is never replaced: a name that is
+ * already taken - two recoveries inside one millisecond, or a clock that stepped back - is retried
+ * with a `-<n>` suffix. The aside keeps the corrupt file's bytes but is narrowed to owner-only
+ * where the filesystem has POSIX modes, because a torn file written before [atomicWriteText]
+ * pinned its temp files may have been created world-readable and it is never pruned.
+ *
+ * Best-effort: a failed move (another process holding the file, a read-only volume, a name the
+ * filesystem cannot represent, a security manager's refusal) is logged with its cause and reported
+ * via the return value rather than thrown. The three settings managers call this from recovery
+ * paths their object initializers reach, so an escape would fail the whole object rather than leave
+ * it on defaults (#1692); the caller's own fallback - fresh defaults, written back with
+ * [atomicWriteText] - is what keeps the app usable either way. **When this returns `false` the
+ * caller's write-back overwrites the corrupt bytes.**
+ *
+ * `.corrupt-*` files are never pruned. They do not end in `.json`, so no settings scan picks them
+ * up, and the file self-heals, so there is at most one per corruption event.
+ */
+fun File.renameAsideCorrupt(): Boolean = renameAsideCorrupt(System.currentTimeMillis())
+
+/** [renameAsideCorrupt] with the stamp supplied, so a test can make the names collide on purpose (#1693). */
+internal fun File.renameAsideCorrupt(stamp: Long): Boolean {
+    var lastFailure: Exception? = null
+    var attempt = 0
+    while (attempt < MAX_ASIDE_ATTEMPTS) {
+        val suffix = if (attempt == 0) "" else "-$attempt"
+        try {
+            val aside = resolveSibling("$name.corrupt-$stamp$suffix").toPath()
+            Files.move(toPath(), aside)
+            aside.restrictToOwner()
+            return true
+        } catch (e: FileAlreadyExistsException) {
+            // Name taken: try the next suffix.
+            lastFailure = e
+            attempt++
+        } catch (e: IOException) {
+            // Not a name clash (a lock, a read-only volume, the source vanished): retrying cannot help.
+            lastFailure = e
+            attempt = MAX_ASIDE_ATTEMPTS
+        } catch (e: InvalidPathException) {
+            // A name the filesystem cannot represent; every suffix would fail the same way.
+            lastFailure = e
+            attempt = MAX_ASIDE_ATTEMPTS
+        } catch (e: SecurityException) {
+            lastFailure = e
+            attempt = MAX_ASIDE_ATTEMPTS
+        }
+    }
+    asideLogger.warn(
+        LogCategory.FILE,
+        "Could not move a corrupt file aside",
+        mapOf("path" to path),
+        error = lastFailure,
+    )
+    return false
+}
+
+internal const val MAX_ASIDE_ATTEMPTS = 100
+
+private val asideLogger = BossLogger.forComponent("AtomicFileWrite")
+
+private fun Path.restrictToOwner() {
+    try {
+        Files.setPosixFilePermissions(this, OWNER_ONLY_FILE_PERMISSIONS)
+    } catch (_: UnsupportedOperationException) {
+        // No POSIX modes here; the aside keeps whatever ACL it had, which is all there is to keep.
+    } catch (e: IOException) {
+        asideLogger.warn(LogCategory.FILE, "Could not restrict a corrupt-file aside to its owner", error = e)
+    } catch (e: SecurityException) {
+        // The move itself succeeded, so the bytes are preserved; only the narrowing was refused.
+        asideLogger.warn(LogCategory.FILE, "Could not restrict a corrupt-file aside to its owner", error = e)
     }
 }

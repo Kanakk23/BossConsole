@@ -3174,9 +3174,7 @@ internal class BrowserHandleImpl(
                                 )
                                 return@launch
                             }
-                            // Lets FluckEngine close this tab again if a download starts right
-                            // after it opens - a redirect to a file looks like a page until it
-                            // does not. Also the burst cap: a window.open storm would otherwise
+                            // Admission cap: a window.open storm would otherwise
                             // adopt every popup into a real tab, so past the cap the tab is
                             // dropped - the popup browser above is already closed either way.
                             if (!FluckEngine.notifyTabOpened()) {

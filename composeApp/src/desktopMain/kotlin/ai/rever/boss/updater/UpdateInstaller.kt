@@ -3,6 +3,7 @@ package ai.rever.boss.updater
 import ai.rever.boss.utils.AppVersion
 import ai.rever.boss.utils.BOSS_MACOS_APP_BUNDLE_NAME
 import ai.rever.boss.utils.BOSS_MACOS_BUNDLE_ID
+import ai.rever.boss.utils.CodeSourceLocation
 import ai.rever.boss.utils.Version
 import ai.rever.boss.utils.WindowsProtocolCleanup
 import ai.rever.boss.utils.logging.BossLogger
@@ -11,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.net.URL
 import java.nio.file.Paths
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
@@ -72,6 +74,29 @@ internal fun macOSAppBundlePathFromLibraryPath(libraryPath: String): String? =
     libraryPath
         .split(File.pathSeparatorChar)
         .firstNotNullOfOrNull(::macOSAppBundlePathIn)
+
+/** Find a `.app` ancestor of a code-source URL within the six checked levels. */
+internal fun appBundleAncestorOf(location: URL?): File? {
+    var current = CodeSourceLocation.fileOf(location)
+    repeat(6) {
+        if (current?.name?.endsWith(MACOS_APP_BUNDLE_SUFFIX) == true) return current
+        current = current?.parentFile
+    }
+    return null
+}
+
+internal data class AppBundleCandidate(
+    val file: File,
+    val fromCodeSource: Boolean,
+)
+
+/** Prefer the running bundle, then an installed copy when the code source is unavailable. */
+internal fun appBundleFromCodeSourceOrApplications(
+    location: URL?,
+    applicationsBundle: File,
+): AppBundleCandidate? =
+    appBundleAncestorOf(location)?.let { AppBundleCandidate(it, fromCodeSource = true) }
+        ?: applicationsBundle.takeIf(File::exists)?.let { AppBundleCandidate(it, fromCodeSource = false) }
 
 /**
  * Resolve a macOS app bundle path without coupling the decision logic to the
@@ -833,9 +858,18 @@ object UpdateInstaller {
      * The validation is swallowed here rather than left to the script generator on
      * purpose. The generator throws, and a throw on this argument would abort an
      * update that is otherwise fine - trading "installs but does not relaunch" for
-     * "does not install", which is strictly worse. In practice it cannot trigger: the
-     * MSI path passed alongside it lives under the same user profile and so carries
-     * the same account name, and the filename component is the constant `BOSS.exe`.
+     * "does not install", which is strictly worse. For a local install it cannot
+     * trigger: the MSI path passed alongside it lives under the same user profile and
+     * so carries the same account name, and the filename component is the constant
+     * `BOSS.exe`.
+     *
+     * It does trigger for an install on a hidden network share, whose name ends in `$`
+     * (`\\nas01\apps$\BOSS\BOSS.exe`): the validator refuses `$` anywhere in a path.
+     * Such an install updates but does not relaunch. That was already the outcome
+     * through `jpackage.app-path`, which names the same share and is tried first; the
+     * code-source fallback reaching the share too does not change it. Allowing `$` in
+     * the directory component would mean relaxing a rule every platform's update
+     * script shares, which is a decision for [UpdatePathValidator], not for this path.
      */
     internal fun getWindowsLauncherPath(): String? {
         val launcher =
@@ -872,25 +906,11 @@ object UpdateInstaller {
 
     /**
      * The jar or classes directory this code is running from, or null if the location
-     * is unavailable. Goes through [java.net.URI] rather than `location.path`: that is
-     * URL-encoded, so a Windows install under a profile with a space in it yields a
-     * `%20` no filesystem call resolves.
+     * is unavailable. [CodeSourceLocation] explains why this is neither `location.path`
+     * (URL-encoded) nor `File(URI)` (which rejects a network share's authority), and
+     * logs the reason when it answers null; it does not throw.
      */
-    private fun currentCodeSourceFile(): File? =
-        try {
-            UpdateInstaller::class.java.protectionDomain
-                ?.codeSource
-                ?.location
-                ?.toURI()
-                ?.let(::File)
-        } catch (e: Exception) {
-            logger.debug(
-                LogCategory.SYSTEM,
-                "Could not resolve the current code source",
-                mapOf("error" to (e.message ?: "unknown")),
-            )
-            null
-        }
+    private fun currentCodeSourceFile(): File? = CodeSourceLocation.fileFor(UpdateInstaller::class.java)
 
     /**
      * Get current application path for macOS .app bundle
@@ -911,24 +931,35 @@ object UpdateInstaller {
                 return resolveRealAppPath(bundlePath)
             }
 
-            // Method 2: Try to find app bundle from current JAR/class location
-            val jarPath = UpdateInstaller::class.java.protectionDomain.codeSource.location.path
-            logger.trace(LogCategory.SYSTEM, "Current code source", mapOf("path" to jarPath))
+            // Method 2: Try to find app bundle from current JAR/class location.
+            //
+            // URL.path is encoded, so paths with spaces cannot be used directly.
+            // The shared resolver also preserves network-share authorities.
+            val codeSourceLocation =
+                runCatching {
+                    UpdateInstaller::class.java.protectionDomain
+                        ?.codeSource
+                        ?.location
+                }.getOrNull()
+            logger.trace(
+                LogCategory.SYSTEM,
+                "Current code source",
+                mapOf("url" to (codeSourceLocation?.toString() ?: "<unavailable>")),
+            )
 
-            var currentFile = File(jarPath)
-            // Walk up the directory tree looking for .app bundle
-            for (i in 0..5) {
-                logger.trace(LogCategory.SYSTEM, "Checking parent", mapOf("index" to i, "path" to currentFile.absolutePath))
-                if (currentFile.name.endsWith(".app")) {
-                    logger.debug(LogCategory.SYSTEM, "Found app bundle via directory traversal", mapOf("path" to currentFile.absolutePath))
-                    return resolveRealAppPath(currentFile.absolutePath)
-                }
-                currentFile = currentFile.parentFile ?: break
+            val applicationsPath = "$MACOS_APPLICATIONS_DIRECTORY/$BOSS_MACOS_APP_BUNDLE_NAME"
+            val appBundle = appBundleFromCodeSourceOrApplications(codeSourceLocation, File(applicationsPath))
+            if (appBundle?.fromCodeSource == true) {
+                logger.debug(
+                    LogCategory.SYSTEM,
+                    "Found app bundle via directory traversal",
+                    mapOf("path" to appBundle.file.absolutePath),
+                )
+                return resolveRealAppPath(appBundle.file.absolutePath)
             }
 
             // Method 3: Check if running from Applications folder
-            val applicationsPath = "$MACOS_APPLICATIONS_DIRECTORY/$BOSS_MACOS_APP_BUNDLE_NAME"
-            if (File(applicationsPath).exists()) {
+            if (appBundle != null) {
                 logger.debug(LogCategory.SYSTEM, "Found BOSS in Applications folder", mapOf("path" to applicationsPath))
                 return applicationsPath
             }
@@ -1108,12 +1139,11 @@ object UpdateInstaller {
      */
     private fun getCurrentJarPath(): File? =
         try {
-            val jarPath =
-                UpdateInstaller::class.java.protectionDomain.codeSource.location
-                    .toURI()
-                    .path
-            val jarFile = File(jarPath)
-            if (jarFile.exists() && jarFile.name.endsWith(".jar")) {
+            // Resolved through CodeSourceLocation, not URI.path: on a network-share
+            // install the path component has already lost the server name, so the
+            // existence check below failed and the JAR update silently never ran.
+            val jarFile = CodeSourceLocation.fileFor(UpdateInstaller::class.java)
+            if (jarFile != null && jarFile.exists() && jarFile.name.endsWith(".jar")) {
                 jarFile
             } else {
                 null
@@ -1121,7 +1151,7 @@ object UpdateInstaller {
         } catch (e: Exception) {
             logger.debug(
                 LogCategory.SYSTEM,
-                "Could not determine current JAR path - not running from a JAR",
+                "Could not check the current JAR path",
                 mapOf("error" to e.toString()),
             )
             null

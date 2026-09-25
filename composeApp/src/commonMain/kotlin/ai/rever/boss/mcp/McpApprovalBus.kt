@@ -1,6 +1,7 @@
 package ai.rever.boss.mcp
 
 import ai.rever.boss.mcp.sandbox.McpRiskAssessment
+import ai.rever.boss.mcp.secrets.SecretDescriptor
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.CompletableDeferred
@@ -72,12 +73,25 @@ data class McpApprovalRequest(
     val toolDescription: String? = null,
     /** The policy action that suspended this call - ASK today; carried so the dialog can say why. */
     val policy: McpPolicyAction? = null,
+    /**
+     * True when a saved ALLOW was overridden because this call rates CRITICAL (#1577). No saved
+     * rule can pre-approve such a call - the gate asks again every time - so the dialog offers
+     * only a one-off answer here, and the registry treats any broader approval as once (#1624).
+     */
+    val escalated: Boolean = false,
+    /**
+     * The secrets this call would hand the tool, one per reference in its arguments. Metadata
+     * only (website, username, field): the values are never on this object, so a dialog cannot
+     * show them by accident. Empty for every call without references.
+     */
+    val secretRefs: List<SecretDescriptor> = emptyList(),
     val requestedAt: Long = System.currentTimeMillis(),
     val deferred: CompletableDeferred<McpApprovalDecision> = CompletableDeferred(),
 ) {
     /**
      * Milliseconds left before this request auto-denies, relative to [requestedAt].
-     * The dialog renders the snapshot it took at open; nothing here ticks.
+     * Nothing here ticks. The dialog's one countdown is `approvalMillisRemaining`, which reads
+     * the same `requestedAt + timeoutMs` deadline that [McpApprovalBus.requestApproval] enforces.
      */
     fun remainingTimeoutMs(): Long = (timeoutMs - (System.currentTimeMillis() - requestedAt)).coerceAtLeast(0)
 }
@@ -109,7 +123,8 @@ open class McpApprovalBus(
      * or [timeoutMs] elapses (in which case it fails closed).
      */
     // Queue overflow needs its own returns; the request carries the tool's full approval
-    // context, from name and provider to its own read-only declaration.
+    // context, from name and provider to its own read-only declaration and the secrets it
+    // would receive. Folding those into a builder would move the same names one call deeper.
     @Suppress("ReturnCount", "LongParameterList")
     suspend fun requestApproval(
         toolName: String,
@@ -120,6 +135,8 @@ open class McpApprovalBus(
         declaredReadOnly: Boolean? = null,
         toolDescription: String? = null,
         policy: McpPolicyAction? = null,
+        escalated: Boolean = false,
+        secretRefs: List<SecretDescriptor> = emptyList(),
     ): McpApprovalDecision {
         val request =
             McpApprovalRequest(
@@ -131,6 +148,8 @@ open class McpApprovalBus(
                 declaredReadOnly = declaredReadOnly,
                 toolDescription = toolDescription,
                 policy = policy,
+                escalated = escalated,
+                secretRefs = secretRefs,
             )
 
         synchronized(lock) {
@@ -147,17 +166,19 @@ open class McpApprovalBus(
         }
 
         if (_requests.trySend(request).isFailure) {
-            synchronized(lock) {
-                activeRequests.remove(request.id)
-                _pendingList.update { list -> list.filterNot { it.id == request.id } }
-            }
+            release(request)
             return McpApprovalDecision.QueueFull
         }
 
         logger.info(
             LogCategory.SYSTEM,
             "Approval requested for MCP tool",
-            mapOf("tool" to toolName, "requestId" to request.id, "timeoutMs" to timeoutMs),
+            mapOf(
+                "tool" to toolName,
+                "requestId" to request.id,
+                "timeoutMs" to timeoutMs,
+                "secretRefs" to secretRefs.size,
+            ),
         )
 
         return try {
@@ -177,10 +198,15 @@ open class McpApprovalBus(
             decision
         } finally {
             request.deferred.complete(McpApprovalDecision.Denied("Approval request expired"))
-            synchronized(lock) {
-                activeRequests.remove(request.id)
-                _pendingList.update { list -> list.filterNot { it.id == request.id } }
-            }
+            release(request)
+        }
+    }
+
+    /** Forget [request]: it was answered, timed out, or could not be delivered. */
+    private fun release(request: McpApprovalRequest) {
+        synchronized(lock) {
+            activeRequests.remove(request.id)
+            _pendingList.update { list -> list.filterNot { it.id == request.id } }
         }
     }
 
