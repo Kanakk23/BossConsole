@@ -15,6 +15,8 @@ import kotlinx.coroutines.launch
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import ai.rever.boss.components.plugin.panels.left_top.scanDirectoryWithDepth as platformScanDirectoryWithDepth
 
@@ -323,6 +325,8 @@ class FileSystemDataProviderImpl(
      */
     private fun isReadableAndWritable(file: File): Boolean {
         val home = File(System.getProperty("user.home")).canonicalFile
+        // Compares canonicalFile paths, which keep Windows junctions as written, so it is
+        // knowingly weaker than the Downloads branch.
         val inHome = file.path == home.path || file.path.startsWith(home.path + File.separator)
 
         return inHome || isInsideDownloads(file)
@@ -331,21 +335,32 @@ class FileSystemDataProviderImpl(
     /**
      * Compared on real paths, so neither `..` nor a symlink or junction inside the folder can
      * lead into a sibling. A Downloads folder at a filesystem root admits nothing, since that
-     * would admit the whole drive.
+     * would admit the whole drive. A path that cannot be resolved, such as a dangling link or a
+     * Downloads share that has gone away, is refused rather than reported as an I/O failure.
      */
     private fun isInsideDownloads(file: File): Boolean {
-        val downloads = realPath(File(downloadsDirectory()).canonicalFile)?.takeIf { it.parent != null }
+        val downloads =
+            runCatching { File(downloadsDirectory()).canonicalFile }
+                .getOrNull()
+                ?.let(::realPath)
+                ?.takeIf { it.parent != null }
 
         return downloads != null && realPath(file)?.startsWith(downloads) == true
     }
 
     /**
      * [file] with every link resolved, including Windows junctions, which `canonicalFile` keeps
-     * as written. Parts that do not exist yet cannot be links, so they are appended as they are.
+     * as written, or null if that fails. The climb stops at the first part that exists as an
+     * entry, a link included even when its target does not, so a dangling link is resolved
+     * (and fails) rather than appended as a plain name. Parts below it do not exist yet and
+     * cannot be links, so they are appended as they are.
      */
-    private fun realPath(file: File): Path? {
-        val existing = generateSequence(file) { it.parentFile }.firstOrNull { it.exists() }
+    private fun realPath(file: File): Path? =
+        runCatching {
+            val existing =
+                generateSequence(file) { it.parentFile }
+                    .firstOrNull { Files.exists(it.toPath(), LinkOption.NOFOLLOW_LINKS) }
 
-        return existing?.toPath()?.toRealPath()?.resolve(existing.toPath().relativize(file.toPath()))
-    }
+            existing?.toPath()?.toRealPath()?.resolve(existing.toPath().relativize(file.toPath()))
+        }.getOrNull()
 }
