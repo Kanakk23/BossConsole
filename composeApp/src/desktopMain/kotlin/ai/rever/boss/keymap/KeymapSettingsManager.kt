@@ -12,6 +12,7 @@ import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.ComponentLogger
 import ai.rever.boss.utils.logging.LogCategory
+import ai.rever.boss.utils.logging.decodeFailure
 import ai.rever.boss.utils.renameAsideCorrupt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -127,7 +128,7 @@ actual object KeymapSettingsManager {
             // the same way, and the next save overwrites them with no copy kept. Move it aside so
             // it can still be inspected, and self-heal with a fresh default. Only a decode failure
             // lands here: a read error says nothing about whether the bytes are good.
-            logger.error(LogCategory.SYSTEM, "Keymap settings file is corrupt, resetting to defaults", error = e)
+            logger.error(LogCategory.SYSTEM, "Keymap settings file is corrupt, resetting to defaults", decodeFailure(e))
             if (!settingsFile.renameAsideCorrupt()) {
                 logger.warn(LogCategory.SYSTEM, "Keymap settings file not moved aside; overwriting it")
             }
@@ -292,6 +293,10 @@ actual object KeymapSettingsManager {
             val settings = repairStoredKeyCodes(json.decodeFromString<KeymapSettings>(jsonString), logger)
             updateSettings(settings)
             settings
+        } catch (e: SerializationException) {
+            // The imported document is the user's keymap; log where it failed, not what it said.
+            logger.error(LogCategory.SYSTEM, "Failed to import keymap settings", decodeFailure(e))
+            null
         } catch (e: Exception) {
             logger.error(LogCategory.SYSTEM, "Failed to import keymap settings", error = e)
             null

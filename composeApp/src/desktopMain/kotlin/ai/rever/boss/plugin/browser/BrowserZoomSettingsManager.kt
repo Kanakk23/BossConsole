@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
+import ai.rever.boss.utils.logging.decodeFailure
 import ai.rever.boss.utils.renameAsideCorrupt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -137,7 +138,11 @@ object BrowserZoomSettingsManager {
                 // per-domain zoom levels are kept for inspection instead of being re-failed on
                 // every launch or overwritten by the next save, and persist a fresh file so this
                 // launch self-heals.
-                logger.error(LogCategory.BROWSER, "Zoom settings file is corrupt, resetting to defaults", error = e)
+                logger.error(
+                    LogCategory.BROWSER,
+                    "Zoom settings file is corrupt, resetting to defaults",
+                    decodeFailure(e),
+                )
                 if (!settingsFile.renameAsideCorrupt()) {
                     logger.warn(LogCategory.BROWSER, "Zoom settings file not moved aside; overwriting it")
                 }

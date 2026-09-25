@@ -1,5 +1,8 @@
 package ai.rever.boss.plugin.browser
 
+import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.LogEntry
+import ai.rever.boss.utils.logging.LogListener
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.nio.file.Files
@@ -10,6 +13,8 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -66,6 +71,33 @@ class BrowserZoomSettingsRecoveryTest {
         assertTrue(settingsFile.isDirectory, "the original path must be untouched")
         val corrupt = tempDir.listFiles { f -> f.name.startsWith("${settingsFile.name}.corrupt-") }.orEmpty()
         assertEquals(0, corrupt.size, "no aside may be created for a read error")
+    }
+
+    // #1695: the corrupt-file log line used to carry the decoder's exception, whose message quotes
+    // the file - and this file is keyed by the domains a user zoomed.
+    @Test
+    fun `the corrupt-file log line names no domain from the file`() {
+        val domain = "private-intranet.example"
+        val entries = mutableListOf<LogEntry>()
+        val listener = LogListener { entry -> synchronized(entries) { entries += entry } }
+        settingsFile.writeText(
+            """{"domainSettings":{"$domain":{"domain":"$domain","zoomLevel":"big"}}}""",
+        )
+
+        BossLogger.addListener(listener)
+        try {
+            BrowserZoomSettingsManager.resetForTesting(settingsFile)
+        } finally {
+            BossLogger.removeListener(listener)
+        }
+
+        val logged = synchronized(entries) { entries.toList() }
+        val corrupt = logged.single { it.message.startsWith("Zoom settings file is corrupt") }
+        assertNull(corrupt.error, "the decoder's exception quotes the file, so it must not be attached")
+        assertEquals("$.domainSettings[*].zoomLevel", corrupt.data?.get("path"))
+        for (entry in logged) {
+            assertFalse(domain in "${entry.message} ${entry.data} ${entry.error}", "leaked in: $entry")
+        }
     }
 
     private fun assertSelfHeals(fixture: String) {

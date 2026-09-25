@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
+import ai.rever.boss.utils.logging.decodeFailure
 import ai.rever.boss.utils.renameAsideCorrupt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -96,7 +97,11 @@ actual object WorkspaceSettingsManager {
             // Corrupt content, not a read error: move the bad file aside so it is kept for
             // inspection instead of being re-failed on every launch or overwritten by the next
             // save, and write a fresh default so this launch self-heals.
-            logger.error(LogCategory.SYSTEM, "Workspace settings file is corrupt, resetting to defaults", error = e)
+            logger.error(
+                LogCategory.SYSTEM,
+                "Workspace settings file is corrupt, resetting to defaults",
+                decodeFailure(e),
+            )
             if (!settingsFile.renameAsideCorrupt()) {
                 logger.warn(LogCategory.SYSTEM, "Workspace settings file not moved aside; overwriting it")
             }
