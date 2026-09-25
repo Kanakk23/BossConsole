@@ -740,7 +740,7 @@ internal class McpToolRegistryCore(
         )
     }
 
-    fun unregisterProvider(providerId: String): Unit {
+    fun unregisterProvider(providerId: String) {
         _preparers.remove(providerId)
         synchronized(mutationLock) {
             if (!_providers.value.containsKey(providerId)) return@synchronized
@@ -1044,6 +1044,7 @@ internal class McpToolRegistryCore(
                     result = prepared.result
                     return result
                 }
+
                 is McpPreparationResult.Prepared -> {
                     effectiveArgs =
                         if (prepared.executionObject != null) {
@@ -1060,6 +1061,7 @@ internal class McpToolRegistryCore(
                         forceAsk = false
                     }
                 }
+
                 null -> {
                     effectiveArgs = args
                     displayModel = null
@@ -1414,60 +1416,70 @@ internal class McpToolRegistryCore(
             }
 
             McpPolicyAction.ASK -> {
-                when (
-                    val decision =
-                        approvalBus.requestApproval(
-                            tool.definition.name,
-                            tool.providerId,
-                            McpArgumentSanitizer.parseArguments(args.raw),
-                            riskAssessment =
-                                DefaultMcpRiskEvaluator()
-                                    .evaluateRisk(tool.definition.name, args)
-                                    .withSecrets(secretRefs),
-                            declaredReadOnly = tool.definition.readOnly,
-                            toolDescription = tool.definition.description,
-                            policy = effectivePolicy,
-                            escalated = escalated,
-                            secretRefs = secretRefs,
-                            displayModel = displayModel,
-                            allowStandingTrust = allowStandingTrust,
-                        )
-                ) {
-                    is McpApprovalDecision.Approved -> {
-                        val sanitizedDecision =
-                            if (!allowStandingTrust) {
-                                decision.copy(trustForSession = false, persistPolicy = false, trustProvider = false)
-                            } else {
-                                onceIfEscalated(tool, decision, escalated || secretRefs.isNotEmpty())
-                            }
-                        approvedAuthorization(
-                            tool,
-                            sanitizedDecision,
-                            revocation,
-                        )
-                    }
-
-                    is McpApprovalDecision.Denied -> {
-                        val disposition =
-                            if (decision.persistPolicy && allowStandingTrust) {
-                                persistentDenialDisposition(tool, revocation)
-                            } else {
-                                McpApprovalDisposition.DENIED_BY_OPERATOR
-                            }
-                        disposition to "MCP tool rejected by operator: ${decision.reason}"
-                    }
-
-                    McpApprovalDecision.QueueFull -> {
-                        McpApprovalDisposition.QUEUE_FULL to "MCP approval queue is full; no operator decision was made"
-                    }
-
-                    McpApprovalDecision.Timeout -> {
-                        McpApprovalDisposition.TIMEOUT to "MCP tool timed out waiting for operator approval"
-                    }
-                }
+                val decision =
+                    approvalBus.requestApproval(
+                        tool.definition.name,
+                        tool.providerId,
+                        McpArgumentSanitizer.parseArguments(args.raw),
+                        riskAssessment =
+                            DefaultMcpRiskEvaluator()
+                                .evaluateRisk(tool.definition.name, args)
+                                .withSecrets(secretRefs),
+                        declaredReadOnly = tool.definition.readOnly,
+                        toolDescription = tool.definition.description,
+                        policy = effectivePolicy,
+                        escalated = escalated,
+                        secretRefs = secretRefs,
+                        displayModel = displayModel,
+                        allowStandingTrust = allowStandingTrust,
+                    )
+                handleApprovalDecision(tool, decision, revocation, escalated, secretRefs, allowStandingTrust)
             }
         }
     }
+
+    @Suppress("LongParameterList")
+    private fun handleApprovalDecision(
+        tool: RegisteredMcpTool,
+        decision: McpApprovalDecision,
+        revocation: Long,
+        escalated: Boolean,
+        secretRefs: List<SecretDescriptor>,
+        allowStandingTrust: Boolean,
+    ): Pair<McpApprovalDisposition, String?> =
+        when (decision) {
+            is McpApprovalDecision.Approved -> {
+                val sanitizedDecision =
+                    if (!allowStandingTrust) {
+                        decision.copy(trustForSession = false, persistPolicy = false, trustProvider = false)
+                    } else {
+                        onceIfEscalated(tool, decision, escalated || secretRefs.isNotEmpty())
+                    }
+                approvedAuthorization(
+                    tool,
+                    sanitizedDecision,
+                    revocation,
+                )
+            }
+
+            is McpApprovalDecision.Denied -> {
+                val disposition =
+                    if (decision.persistPolicy && allowStandingTrust) {
+                        persistentDenialDisposition(tool, revocation)
+                    } else {
+                        McpApprovalDisposition.DENIED_BY_OPERATOR
+                    }
+                disposition to "MCP tool rejected by operator: ${decision.reason}"
+            }
+
+            McpApprovalDecision.QueueFull -> {
+                McpApprovalDisposition.QUEUE_FULL to "MCP approval queue is full; no operator decision was made"
+            }
+
+            McpApprovalDecision.Timeout -> {
+                McpApprovalDisposition.TIMEOUT to "MCP tool timed out waiting for operator approval"
+            }
+        }
 
     /**
      * Whether this disposition should also grant session trust for the tool in hand.

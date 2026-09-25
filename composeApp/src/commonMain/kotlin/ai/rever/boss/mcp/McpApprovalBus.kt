@@ -179,10 +179,10 @@ open class McpApprovalBus(
         allowStandingTrust: Boolean = true,
     ): McpApprovalDecision {
         val request =
-            McpApprovalRequest(
+            approvalRequest(
                 toolName = toolName,
                 providerId = providerId,
-                arguments = McpArgumentSanitizer.sanitize(arguments),
+                arguments = arguments,
                 timeoutMs = timeoutMs,
                 riskAssessment = riskAssessment,
                 declaredReadOnly = declaredReadOnly,
@@ -327,6 +327,36 @@ open class McpApprovalBus(
         }
         return denied
     }
+
+    @Suppress("LongParameterList")
+    private fun approvalRequest(
+        toolName: String,
+        providerId: String,
+        arguments: Map<String, Any?>,
+        timeoutMs: Long,
+        riskAssessment: McpRiskAssessment?,
+        declaredReadOnly: Boolean?,
+        toolDescription: String?,
+        policy: McpPolicyAction?,
+        escalated: Boolean,
+        secretRefs: List<SecretDescriptor>,
+        displayModel: Any?,
+        allowStandingTrust: Boolean,
+    ): McpApprovalRequest =
+        McpApprovalRequest(
+            toolName = toolName,
+            providerId = providerId,
+            arguments = McpArgumentSanitizer.sanitize(arguments),
+            timeoutMs = timeoutMs,
+            riskAssessment = riskAssessment,
+            declaredReadOnly = declaredReadOnly,
+            toolDescription = toolDescription,
+            policy = policy,
+            escalated = escalated,
+            secretRefs = secretRefs,
+            displayModel = displayModel,
+            allowStandingTrust = allowStandingTrust,
+        )
 }
 
 /** Each delivered request belongs to one window until answered, timed out or that window closes. */

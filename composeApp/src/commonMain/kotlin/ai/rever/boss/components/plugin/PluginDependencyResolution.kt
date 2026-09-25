@@ -480,7 +480,10 @@ interface MissingDependencyInstaller {
                 if (artifact == root) {
                     error
                 } else {
-                    val message = error.message?.let { "Could not install ${root?.pluginId}: $it" } ?: "Could not install ${root?.pluginId}."
+                    val message =
+                        error.message?.let {
+                            "Could not install ${root?.pluginId}: $it"
+                        } ?: "Could not install ${root?.pluginId}."
                     IllegalStateException(message, error)
                 }
             return Result.failure(reported)

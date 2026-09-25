@@ -3,8 +3,8 @@ package ai.rever.boss.plugin
 import ai.rever.boss.components.plugin.DependencyInstallPlan
 import ai.rever.boss.components.plugin.MissingDependencyInstaller
 import ai.rever.boss.components.plugin.PluginDependencyResolution
-import ai.rever.boss.mcp.ApprovedArtifact
 import ai.rever.boss.downloads.DownloadCenter
+import ai.rever.boss.mcp.ApprovedArtifact
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.api.TransferKind
 import ai.rever.boss.plugin.api.TransferPhase
