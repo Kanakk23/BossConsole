@@ -100,6 +100,7 @@ import ai.rever.boss.plugin.sandbox.notification.PluginSandboxNotificationListen
 import ai.rever.boss.plugin.sandbox.notification.PluginToastState
 import ai.rever.boss.plugin.ui.BossThemes
 import ai.rever.boss.plugin.ui.ContextMenuItemData
+import ai.rever.boss.plugin.workspace.uniqueId
 import ai.rever.boss.search.ContentSearchService
 import ai.rever.boss.search.SearchRegistryImpl
 import ai.rever.boss.services.auth.AuthDataProviderImpl
@@ -2130,7 +2131,12 @@ private class ApiActiveTabsProviderAdapter(
         url: String,
         title: String,
     ): String? {
-        val tabId = "plugin-tab-${kotlin.time.Clock.System.now().toEpochMilliseconds()}"
+        // The id is how MCP and search address the tab across every workspace this window
+        // is running, so it must not collide with a live one: entropy first, then the
+        // findTabLocation scan as the deterministic backstop.
+        val tabId =
+            generateSequence { uniqueId("plugin-tab") }
+                .first { splitViewState.findTabLocation(it) == null }
         val fluckTab =
             ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo(
                 id = tabId,
@@ -2327,7 +2333,11 @@ internal class DefaultBackgroundTaskProvider(
         task: suspend () -> Unit,
     ): BackgroundTaskHandle? =
         try {
-            val taskId = taskIdOverride?.invoke(name) ?: "$name-${System.currentTimeMillis()}"
+            // taskId keys activeTasks. Entropy prevents same-millisecond launches from
+            // replacing one another; the override lets tests force a collision.
+            val taskId =
+                taskIdOverride?.invoke(name)
+                    ?: generateSequence { uniqueId(name) }.first { !activeTasks.containsKey(it) }
             val job = scope.launch { task() }
             val handle = DefaultBackgroundTaskHandle(name, job)
             // Register first, release second. The release used to be a `finally` inside the

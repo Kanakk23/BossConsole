@@ -966,7 +966,9 @@ is now gated - packaging relies on those.
 `implementation(projects.pluginPlatform.pluginWorkspaceTypes)`, so its POM pins the sibling at the
 current project version. `publish-maven-central.yml` takes a free-form `packages` input, and
 dispatching bookmark-types alone would ship a POM requiring a `plugin-workspace-types` version that
-does not exist on Central. `all` is safe - workspace-types publishes first. BossConsole#81 tracks the
+does not exist on Central. Bookmark id generation also calls `UniqueIdsKt` at runtime, so an older
+workspace-types jar cannot substitute for the sibling version. `all` is safe - workspace-types
+publishes first. BossConsole#81 tracks the
 durable guard: diffing public members against the api jar `plugin-api-core` already downloads,
 covering all eight duplicated packages rather than this one field.
 
@@ -1470,7 +1472,7 @@ template picked from the fourth of those is the same gesture as one picked from 
 - **Templates are the SET of built-in ids, and it cannot be a prefix test.**
   `PredefinedWorkspaces.allIds` is derived from `allWorkspaces`, so a ninth built-in joins by
   existing; all eight ids are named constants so one can be referred to. `LayoutWorkspace.generateId()`
-  mints `workspace-<epoch millis>`, so a saved Space carries the same `workspace-` prefix as a
+  mints `workspace-<epoch millis>-<entropy>`, so a saved Space carries the same `workspace-` prefix as a
   built-in and `startsWith("workspace-")` would call every Space a template. The NAME is not the key
   either - a user can save a Space called "Claude Code".
 - **There is deliberately NO `isTemplate` field on `LayoutWorkspace`.** It is the plugin api type,
@@ -1575,7 +1577,7 @@ Three properties of the adoption worth keeping:
   id for the same file on every launch, so nothing could refer to that Space across a restart - the
   session set records ids, and so does every preserved-state key.
 - **It cannot be mistaken for either kind of id.** No built-in id ends in `-saved`, and
-  `generateId()` produces `workspace-<epoch millis>`, so an adopted id is recognisable as one. The
+  `generateId()` produces `workspace-<epoch millis>-<entropy>`, so an adopted id is recognisable as one. The
   plugin's template set is the eight literal ids, so an adopted Space files under Spaces.
 - **Nothing is rewritten on disk.** The migration is in memory, so a launch that reads a legacy file
   cannot half-write anything, and the file keeps the name the user sees in the folder.
@@ -1613,8 +1615,8 @@ into "Save Space..." bypassed `uniqueWorkspaceName` entirely.
 ### The path is the id
 
 `WorkspaceFileManagerCommon.fileNameForId` - copied from `WorkspaceServiceImpl.persistToDisk`, which
-has written `<id>.json` all along. An id is unique by construction, so the collision is impossible
-rather than improbable, and the name is free to be whatever the user wants.
+has written `<id>.json` all along. A generated id has entropy, so accidental collisions are very
+unlikely, and the name is free to be whatever the user wants.
 
 - **Nothing is rewritten or renamed on disk by an upgrade.** `loadAllWorkspaces` already read every
   file's id out of its contents, so it now records an `id -> fileName` map as it scans and
