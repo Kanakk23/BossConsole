@@ -8,6 +8,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.parallel.ResourceLock
 import java.io.File
 import java.nio.file.Files
 import kotlin.test.AfterTest
@@ -23,6 +24,7 @@ import kotlin.test.assertTrue
  * handler. The provider reads/writes the [DownloadHistoryManager] singleton, redirected to a
  * hermetic temp file per test.
  */
+@ResourceLock("DownloadHistoryManager")
 class DownloadHistoryMcpToolProviderTest {
     private lateinit var tempDir: File
     private lateinit var tempFile: File
@@ -40,10 +42,13 @@ class DownloadHistoryMcpToolProviderTest {
         tempDir.deleteRecursively()
     }
 
-    private suspend fun call(name: String): McpToolResult {
+    private suspend fun call(
+        name: String,
+        args: McpToolArgs = McpToolArgs(emptyMap(), "{}"),
+    ): McpToolResult {
         val tool = DownloadHistoryMcpToolProvider.tools().firstOrNull { it.name == name }
         requireNotNull(tool) { "tool $name not found" }
-        return tool.handler.call(McpToolArgs(emptyMap(), "{}"))
+        return tool.handler.call(args)
     }
 
     private fun json(result: McpToolResult) = Json.parseToJsonElement(result.text).jsonObject
@@ -88,5 +93,52 @@ class DownloadHistoryMcpToolProviderTest {
             val entry = json(call("downloads_history_list"))["downloads"]!!.jsonArray.first().jsonObject
             assertNull(entry["sizeBytes"])
             assertFalse(entry["fileName"]!!.jsonPrimitive.content.isEmpty())
+        }
+
+    @Test
+    fun `list pages a bounded number of entries`() =
+        runBlocking {
+            repeat(55) { DownloadHistoryManager.record("u", "/d/$it.txt") }
+            val first = json(call("downloads_history_list"))
+            assertEquals(55, first["total"]!!.jsonPrimitive.content.toInt())
+            assertEquals(50, first["downloads"]!!.jsonArray.size)
+
+            val next =
+                json(
+                    call(
+                        "downloads_history_list",
+                        McpToolArgs(mapOf("offset" to 50, "limit" to 10), "{}"),
+                    ),
+                )
+            assertEquals(5, next["downloads"]!!.jsonArray.size)
+            assertEquals(
+                "4.txt",
+                next["downloads"]!!
+                    .jsonArray
+                    .first()
+                    .jsonObject["fileName"]!!
+                    .jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun `clear reports a disk failure and keeps the in-memory history`() =
+        runBlocking {
+            DownloadHistoryManager.record("u", "/d/a.txt")
+            assertTrue(tempFile.delete())
+            assertTrue(tempFile.mkdir())
+
+            assertTrue(call("downloads_history_clear").isError)
+            assertEquals(1, DownloadHistoryManager.downloads.value.size)
+        }
+
+    @Test
+    fun `a corrupt history is reported until clear replaces it`() =
+        runBlocking {
+            tempFile.writeText("{ broken")
+            DownloadHistoryManager.resetForTesting(tempFile)
+            assertTrue(call("downloads_history_list").isError)
+            assertFalse(call("downloads_history_clear").isError)
+            assertEquals(0, json(call("downloads_history_list"))["total"]!!.jsonPrimitive.content.toInt())
         }
 }
