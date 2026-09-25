@@ -40,15 +40,18 @@ enum class ClassLoaderState {
  * This ensures plugins get their own dependencies while sharing common APIs
  * with the host application.
  *
- * Once the loader leaves [ClassLoaderState.ACTIVE] the child-first miss stops
- * delegating to the parent: a plugin class requested after teardown must fail
- * loudly rather than silently resolve to the host's copy. Only FIRST-TIME loads
- * are refused — the JVM records this loader as the initiating loader for every
- * name it has already resolved, host classes included, so `findLoadedClass`
- * keeps answering those after close and orderly teardown is unaffected. See
- * [loadClassChildFirst].
- * Non-shared resources also stop delegating after ACTIVE, returning null/empty
- * for misses while keeping own-JAR resources until close. Shared paths remain
+ * Parent delegation is confined to [sharedPackages]: a child-first miss is
+ * refused in every state, never handed to the host classloader. Without that
+ * boundary any side-loaded plugin could resolve host internals - credentials,
+ * process control - by class name alone. Once the loader leaves
+ * [ClassLoaderState.ACTIVE] the refusal is logged as a lifecycle violation:
+ * a plugin class requested after teardown means something still holds the
+ * plugin. Only FIRST-TIME loads are refused — the JVM records this loader as
+ * the initiating loader for every name it has already resolved, host classes
+ * included, so `findLoadedClass` keeps answering those after close and orderly
+ * teardown is unaffected. See [loadClassChildFirst].
+ * Non-shared resources never delegate either: misses return null/empty in
+ * every state while keeping own-JAR resources until close. Shared paths remain
  * parent-first; META-INF/services is non-shared even for a shared interface.
  *
  * @param pluginId The ID of the plugin this classloader serves
@@ -366,10 +369,12 @@ class PluginClassLoader(
     /**
      * Load a class with child-first strategy.
      *
-     * While the loader is ACTIVE a miss in the plugin jar delegates to the
-     * parent — that is the normal path for every host-provided class. Once the
-     * loader is unloading or closed the same delegation becomes destructive, so
-     * it is refused instead; see the comment in the catch block.
+     * Only names inside [sharedPackages] may resolve against the parent, and
+     * those are routed parent-first by [loadClass] before this runs — so a
+     * child-first miss is always the end of the line. While ACTIVE the miss
+     * propagates as the plain [ClassNotFoundException]; once the loader is
+     * unloading or closed the same miss is also a lifecycle violation, so the
+     * refusal is wrapped and logged — see the comment in the catch block.
      *
      * Both post-ACTIVE states must refuse parent fallback:
      * - [ClassLoaderState.UNLOADED]: the jar is shut, so `findClass` misses even on names
@@ -395,11 +400,14 @@ class PluginClassLoader(
             // and the message must not disagree with the structured field.
             val stateAtRefusal = state
             if (stateAtRefusal == ClassLoaderState.ACTIVE) {
-                // Fall back to parent. Deliberately unlogged: this is the
-                // expected delegation path for every host-provided class a
-                // plugin touches, so logging here would flood at class-load
-                // time on a hot path.
-                return parent.loadClass(name)
+                // No parent fallback: every name reaching this catch is outside
+                // sharedPackages (shared names went parent-first in loadClass),
+                // so the only honest answers are the plugin jar - already
+                // missed - and nothing. Re-throwing the findClass miss keeps
+                // the plain ClassNotFoundException contract that
+                // optional-dependency probes already handle; the class the
+                // plugin cannot have is a host class it named but may not see.
+                throw notInPluginJar
             }
 
             // A closed URLClassLoader answers findClass() with
@@ -446,9 +454,11 @@ class PluginClassLoader(
 
     /**
      * Get a resource with child-first strategy for plugin resources.
-     * Once unloading starts, a non-shared miss stays missing rather than
-     * substituting the host's copy. Resources in the still-open plugin JAR
-     * remain available to teardown code; shared resources remain parent-first.
+     * Parent delegation is confined to shared paths: a non-shared miss returns
+     * null in every state rather than reading a host resource the plugin may
+     * not see — the same boundary loadClassChildFirst enforces for classes.
+     * Resources in the still-open plugin JAR remain available to teardown code;
+     * shared resources remain parent-first throughout.
      */
     override fun getResource(name: String): URL? {
         // For shared packages, use parent-first
@@ -462,31 +472,21 @@ class PluginClassLoader(
         }
         val own = findResource(name)
         val stateAtLookup = state
-        return when {
-            own != null -> {
-                own
-            }
-
-            stateAtLookup == ClassLoaderState.ACTIVE -> {
-                parent.getResource(name)
-            }
-
-            else -> {
-                logResourceRefusal(refusedResourceNames.add(name), pluginId, name, stateAtLookup)
-                null
-            }
+        if (own == null && stateAtLookup != ClassLoaderState.ACTIVE) {
+            logResourceRefusal(refusedResourceNames.add(name), pluginId, name, stateAtLookup)
         }
+        return own
     }
 
     /**
      * Enumerate resources mirroring [getResource]'s strategy: shared paths
-     * parent-first, everything else child-first. URLClassLoader's inherited
-     * plural enumeration is always parent-first, and with the ApiClassLoader
-     * in the parent chain (whose jar carries its own
-     * META-INF/boss-plugin/plugin.json and jar manifest) that would surface
+     * parent-first, everything else confined to the plugin's own JAR in every
+     * state — a plugin must not enumerate host resources it may not see, and
+     * META-INF/services discovery can never switch to host providers.
+     * URLClassLoader's inherited plural enumeration is always parent-first,
+     * and with the ApiClassLoader in the parent chain (whose jar carries its
+     * own META-INF/boss-plugin/plugin.json and jar manifest) that would surface
      * the api jar's copy of non-shared resources ahead of the plugin's own.
-     * After unloading starts only own resources are enumerated, preventing
-     * META-INF/services discovery from silently switching to host providers.
      * After close this is empty, as the plugin JAR can no longer be searched.
      */
     override fun getResources(name: String): java.util.Enumeration<URL> {
@@ -498,21 +498,12 @@ class PluginClassLoader(
             return super.getResources(name)
         }
         val own = java.util.Collections.list(findResources(name))
-        val stateAtLookup = state
-        val fromParents =
-            if (stateAtLookup == ClassLoaderState.ACTIVE) {
-                java.util.Collections
-                    .list(parent.getResources(name))
-                    .filterNot { it in own }
-            } else {
-                // Keep the first WARN for a missing result, not a successful own-JAR
-                // lookup during teardown that merely excludes host contributions.
-                if (own.isEmpty()) {
-                    logResourceRefusal(refusedResourceNames.add(name), pluginId, name, stateAtLookup)
-                }
-                emptyList()
-            }
-        return java.util.Collections.enumeration(own + fromParents)
+        // Keep the first WARN for a missing result, not a successful own-JAR
+        // lookup during teardown that merely excludes host contributions.
+        if (state != ClassLoaderState.ACTIVE && own.isEmpty()) {
+            logResourceRefusal(refusedResourceNames.add(name), pluginId, name, state)
+        }
+        return java.util.Collections.enumeration(own)
     }
 
     /**

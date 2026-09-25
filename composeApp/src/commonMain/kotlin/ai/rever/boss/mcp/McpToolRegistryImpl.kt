@@ -936,7 +936,8 @@ internal class McpToolRegistryCore(
                 }
             }
 
-    @Suppress("LongMethod") // Keep authorization and execution inside the same cancellation audit boundary.
+    // One boundary must cover denial, approval, execution, and the ledger write.
+    @Suppress("LongMethod", "CyclomaticComplexMethod")
     suspend fun invoke(
         toolName: String,
         arguments: String,
@@ -964,21 +965,18 @@ internal class McpToolRegistryCore(
         // executes the tool, and a cancellation while the vault is being read has nothing to
         // record - the ledger's job is to say what happened to an authorized-or-refused call,
         // and this call is neither yet. Everything it decides is carried into that boundary.
-        val secrets = secretPrePass.prepare(args, policy)
+        val invalidArguments = invalidArguments(tool, arguments, args)
+        val secrets = if (invalidArguments == null) secretPrePass.prepare(args, policy) else SecretPreparation.None
         val effectivePolicy = secrets.effectivePolicy(policy)
         var disposition = McpApprovalDisposition.AUTO_ALLOWED
         var result: McpToolResult? = null
         var executionStarted = false
         try {
-            // Non-object argument text used to collapse to empty args in parseArgs and run
-            // the handler on defaults anyway - a refusal comes before authorization so the
-            // call is ledgered as INVALID_ARGUMENTS and never prompts nor executes.
-            val shapeError = nonObjectArgsError(tool.definition, arguments)
+            // Shape and schema refusals precede authorization, approval, and execution.
             val authorization =
-                if (shapeError != null) {
-                    McpApprovalDisposition.INVALID_ARGUMENTS to shapeError
+                if (invalidArguments != null) {
+                    McpApprovalDisposition.INVALID_ARGUMENTS to invalidArguments
                 } else {
-                    // The destructive-shell and secret paths both affect authorization.
                     authorize(tool, args, effectivePolicy, revocation, secrets, escalated = policy != savedPolicy)
                 }
             disposition = authorization.first
@@ -1058,6 +1056,19 @@ internal class McpToolRegistryCore(
 
     private fun isAvailable(tool: RegisteredMcpTool): Boolean =
         _tools.value.any { it.providerId == tool.providerId && it.definition === tool.definition }
+
+    /** Validate argument shape and schema before raising an approval or invoking a handler. */
+    private fun invalidArguments(
+        tool: RegisteredMcpTool,
+        arguments: String,
+        args: McpToolArgs,
+    ): String? {
+        if (mcpJsonNestingExceeds(arguments)) return "MCP arguments exceed the supported nesting depth"
+        val shapeError = nonObjectArgsError(tool.definition, arguments)
+        val schemaError =
+            if (shapeError == null) validateMcpToolArguments(tool.definition.inputSchema, args.raw) else null
+        return shapeError ?: schemaError
+    }
 
     private suspend fun confirmApproval(
         tool: RegisteredMcpTool,

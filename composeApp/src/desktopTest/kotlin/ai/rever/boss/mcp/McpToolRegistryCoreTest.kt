@@ -31,8 +31,7 @@ import kotlin.test.assertTrue
  * cannot be read or written (BossConsole#85) — lives in
  * [McpKillSwitchPersistenceTest].
  */
-// Keep permission, alias, and invocation regression cases together so they share
-// the same throwaway registry setup and verify the full dispatch contract.
+// Keep the invocation contracts in one fixture so the shared registry setup is consistent.
 @Suppress("LargeClass")
 class McpToolRegistryCoreTest {
     private val tempFiles = mutableListOf<File>()
@@ -635,6 +634,108 @@ class McpToolRegistryCoreTest {
 
             assertFalse(core.invoke("blank_args_tool", "   ").isError)
             assertFalse(requireNotNull(captured).has("anything"))
+        }
+
+    @Test
+    fun `invoke enforces the tool's declared inputSchema and never runs the handler on a mismatch`() =
+        runBlocking {
+            var handlerCalls = 0
+            val ledger = McpOperationLedger(ledgerFile = null)
+            val core = McpToolRegistryCore(disabledFile = null, ledger = ledger)
+            core.registerProvider(
+                provider(
+                    "p1",
+                    McpToolDefinition(
+                        name = "read_file",
+                        description = "test tool read_file",
+                        inputSchema =
+                            """{"type":"object","properties":{"path":{"type":"string"}},""" +
+                                """"required":["path"]}""",
+                        handler =
+                            McpToolHandler {
+                                handlerCalls++
+                                McpToolResult("ok")
+                            },
+                    ),
+                ),
+            )
+
+            val wrongType = core.invoke("read_file", """{"path":123}""")
+            assertTrue(wrongType.isError, "a number where the schema declares a string must be refused")
+            assertTrue(wrongType.text.contains("path"), "the error names the offending field")
+            assertTrue(wrongType.text.contains("string"), "the error names the expected type")
+
+            val missing = core.invoke("read_file", "{}")
+            assertTrue(missing.isError, "a missing required field must be refused")
+            assertTrue(missing.text.contains("path"), "the error names the missing field")
+
+            assertEquals(0, handlerCalls, "schema-mismatched calls must never reach the handler")
+            assertEquals(2, ledger.recentOperations.value.size)
+            assertTrue(
+                ledger.recentOperations.value.all {
+                    it.approvalDisposition == McpApprovalDisposition.INVALID_ARGUMENTS
+                },
+                "schema refusals are recorded as INVALID_ARGUMENTS, not a tool fault",
+            )
+
+            // The gate must not over-reject: arguments satisfying the schema still invoke.
+            val ok = core.invoke("read_file", """{"path":"/tmp/x"}""")
+            assertFalse(ok.isError)
+            assertEquals(1, handlerCalls)
+        }
+
+    @Test
+    fun `invoke fails closed when the tool's inputSchema itself is unreadable`() =
+        runBlocking {
+            var handlerCalls = 0
+            val core = McpToolRegistryCore(disabledFile = null)
+            core.registerProvider(
+                provider(
+                    "p1",
+                    McpToolDefinition(
+                        name = "broken_schema_tool",
+                        description = "test tool broken_schema_tool",
+                        inputSchema = "{not a schema",
+                        handler =
+                            McpToolHandler {
+                                handlerCalls++
+                                McpToolResult("ok")
+                            },
+                    ),
+                ),
+            )
+
+            val result = core.invoke("broken_schema_tool", "{}")
+
+            assertTrue(result.isError, "a contract the host cannot read cannot be enforced")
+            assertEquals(0, handlerCalls)
+        }
+
+    @Test
+    fun `deeply nested arguments are rejected before schema parsing and execution`() =
+        runBlocking {
+            var calls = 0
+            val core = McpToolRegistryCore(disabledFile = null)
+            core.registerProvider(
+                provider(
+                    "p1",
+                    echoTool(
+                        "read_file",
+                        handler =
+                            McpToolHandler {
+                                calls++
+                                McpToolResult("ran")
+                            },
+                    ),
+                ),
+            )
+            val nested = "{\"value\":" + "[".repeat(1024) + "0" + "]".repeat(1024) + "}"
+
+            val result = core.invoke("read_file", nested)
+
+            assertTrue(result.isError)
+            assertTrue(result.text.contains("nesting depth"))
+            assertEquals(0, calls)
         }
 
     @Test
