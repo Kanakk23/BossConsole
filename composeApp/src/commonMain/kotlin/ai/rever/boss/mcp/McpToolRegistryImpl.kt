@@ -1,5 +1,6 @@
 package ai.rever.boss.mcp
 
+import ai.rever.boss.arcade.rushhour.mcp.RushHourMcpTools
 import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.mcp.sandbox.DefaultMcpRiskEvaluator
 import ai.rever.boss.mcp.sandbox.McpRiskLevel
@@ -161,6 +162,7 @@ object McpToolRegistryImpl : McpToolRegistry {
 
     init {
         registerProvider(WorkspaceMcpToolProvider)
+        registerProvider(RushHourMcpTools)
         registerProvider(SnippetMcpToolProvider)
         registerProvider(NotificationMcpToolProvider)
         registerProvider(IntrospectionMcpToolProvider)
