@@ -216,7 +216,7 @@ class WorkspacePortabilityTest {
                                     TabConfig(
                                         type = "terminal",
                                         title = "T",
-                                        initialCommand = "cd \"prefix$projectPath/sub\" && claude",
+                                        initialCommand = "echo \"directory: $projectPath/sub\" && claude",
                                     ),
                                 ),
                         ),
@@ -225,14 +225,14 @@ class WorkspacePortabilityTest {
 
         val exported = WorkspacePortability.toPortable(portable)
         assertEquals(
-            "cd \"prefix${WorkspacePortability.PLACEHOLDER}/sub\" && claude",
+            "echo \"directory: ${WorkspacePortability.PLACEHOLDER}/sub\" && claude",
             tabs(exported).single().initialCommand,
         )
 
         val destination = "/opt/a\"b$(touch nope)"
         val restored = WorkspacePortability.fromPortable(exported, destination)
         assertEquals(
-            "cd \"prefix${CommandProcessor.escapeInsideQuote(destination, '\"')}/sub\" && claude",
+            "echo \"directory: ${CommandProcessor.escapeInsideQuote(destination, '\"')}/sub\" && claude",
             tabs(restored).single().initialCommand,
         )
     }
