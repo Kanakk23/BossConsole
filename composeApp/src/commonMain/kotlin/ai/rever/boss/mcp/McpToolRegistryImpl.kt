@@ -50,6 +50,7 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.longOrNull
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Process-wide registry aggregating MCP tools contributed by active plugins.
@@ -482,6 +483,41 @@ internal interface McpToolAliasProvider {
  * [onFault] is how a kill-switch persistence failure reaches the operator (the
  * façade turns it into a status-bar message); it is also mirrored into [fault].
  */
+private val executionObjects = java.util.Collections.synchronizedMap(java.util.WeakHashMap<McpToolArgs, Any>())
+
+fun McpToolArgs.withExecutionObject(obj: Any): McpToolArgs {
+    executionObjects[this] = obj
+    return this
+}
+
+@Suppress("UNCHECKED_CAST")
+fun <T> McpToolArgs.executionObject(): T? =
+    executionObjects[this] as? T
+
+/** The outcome of a host-side preparation hook. */
+sealed interface McpPreparationResult {
+    data class Prepared(
+        val displayModel: Any?,
+        val executionObject: Any?,
+        val requiresFreshApproval: Boolean = false,
+    ) : McpPreparationResult
+
+    data class Rejected(
+        val result: McpToolResult,
+    ) : McpPreparationResult
+}
+
+/**
+ * Host-side preparation hook for MCP tools: allows a provider to resolve arguments and
+ * produce rich display models before approval, without altering the published plugin API.
+ */
+interface McpToolPreparer {
+    suspend fun prepareInvocation(
+        toolName: String,
+        args: McpToolArgs,
+    ): McpPreparationResult?
+}
+
 // 7 of these arrived with the governance work (policy engine, approval bus, ledger); this
 // change adds the 8th, `maxResultChars`, purely as a test seam alongside `invokeTimeoutMs`.
 // Suppressed rather than hidden behind mutable state: the count is a real signal that this
@@ -666,11 +702,13 @@ internal class McpToolRegistryCore(
     /** Enabled tools = registered minus user-disabled minus permission-denied. This is what the bridge mirrors. */
     private val _tools = MutableStateFlow<List<RegisteredMcpTool>>(emptyList())
     val tools: StateFlow<List<RegisteredMcpTool>> = _tools.asStateFlow()
+    private val _preparers = ConcurrentHashMap<String, McpToolPreparer>()
 
     /** Host-owned marker that prevents prepared registration metadata being copied again on replay. */
     private interface ProviderSnapshot :
         McpToolProvider,
-        McpToolAliasProvider
+        McpToolAliasProvider,
+        McpToolPreparer
 
     /**
      * Snapshot [provider] without re-entering its metadata getters during a later replay. Tool
@@ -692,12 +730,18 @@ internal class McpToolRegistryCore(
             }
         // Read alongside tools() outside the lock - same plugin-code discipline.
         val aliases = (provider as? McpToolAliasProvider)?.toolAliases.orEmpty().toMap()
+        val preparer = provider as? McpToolPreparer
         return object : ProviderSnapshot {
             override val providerId = providerId
 
             override fun tools(): List<McpToolDefinition> = definitions
 
             override val toolAliases: Map<String, String> = aliases
+
+            override suspend fun prepareInvocation(
+                toolName: String,
+                args: McpToolArgs,
+            ): McpPreparationResult? = preparer?.prepareInvocation(toolName, args)
         }
     }
 
@@ -708,6 +752,10 @@ internal class McpToolRegistryCore(
         val providerId = prepared.providerId
         val defs = prepared.tools()
         val aliases = (prepared as? McpToolAliasProvider)?.toolAliases.orEmpty()
+        val preparer = (prepared as? McpToolPreparer) ?: (provider as? McpToolPreparer)
+        if (preparer != null) {
+            _preparers[providerId] = preparer
+        }
         synchronized(mutationLock) {
             if (_providers.value.containsKey(providerId)) {
                 // Same-id re-registration replaces the previous provider. Legitimate on
@@ -730,7 +778,8 @@ internal class McpToolRegistryCore(
         )
     }
 
-    fun unregisterProvider(providerId: String): Unit =
+    fun unregisterProvider(providerId: String): Unit {
+        _preparers.remove(providerId)
         synchronized(mutationLock) {
             if (!_providers.value.containsKey(providerId)) return@synchronized
             _providers.update { it - providerId }
@@ -742,6 +791,7 @@ internal class McpToolRegistryCore(
                 mapOf("providerId" to providerId),
             )
         }
+    }
 
     /**
      * Toggle one tool's kill-switch, **write-through**: the file is written first,
@@ -1001,13 +1051,73 @@ internal class McpToolRegistryCore(
         var result: McpToolResult? = null
         var executionStarted = false
         try {
-            // Shape and schema refusals precede authorization, approval, and execution.
-            val authorization =
-                if (invalidArguments != null) {
-                    McpApprovalDisposition.INVALID_ARGUMENTS to invalidArguments
-                } else {
-                    authorize(tool, args, effectivePolicy, revocation, secrets, escalated)
+            if (effectivePolicy == McpPolicyAction.DENY) {
+                disposition = McpApprovalDisposition.POLICY_DENIED
+                result = McpToolResult("MCP tool rejected by policy (DENY)", isError = true)
+                return result
+            }
+
+            if (invalidArguments != null) {
+                disposition = McpApprovalDisposition.INVALID_ARGUMENTS
+                result = McpToolResult(invalidArguments, isError = true)
+                return result
+            }
+
+            if (secrets is SecretPreparation.Refused) {
+                disposition = secrets.disposition
+                result = McpToolResult(secrets.message, isError = true)
+                return result
+            }
+
+            val preparer = _preparers[tool.providerId]
+            val prepared = preparer?.prepareInvocation(toolName, args)
+            val effectiveArgs: McpToolArgs
+            val displayModel: Any?
+            val allowStandingTrust: Boolean
+            val forceAsk: Boolean
+
+            when (prepared) {
+                is McpPreparationResult.Rejected -> {
+                    disposition = McpApprovalDisposition.POLICY_DENIED
+                    result = prepared.result
+                    return result
                 }
+                is McpPreparationResult.Prepared -> {
+                    effectiveArgs =
+                        if (prepared.executionObject != null) {
+                            args.withExecutionObject(prepared.executionObject)
+                        } else {
+                            args
+                        }
+                    displayModel = prepared.displayModel
+                    if (prepared.requiresFreshApproval) {
+                        allowStandingTrust = false
+                        forceAsk = true
+                    } else {
+                        allowStandingTrust = true
+                        forceAsk = false
+                    }
+                }
+                null -> {
+                    effectiveArgs = args
+                    displayModel = null
+                    allowStandingTrust = true
+                    forceAsk = false
+                }
+            }
+
+            val authorization =
+                authorizeInvocation(
+                    tool = tool,
+                    args = effectiveArgs,
+                    policy = effectivePolicy,
+                    revocation = revocation,
+                    escalated = escalated,
+                    secretRefs = secrets.descriptors,
+                    displayModel = displayModel,
+                    allowStandingTrust = allowStandingTrust,
+                    forceAsk = forceAsk,
+                )
             disposition = authorization.first
             val denial = authorization.second
             result =
@@ -1023,7 +1133,7 @@ internal class McpToolRegistryCore(
 
                     else -> {
                         executionStarted = true
-                        executeAuthorized(tool, secrets.executionArgs(args), secrets.resultFilter())
+                        executeAuthorized(tool, secrets.executionArgs(effectiveArgs), secrets.resultFilter())
                     }
                 }
             return requireNotNull(result)
@@ -1318,12 +1428,14 @@ internal class McpToolRegistryCore(
         args: McpToolArgs,
         policy: McpPolicyAction,
         revocation: Long,
-        // No default: a caller that forgot it would silently answer "not escalated", which is the
-        // direction that lets a broader approval stick.
         escalated: Boolean,
         secretRefs: List<SecretDescriptor> = emptyList(),
-    ): Pair<McpApprovalDisposition, String?> =
-        when (policy) {
+        displayModel: Any? = null,
+        allowStandingTrust: Boolean = true,
+        forceAsk: Boolean = false,
+    ): Pair<McpApprovalDisposition, String?> {
+        val effectivePolicy = if (forceAsk && policy == McpPolicyAction.ALLOW) McpPolicyAction.ASK else policy
+        return when (effectivePolicy) {
             McpPolicyAction.DENY -> {
                 McpApprovalDisposition.POLICY_DENIED to "MCP tool rejected by policy (DENY)"
             }
@@ -1352,26 +1464,30 @@ internal class McpToolRegistryCore(
                                     .withSecrets(secretRefs),
                             declaredReadOnly = tool.definition.readOnly,
                             toolDescription = tool.definition.description,
-                            policy = policy,
+                            policy = effectivePolicy,
                             escalated = escalated,
                             secretRefs = secretRefs,
+                            displayModel = displayModel,
+                            allowStandingTrust = allowStandingTrust,
                         )
                 ) {
                     is McpApprovalDecision.Approved -> {
-                        // Two reasons a broader scope cannot be honoured, one mechanism: the
-                        // destructive-shell gate overrides any saved allow on the next call
-                        // (#1624), and a secret-bearing call is refused a durable rule because
-                        // the prompt was raised for the secret, not for the tool.
+                        val sanitizedDecision =
+                            if (!allowStandingTrust) {
+                                decision.copy(trustForSession = false, persistPolicy = false, trustProvider = false)
+                            } else {
+                                onceIfEscalated(tool, decision, escalated || secretRefs.isNotEmpty())
+                            }
                         approvedAuthorization(
                             tool,
-                            onceIfEscalated(tool, decision, escalated || secretRefs.isNotEmpty()),
+                            sanitizedDecision,
                             revocation,
                         )
                     }
 
                     is McpApprovalDecision.Denied -> {
                         val disposition =
-                            if (decision.persistPolicy) {
+                            if (decision.persistPolicy && allowStandingTrust) {
                                 persistentDenialDisposition(tool, revocation)
                             } else {
                                 McpApprovalDisposition.DENIED_BY_OPERATOR
@@ -1389,6 +1505,7 @@ internal class McpToolRegistryCore(
                 }
             }
         }
+    }
 
     /**
      * Whether this disposition should also grant session trust for the tool in hand.
