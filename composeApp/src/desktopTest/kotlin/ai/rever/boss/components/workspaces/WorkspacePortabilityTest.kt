@@ -86,6 +86,40 @@ class WorkspacePortabilityTest {
     }
 
     @Test
+    fun `portable command inside a wider quote region uses the shared quote-context escaping`() {
+        val portable =
+            sampleWorkspace(projectPath).copy(
+                layout =
+                    SplitConfig.SinglePanel(
+                        PanelConfig(
+                            id = "main",
+                            tabs =
+                                listOf(
+                                    TabConfig(
+                                        type = "terminal",
+                                        title = "T",
+                                        initialCommand = "cd \"prefix$projectPath/sub\" && claude",
+                                    ),
+                                ),
+                        ),
+                    ),
+            )
+
+        val exported = WorkspacePortability.toPortable(portable)
+        assertEquals(
+            "cd \"prefix${WorkspacePortability.PLACEHOLDER}/sub\" && claude",
+            tabs(exported).single().initialCommand,
+        )
+
+        val destination = "/opt/a\"b$(touch nope)"
+        val restored = WorkspacePortability.fromPortable(exported, destination)
+        assertEquals(
+            "cd \"prefix${CommandProcessor.escapeInsideQuote(destination, '\"')}/sub\" && claude",
+            tabs(restored).single().initialCommand,
+        )
+    }
+
+    @Test
     fun `a Space with no project path is already portable and returned unchanged`() {
         val ws = sampleWorkspace(null)
         assertSame(ws, WorkspacePortability.toPortable(ws))

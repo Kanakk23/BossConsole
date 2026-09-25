@@ -6,6 +6,7 @@ import ai.rever.boss.components.plugin.currentPluginHealth
 import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
 import ai.rever.boss.components.plugin.tab_types.registerPanelHostTab
 import ai.rever.boss.components.registery.PanelComponentStoreRegistry
+import ai.rever.boss.components.window_panel.RegisterSplitViewState
 import ai.rever.boss.components.window_panel.SplitNode
 import ai.rever.boss.components.window_panel.SplitViewStateRegistry
 import ai.rever.boss.components.wizard.plugin.PluginWizardIntegration
@@ -28,10 +29,7 @@ import ai.rever.boss.components.workspaces.workspaceManager
 import ai.rever.boss.consumePendingInitialProject
 import ai.rever.boss.consumePendingInitialTab
 import ai.rever.boss.health.WorkspaceHealthSources
-import ai.rever.boss.performance.BrowserTabInfo
-import ai.rever.boss.performance.EditorTabResourceInfo
 import ai.rever.boss.performance.PerformanceState
-import ai.rever.boss.performance.TerminalInfo
 import ai.rever.boss.plugin.api.Panel.Companion.bottom
 import ai.rever.boss.plugin.api.Panel.Companion.left
 import ai.rever.boss.plugin.api.Panel.Companion.right
@@ -44,7 +42,6 @@ import ai.rever.boss.services.auth.CoreAuthService
 import ai.rever.boss.services.auth.UserDataStorage
 import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
 import ai.rever.boss.services.terminal.TerminalAPIAccess
-import ai.rever.boss.setupDownloadTabCloseCallback
 import ai.rever.boss.startup.StartupSettingsManager
 import ai.rever.boss.updater.UpdateCoordinator
 import ai.rever.boss.utils.CLIInstaller
@@ -108,23 +105,24 @@ internal fun BossAppStartupEffects(state: BossAppState) {
         state.draggablePanelComponent.panelDropZonesProvider = { state.tabDragComponent.panelDropZones }
     }
 
-    // Register this window's state in the global registry for multi-window features
-    LaunchedEffect(splitViewState, windowId) {
-        SplitViewStateRegistry.register(windowId, splitViewState)
-    }
-
     // Cancel the split state's deferred-open scope when the state itself goes.
     //
-    // Keyed on `splitViewState` ALONE, deliberately. The obvious place for this
-    // was `SplitViewStateRegistry.unregister`, which is called from the big
-    // DisposableEffect below - and that one is keyed on seven values, only one of
-    // which is the split state. A change to any of the other six would have
-    // cancelled the scope of a state that is still live, after which every
-    // deferred open in that window silently did nothing for the rest of the
-    // session, with no error anywhere.
+    // Keyed on `splitViewState` ALONE, deliberately. Neighbouring effects are keyed on
+    // more than the split state (the plugin effect below is keyed on seven values), and
+    // riding along on one of those would cancel the scope of a state that is still live,
+    // after which every deferred open in that window silently did nothing for the rest of
+    // the session, with no error anywhere.
     DisposableEffect(splitViewState) {
         onDispose { splitViewState.dispose() }
     }
+
+    // Register this window's state in the global registry for multi-window features.
+    // RegisterSplitViewState pairs the register with its unregister on the same keys, so
+    // the entry's lifetime is exactly this window's composition lifetime - an onDispose in
+    // a distant multi-keyed effect could strand a live window or leak a dead one. Declared
+    // after the state-dispose effect so teardown still unregisters before the state dies:
+    // Compose forgets sibling effects in reverse order.
+    RegisterSplitViewState(windowId, splitViewState)
 
     // Register this window's panel component store so the plugin reload path can
     // reset open sidebar panel slots across all windows (see PanelComponentStoreRegistry).
@@ -189,14 +187,9 @@ internal fun BossAppStartupEffects(state: BossAppState) {
         }
     }
 
-    // Register callback for FluckEngine to auto-close download redirect tabs (desktop only)
-    LaunchedEffect(splitViewState) {
-        setupDownloadTabCloseCallback(splitViewState)
-    }
-
     // Cancel any active drag when window loses focus (prevents stuck ghost)
     LaunchedEffect(state.tabDragComponent, windowId) {
-        WindowFocusManager.focusedWindowFlow.collect { focusedWindowId ->
+        WindowFocusManager.activeWindowFlow.collect { focusedWindowId ->
             // If this window lost focus and there's an active drag, cancel it
             if (focusedWindowId != windowId && state.tabDragComponent.isDragging) {
                 state.tabDragComponent.cancelDrag()
@@ -223,7 +216,18 @@ internal fun BossAppStartupEffects(state: BossAppState) {
     LaunchedEffect(windowId, windowProjectState) {
         val pendingProject = consumePendingInitialProject(windowId)
         if (pendingProject != null) {
+            // Opening a project in a NEW window is itself the answer to "where": the window's
+            // own fresh Space. So the project-selection effect must not ask for a layout on top.
+            state.answeredProjectPath = pendingProject.path
             windowProjectState.selectProject(pendingProject)
+        }
+    }
+
+    // "Open this project" from anywhere outside BossAppDialogs - the top bar, Home, the Open
+    // Project list - lands on this window's one "where should it open?" dialog.
+    LaunchedEffect(windowId) {
+        ProjectOpenRequests.requestsFor(windowId).collect { project ->
+            requestProjectOpen(state, state.windowProjectState, project)
         }
     }
 
@@ -234,7 +238,7 @@ internal fun BossAppStartupEffects(state: BossAppState) {
     // Use DisposableEffect to clean up on disposal and prevent memory leaks
     DisposableEffect(splitViewState, state.draggablePanelComponent) {
         // Cache for getAllPanels() to avoid repeated tree traversals
-        // All 6 providers are called within milliseconds of each other every 5 seconds
+        // The count providers are called within milliseconds of each other every 5 seconds
         // Using synchronized block for thread-safe access from provider lambdas
         val cacheLock = Any()
         var cachedPanels: List<SplitNode.Panel>? = null
@@ -289,51 +293,6 @@ internal fun BossAppStartupEffects(state: BossAppState) {
             },
         )
 
-        // Register detailed resource providers for the Resources tab
-        PerformanceState.registerDetailedResourceProviders(
-            browserTabs = {
-                getCachedPanels().flatMap { panel ->
-                    val tabsState = panel.tabsComponent.tabsState.value
-                    val activeTabId = tabsState.activeTab?.id
-                    tabsState.tabs.filterIsInstance<FluckTabInfo>().map { tab ->
-                        BrowserTabInfo(
-                            id = tab.id,
-                            title = tab.title,
-                            url = tab.currentUrl,
-                            isActive = tab.id == activeTabId,
-                        )
-                    }
-                }
-            },
-            terminals = {
-                getCachedPanels().flatMap { panel ->
-                    val tabsState = panel.tabsComponent.tabsState.value
-                    val activeTabId = tabsState.activeTab?.id
-                    tabsState.tabs.filterIsInstance<TerminalTabInfo>().map { tab ->
-                        TerminalInfo(
-                            id = tab.id,
-                            title = tab.title,
-                            isActive = tab.id == activeTabId,
-                        )
-                    }
-                }
-            },
-            editorTabs = {
-                getCachedPanels().flatMap { panel ->
-                    val tabsState = panel.tabsComponent.tabsState.value
-                    val activeTabId = tabsState.activeTab?.id
-                    tabsState.tabs.filterIsInstance<EditorTabInfo>().map { tab ->
-                        EditorTabResourceInfo(
-                            id = tab.id,
-                            fileName = tab.title,
-                            filePath = tab.filePath,
-                            isActive = tab.id == activeTabId,
-                        )
-                    }
-                }
-            },
-        )
-
         onDispose {
             PerformanceState.clearResourceProviders()
         }
@@ -362,15 +321,16 @@ internal fun BossAppStartupEffects(state: BossAppState) {
         val path = selectedProject.path
         if (path.isEmpty()) return@LaunchedEffect
 
-        // A project the restore selected is not a project the user just picked. Last
-        // Session carries its own layout, and both of the branches below would discard
-        // it - the apply by clearing panels, the prompt by covering it with a question
-        // nobody asked. See isUserProjectSelection.
-        if (!isUserProjectSelection(path, state.restoredProjectPath)) {
-            // Consumed, so re-opening the same project later still counts as a choice.
-            state.restoredProjectPath = null
-            return@LaunchedEffect
-        }
+        // A project the restore selected is not a project the user just picked: Last Session
+        // carries its own layout, and both branches below would discard it - the apply by
+        // clearing panels, the prompt by covering it with a question nobody asked. Nor is one a
+        // person placed through "where should this open?", which already decided the layout.
+        // Both marks are consumed together, so re-opening the same project later still counts as
+        // a choice. See gateProjectSelection.
+        val gate = gateProjectSelection(path, state.restoredProjectPath, state.answeredProjectPath)
+        state.restoredProjectPath = gate.restoredProjectPath
+        state.answeredProjectPath = gate.answeredProjectPath
+        if (!gate.handle) return@LaunchedEffect
 
         when (val choice = WorkspaceSettingsManager.currentSettings.value.resolveOnProjectSelection()) {
             // Named rather than folded into an else, so adding a fourth mode has to
@@ -381,7 +341,7 @@ internal fun BossAppStartupEffects(state: BossAppState) {
             is ProjectSelectionWorkspace.Ask -> {
                 // The prompt names the project so it reads as a consequence of what was
                 // just done, rather than an unexplained dialog at startup.
-                state.pendingWorkspacePrompt = selectedProject.name
+                state.pendingWorkspacePrompt = SpacePrompt(selectedProject, placeOnPick = false)
             }
 
             is ProjectSelectionWorkspace.Apply -> {
@@ -468,7 +428,9 @@ internal fun BossAppStartupEffects(state: BossAppState) {
             // Panels must release resources before this window's plugin classloaders close,
             // during window teardown. Store disposal is idempotent.
             state.panelComponentStore.dispose()
-            // Cleanup plugin coroutines
+            // Cleanup plugin coroutines. dispose() returns immediately - the teardown runs on
+            // the plugin's own background scope and must not be joined here: this is the UI
+            // thread, and blocking it is exactly the stall it exists to prevent.
             plugin.dispose()
             // NOTE: the updater is NOT torn down here. It is process-wide; the
             // first window to close used to cancel periodic checks and in-flight
@@ -476,8 +438,10 @@ internal fun BossAppStartupEffects(state: BossAppState) {
             // handle is released by rememberBossAppState, which also acquired it,
             // and app-level teardown is UpdateCoordinator.shutdown() in main.kt.
 
-            // Unregister this window's state from the global registries
-            SplitViewStateRegistry.unregister(windowId)
+            // Unregister this window's state from the global registries.
+            // SplitViewStateRegistry is not here: RegisterSplitViewState owns that pair on
+            // the (windowId, splitViewState) keys, so an unrelated key change above cannot
+            // drop a live window and a throw above cannot leak a dead one.
             WindowProjectStateRegistry.unregister(windowId)
             WindowRunnerStateRegistry.unregister(windowId)
             WindowGitStateRegistry.unregister(windowId)
