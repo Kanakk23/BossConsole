@@ -9,6 +9,7 @@ internal suspend fun PointerInputScope.detectTabDragGestures(
     component: TabDraggableComponent,
     onStart: (Offset) -> Unit,
     onEnd: (TabDropResult?) -> Unit,
+    sourceIndex: () -> Int? = { null },
 ) {
     var ownedDrag: DraggingTabInfo? = null
 
@@ -32,17 +33,29 @@ internal suspend fun PointerInputScope.detectTabDragGestures(
                 }
             },
             onDragEnd = {
-                if (ownsDrag()) onEnd(component.endDrag())
+                if (ownsDrag()) {
+                    val result = component.endDrag(sourceIndex())
+                    ownedDrag = null
+                    onEnd(result)
+                }
                 ownedDrag = null
             },
             onDragCancel = {
-                if (ownsDrag()) component.cancelDrag()
+                if (ownsDrag()) {
+                    component.cancelDrag()
+                    ownedDrag = null
+                    onEnd(null)
+                }
                 ownedDrag = null
             },
         )
     } finally {
         // Removal, pointerInput key changes and exceptions do not necessarily call onDragCancel.
         // Identity prevents an obsolete handler from cancelling a replacement drag.
-        if (ownsDrag()) component.cancelDrag()
+        if (ownsDrag()) {
+            component.cancelDrag()
+            ownedDrag = null
+            onEnd(null)
+        }
     }
 }

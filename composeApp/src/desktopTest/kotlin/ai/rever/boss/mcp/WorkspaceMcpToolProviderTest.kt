@@ -195,19 +195,38 @@ class WorkspaceMcpToolProviderTest {
     }
 
     @Test
-    fun `tools exposes workspace and terminal lifecycle operations and aliases`() {
-        val tools = WorkspaceMcpToolProvider.tools().map { it.name }.toSet()
-        assertTrue(tools.contains("list_workspaces"))
-        assertTrue(tools.contains("workspace_list"))
-        assertTrue(tools.contains("open_workspace"))
-        assertTrue(tools.contains("workspace_open"))
-        assertTrue(tools.contains("create_workspace"))
-        assertTrue(tools.contains("workspace_create"))
-        assertTrue(tools.contains("open_terminal"))
-        assertTrue(tools.contains("terminal_open"))
-        assertTrue(tools.contains("close_workspace"))
-        assertTrue(tools.contains("workspace_close"))
+    fun `tools advertises exactly one canonical name per workspace action`() {
+        val tools = WorkspaceMcpToolProvider.tools().map { it.name }
+        assertEquals(
+            listOf(
+                "list_workspaces",
+                "open_workspace",
+                "create_workspace",
+                "open_terminal",
+                "close_workspace",
+            ),
+            tools,
+        )
+        // The reversed legacy spellings stay invocable through the alias map but
+        // are never advertised: two names per action doubled every list_tools.
+        for ((alias, canonical) in WorkspaceMcpToolProvider.toolAliases) {
+            assertFalse(tools.contains(alias), "$alias must not be advertised")
+            assertTrue(tools.contains(canonical), "$alias must resolve to advertised $canonical")
+        }
     }
+
+    @Test
+    fun `list_tools exposes five workspace tools while the alias still resolves on invoke`() =
+        runBlocking {
+            val core = createTestCore()
+            assertEquals(5, core.allTools.value.count { it.providerId == "boss-workspace" })
+            assertEquals(5, core.tools.value.count { it.providerId == "boss-workspace" })
+
+            val result = core.invoke("workspace_list", "{}")
+            assertFalse(result.isError, "Alias workspace_list must resolve: ${result.text}")
+            val json = Json.parseToJsonElement(result.text).jsonObject
+            assertTrue(json["success"]?.jsonPrimitive?.booleanOrNull == true)
+        }
 
     @Test
     fun `registered in McpToolRegistryImpl by default`() {
@@ -593,10 +612,11 @@ class WorkspaceMcpToolProviderTest {
     @Test
     fun `resolveTargetWindow refuses targeting when multiple windows are open and windowId omitted`() =
         runBlocking {
-            val tabReg1 = TabRegistry()
-            val tabReg2 = TabRegistry()
-            val state1 = SplitViewState(tabReg1, "window-multi-1")
-            val state2 = SplitViewState(tabReg2, "window-multi-2")
+            // Both windows share the stub registry: what is being measured is which window the
+            // workspace lands in, and Dual Terminal only builds at all when "terminal" has a
+            // factory - an empty registry now gets the apply refused rather than applied empty.
+            val state1 = SplitViewState(stubTabRegistry, "window-multi-1")
+            val state2 = SplitViewState(stubTabRegistry, "window-multi-2")
             createdSplitViewStates.add(state1)
             createdSplitViewStates.add(state2)
 

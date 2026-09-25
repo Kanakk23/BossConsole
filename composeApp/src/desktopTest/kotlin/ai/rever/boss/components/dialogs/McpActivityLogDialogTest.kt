@@ -25,6 +25,9 @@ class McpActivityLogDialogTest {
             McpApprovalDisposition.DENIED_BY_OPERATOR,
             McpApprovalDisposition.POLICY_DENIED,
             McpApprovalDisposition.PERSISTENTLY_DENIED,
+            // Refused on argument shape before authorization - the tool never ran, so this
+            // is a withheld-by-the-host denial, not a tool fault.
+            McpApprovalDisposition.INVALID_ARGUMENTS,
         ).forEach { disposition ->
             assertEquals(McpUnsuccessfulCategory.DENIED, disposition.unsuccessfulCategory, disposition.name)
         }

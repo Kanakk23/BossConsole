@@ -743,6 +743,19 @@ logger.error(LogCategory.NETWORK, "Request failed", error = exception)
 
 **Config**: Set `BOSS_LOG_LEVEL` env var or `boss.log.level` system property (TRACE/DEBUG/INFO/WARN/ERROR)
 
+**Log file**: off unless asked for. `BOSS_LOG_FILE=/path/to/boss.log` (or `boss.log.file`) turns on a
+size-rotated file (10 MB, five backups) that receives entries at `BOSS_LOG_FILE_LEVEL` (or
+`boss.log.file.level`) and above, default ERROR. `BOSS_LOG_FILE=off` or a level of `OFF` disables it even if a
+default is ever switched on. The file threshold is applied after the console level, so it can only narrow: with the
+console at INFO and the file at DEBUG, the file gets INFO. Blank is unset at every step, an
+unrecognised level falls through to the next source rather than to INFO. File and console receive the same
+entries; callers must use `LogSanitizer` before logging sensitive data, since `BossLogger` does not sanitize them.
+`BossLogger.configureFromEnvironment()` in
+`main.kt` is the only host entry point; `configure()` has no host caller. Flipping
+`FILE_LOGGING_ON_BY_DEFAULT` in `BossLogger` makes it default-on at `~/.boss/logs/boss.log` for every
+install; that switch is deliberately one constant, because whether to default on was raised on #394 and
+is a policy call.
+
 ## Browser native disposal
 
 `BrowserHandleImpl.dispose()` invalidates the handle and detaches its UI, then
@@ -2498,6 +2511,15 @@ never construct a trailer from the OS username. This uses the selected repositor
 committer identity and Git trailer deduplication for ordinary commits and amend.
 Keep the original four-argument suspend `GitService.commit` overload and its defaults
 for already compiled callers; it delegates with sign-off disabled.
+
+## Recent-page loads respect dismissal
+
+RecentBrowserPagesManager registers a load ticket before launching startup IO. Clear and removal
+predicates update that ticket alongside the in-memory mutation; publication filters only loaded
+rows, preserving newer recorded visits. Keep the guard lock away from disk IO and pass the same
+ticket through browser-history bootstrap. Release tickets after loading; they are transient
+startup coordination, not permanent URL tombstones. Tests using the singleton must await its
+initial load, drain writes, and restore both page/dismissal flows before restoring settingsFile.
 
 ### Run scan publication ownership
 

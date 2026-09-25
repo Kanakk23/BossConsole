@@ -307,7 +307,7 @@
     <ID>LongMethod:DynamicPluginManager.kt$DynamicPluginManager$private suspend fun uninstallPlugin( pluginId: String, force: Boolean, waitForGC: Boolean, closeTabsAcrossWindows: Boolean, ): Result&lt;Unit&gt;</ID>
     <ID>LongMethod:DynamicPluginManager.kt$DynamicPluginManager$suspend fun installPlugin( jarPath: String, enabled: Boolean = true, ): Result&lt;DynamicPluginInfo&gt;</ID>
     <ID>LongMethod:DynamicPluginManager.kt$DynamicPluginManager$suspend fun loadBundledPlugins(bundledDir: java.io.File): Map&lt;String, Result&lt;DynamicPluginInfo&gt;&gt;</ID>
-    <ID>LongMethod:DynamicPluginManager.kt$DynamicPluginManager$suspend fun loadPersistedPlugins(plugins: List&lt;PersistedPluginEntry&gt;): Map&lt;String, Result&lt;DynamicPluginInfo&gt;&gt;</ID>
+    <ID>LongMethod:DynamicPluginManager.kt$DynamicPluginManager$suspend fun loadPersistedPlugins( plugins: List&lt;PersistedPluginEntry&gt;, allowedRoots: List&lt;java.io.File&gt; = managedPluginJarRoots(), ): Map&lt;String, Result&lt;DynamicPluginInfo&gt;&gt;</ID>
     <ID>LongMethod:DynamicPluginManager.kt$DynamicPluginManager.Companion$private suspend fun hotSwapApiLayerOrchestration(pluginDir: java.io.File): Result&lt;Int&gt;</ID>
     <ID>LongMethod:EditableKeymapSettings.kt$@Composable fun EditableKeymapSettings()</ID>
     <ID>LongMethod:EditableKeymapSettings.kt$@Composable private fun ShortcutItem( binding: KeyBinding, hasConflict: Boolean, conflictingBindings: List&lt;KeyBinding&gt;, onEdit: () -&gt; Unit, )</ID>
@@ -963,7 +963,7 @@
     <ID>NestedBlockDepth:DownloadDataProviderImpl.kt$DownloadDataProviderImpl$override suspend fun removeDownload(id: String): Result&lt;Unit&gt;</ID>
     <ID>NestedBlockDepth:DownloadSettings.kt$private fun getLinuxDownloadsDirectory(userHome: String): String</ID>
     <ID>NestedBlockDepth:DynamicPluginManager.kt$DynamicPluginManager$suspend fun installPlugin( jarPath: String, enabled: Boolean = true, ): Result&lt;DynamicPluginInfo&gt;</ID>
-    <ID>NestedBlockDepth:DynamicPluginManager.kt$DynamicPluginManager$suspend fun loadPersistedPlugins(plugins: List&lt;PersistedPluginEntry&gt;): Map&lt;String, Result&lt;DynamicPluginInfo&gt;&gt;</ID>
+    <ID>NestedBlockDepth:DynamicPluginManager.kt$DynamicPluginManager$suspend fun loadPersistedPlugins( plugins: List&lt;PersistedPluginEntry&gt;, allowedRoots: List&lt;java.io.File&gt; = managedPluginJarRoots(), ): Map&lt;String, Result&lt;DynamicPluginInfo&gt;&gt;</ID>
     <ID>NestedBlockDepth:DynamicPluginManager.kt$DynamicPluginManager.Companion$private suspend fun hotSwapApiLayerOrchestration(pluginDir: java.io.File): Result&lt;Int&gt;</ID>
     <ID>NestedBlockDepth:FluckEngine.kt$FluckEngine$private fun cleanupStaleLockFiles(profileDir: java.nio.file.Path): Boolean</ID>
     <ID>NestedBlockDepth:FluckEngine.kt$FluckEngine$private fun killStaleChromiumProcesses()</ID>

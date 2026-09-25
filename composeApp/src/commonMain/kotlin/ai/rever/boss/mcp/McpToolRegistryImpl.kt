@@ -1,5 +1,6 @@
 package ai.rever.boss.mcp
 
+import ai.rever.boss.arcade.rushhour.mcp.RushHourMcpTools
 import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.mcp.sandbox.DefaultMcpRiskEvaluator
 import ai.rever.boss.mcp.sandbox.McpRiskLevel
@@ -37,6 +38,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -160,6 +162,7 @@ object McpToolRegistryImpl : McpToolRegistry {
 
     init {
         registerProvider(WorkspaceMcpToolProvider)
+        registerProvider(RushHourMcpTools)
         registerProvider(SnippetMcpToolProvider)
         registerProvider(NotificationMcpToolProvider)
         registerProvider(IntrospectionMcpToolProvider)
@@ -330,6 +333,38 @@ internal fun mcpToolPermitted(
     }
 
 /**
+ * The closest candidate tool name to [name], when one is near enough to be a plausible typo.
+ * Backs the "did you mean" hint in [McpToolRegistryCore.invoke]'s unknown-tool rejection; a
+ * name farther than [maxOf] `(2, name.length / 3)` edits is treated as unrelated rather than
+ * offering a misleading suggestion.
+ */
+internal fun nearestToolName(
+    name: String,
+    candidates: Collection<String>,
+): String? =
+    candidates
+        .minByOrNull { editDistance(it, name) }
+        ?.takeIf { editDistance(it, name) <= maxOf(2, name.length / 3) }
+
+/** Plain Levenshtein distance - tool names are short, no early exit needed. */
+private fun editDistance(
+    a: String,
+    b: String,
+): Int {
+    var prev = IntArray(b.length + 1) { it }
+    for (i in 1..a.length) {
+        val cur = IntArray(b.length + 1)
+        cur[0] = i
+        for (j in 1..b.length) {
+            val substitution = if (a[i - 1] == b[j - 1]) 0 else 1
+            cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + substitution)
+        }
+        prev = cur
+    }
+    return prev[b.length]
+}
+
+/**
  * Hard ceiling, in characters, on what [McpToolRegistryCore.invoke] hands back for one
  * plugin tool call.
  *
@@ -411,6 +446,18 @@ private fun truncationMarker(
         "limit, so the last $dropped characters were cut. Whatever the tool put at the end is " +
         "gone, including any note it appended about content it had already left out. Re-run " +
         "with a narrower query, a filter, or a smaller range to get the rest.]"
+
+/**
+ * A provider that still answers to legacy tool names on invoke without
+ * advertising them. The registry reads [toolAliases] once at registration
+ * (same snapshot semantics as [McpToolProvider.tools]); the aliases never
+ * appear in `allTools`/`tools`, so they cost nothing on list_tools, the
+ * bridge mirror, or search, while old callers keep working.
+ */
+internal interface McpToolAliasProvider {
+    /** Invoked alias name -> canonical name as declared in [McpToolProvider.tools]. */
+    val toolAliases: Map<String, String>
+}
 
 /**
  * Testable core behind [McpToolRegistryImpl]. Extracted so unit tests can
@@ -572,6 +619,16 @@ internal class McpToolRegistryCore(
      */
     private val _providers = MutableStateFlow<Map<String, List<McpToolDefinition>>>(emptyMap())
 
+    /**
+     * Legacy/alias tool names by provider id, captured at registration beside the
+     * cached tool list. Aliases are invoke-only: they are never flattened into
+     * [allTools], so list_tools, the bridge mirror and tool search pay one name,
+     * description and schema per action instead of two. Resolving an alias to the
+     * canonical tool means it inherits that tool's disabled, permission and
+     * policy state automatically - an alias cannot bypass the canonical gate.
+     */
+    private val _providerAliases = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
+
     private val _all = MutableStateFlow<List<RegisteredMcpTool>>(emptyList())
     val allTools: StateFlow<List<RegisteredMcpTool>> = _all.asStateFlow()
 
@@ -619,6 +676,8 @@ internal class McpToolRegistryCore(
                 )
                 emptyList()
             }
+        // Read alongside tools() outside the lock - same plugin-code discipline.
+        val aliases = (provider as? McpToolAliasProvider)?.toolAliases.orEmpty()
         synchronized(mutationLock) {
             if (_providers.value.containsKey(provider.providerId)) {
                 // Same-id re-registration replaces the previous provider. Legitimate on
@@ -631,6 +690,7 @@ internal class McpToolRegistryCore(
                 )
             }
             _providers.update { it + (provider.providerId to defs) }
+            _providerAliases.update { it + (provider.providerId to aliases) }
             recompute()
         }
         logger.info(
@@ -644,6 +704,7 @@ internal class McpToolRegistryCore(
         synchronized(mutationLock) {
             if (!_providers.value.containsKey(providerId)) return@synchronized
             _providers.update { it - providerId }
+            _providerAliases.update { it - providerId }
             recompute()
             logger.info(
                 LogCategory.SYSTEM,
@@ -847,22 +908,53 @@ internal class McpToolRegistryCore(
         return mcpToolPermitted(def, access.isAdmin, access.permissions)
     }
 
+    /**
+     * Alias name -> (providerId, canonical tool name) for the first provider
+     * that claims it, or null. The direct name lookup in [invoke] runs before
+     * this, so an alias can never shadow a real tool registered under it.
+     */
+    private fun resolveAlias(toolName: String): Pair<String, String>? =
+        _providerAliases.value.entries.firstNotNullOfOrNull { (providerId, aliases) ->
+            aliases[toolName]?.let { providerId to it }
+        }
+
+    /**
+     * Resolve an invoked name to its exposed tool: a direct registered-name
+     * match wins; on a miss, a registered alias resolves to its canonical tool
+     * in the same provider. Aliases only resolve through [tools], so the
+     * canonical's disabled and permission state decides, never the alias's own.
+     */
+    private fun findInvocableTool(toolName: String): RegisteredMcpTool? =
+        _tools.value.firstOrNull { it.definition.name == toolName }
+            ?: resolveAlias(toolName)?.let { (providerId, canonicalName) ->
+                _tools.value.firstOrNull {
+                    it.providerId == providerId && it.definition.name == canonicalName
+                }
+            }
+
     @Suppress("LongMethod") // Keep authorization and execution inside the same cancellation audit boundary.
     suspend fun invoke(
         toolName: String,
         arguments: String,
     ): McpToolResult {
         val tool =
-            _tools.value.firstOrNull { it.definition.name == toolName }
-                ?: return McpToolResult("Unknown or disabled MCP tool: $toolName", isError = true)
+            findInvocableTool(toolName)
+                ?: return McpToolResult(
+                    unavailableToolMessage(resolveAlias(toolName)?.second ?: toolName),
+                    isError = true,
+                )
         val args = parseMcpToolArgs(arguments, logger)
-        val revocation = policyEngine.revocationVersion(toolName, tool.providerId)
+        // Policy is consulted under the canonical name: an alias must inherit the
+        // canonical tool's policy, not fall back to whatever default the alias's
+        // own name would classify as.
+        val canonicalName = tool.definition.name
+        val revocation = policyEngine.revocationVersion(canonicalName, tool.providerId)
         // The definition's own readOnly declaration rides along on every policy consult for
         // this invocation: a tool that declared side effects classifies as mutating whatever
         // its name says (#804), so it gets the mutating default - ASK under the factory
         // config - rather than being auto-allowed for avoiding the catalog's name patterns.
-        val savedPolicy = policyEngine.policyFor(toolName, tool.providerId, tool.definition.readOnly)
-        val policy = askBeforeDestructiveShell(toolName, args, savedPolicy)
+        val savedPolicy = policyEngine.policyFor(canonicalName, tool.providerId, tool.definition.readOnly)
+        val policy = askBeforeDestructiveShell(canonicalName, args, savedPolicy)
         val startTime = System.nanoTime()
         // The secret pre-pass runs before the audit boundary below on purpose: nothing in it
         // executes the tool, and a cancellation while the vault is being read has nothing to
@@ -874,10 +966,17 @@ internal class McpToolRegistryCore(
         var result: McpToolResult? = null
         var executionStarted = false
         try {
-            // `escalated` is dev's destructive-shell gate (#1577/#1624); the secret path reaches
-            // the same conclusion by its own route, so both flow into one authorize().
+            // Non-object argument text used to collapse to empty args in parseArgs and run
+            // the handler on defaults anyway - a refusal comes before authorization so the
+            // call is ledgered as INVALID_ARGUMENTS and never prompts nor executes.
+            val shapeError = nonObjectArgsError(tool.definition, arguments)
             val authorization =
-                authorize(tool, args, effectivePolicy, revocation, secrets, escalated = policy != savedPolicy)
+                if (shapeError != null) {
+                    McpApprovalDisposition.INVALID_ARGUMENTS to shapeError
+                } else {
+                    // The destructive-shell and secret paths both affect authorization.
+                    authorize(tool, args, effectivePolicy, revocation, secrets, escalated = policy != savedPolicy)
+                }
             disposition = authorization.first
             val denial = authorization.second
             result =
@@ -912,7 +1011,7 @@ internal class McpToolRegistryCore(
             // hop on the caller - the disk work itself belongs to the writer thread.
             withContext(NonCancellable + Dispatchers.IO) {
                 ledger.record(
-                    toolName = toolName,
+                    toolName = canonicalName,
                     providerId = tool.providerId,
                     policyApplied = effectivePolicy,
                     approvalDisposition = disposition,
@@ -930,6 +1029,26 @@ internal class McpToolRegistryCore(
                     secretRefs = secrets.references.map { it.ledgerName },
                 )
             }
+        }
+    }
+
+    /**
+     * Why [toolName] missed the exposed set, stated precisely: never registered, switched off,
+     * or denied to the current user. The single "Unknown or disabled" catch-all this replaces
+     * sent the caller to list every tool just to learn which case it had hit - and a wrong
+     * guess retried the same call. The suggestion is drawn from [permittedTools] only, so the
+     * hint cannot name a tool the caller could not see anyway.
+     */
+    private fun unavailableToolMessage(toolName: String): String {
+        if (_all.value.none { it.definition.name == toolName }) {
+            val suggestion = nearestToolName(toolName, permittedTools().map { it.definition.name })
+            return "No such MCP tool: '$toolName'" +
+                (suggestion?.let { " - did you mean '$it'?" } ?: "")
+        }
+        return if (toolName in _disabled.value) {
+            "MCP tool '$toolName' is disabled - re-enable it to call it."
+        } else {
+            "MCP tool '$toolName' is not permitted for the current user."
         }
     }
 
@@ -1409,6 +1528,57 @@ internal class McpToolRegistryCore(
             t.message ?: t::class.simpleName ?: "unknown error"
         }
     }
+
+    /**
+     * `null` when [arguments] is blank or parses to a JSON object; otherwise the refusal
+     * text [invoke] returns without running the handler. Blank text stays load-bearing
+     * as "no arguments" ([parseArgs] maps it to `{}`); only a caller that sent non-object
+     * content - a JSON array, a bare scalar, or unparseable text - is refused, and the
+     * message names the expected inputSchema and the received shape so the caller can
+     * fix the call rather than retry blind. The raw text is never echoed into the error.
+     */
+    private fun nonObjectArgsError(
+        definition: McpToolDefinition,
+        arguments: String,
+    ): String? {
+        if (arguments.isBlank()) return null
+        return receivedArgsShape(arguments)?.let { received ->
+            "MCP tool '${definition.name}' expects arguments as a JSON object matching " +
+                "inputSchema ${definition.inputSchema}; received $received"
+        }
+    }
+
+    /** `null` for a JSON object, else a short name for the received shape - never the raw text. */
+    private fun receivedArgsShape(arguments: String): String? =
+        try {
+            when (val el = json.parseToJsonElement(arguments)) {
+                is JsonObject -> null
+
+                // JsonNull must precede JsonPrimitive - it is one.
+                is JsonNull -> "null"
+
+                is JsonArray -> "a JSON array"
+
+                is JsonPrimitive -> primitiveShape(el)
+            }
+        } catch (t: Throwable) {
+            logger.debug(
+                LogCategory.SYSTEM,
+                "MCP tool arguments are not parseable JSON - refusing invocation",
+                mapOf("error" to t.toString()),
+            )
+            "unparseable input"
+        }
+
+    // The lenient element parser also accepts unquoted tokens ("garbage" parses as a
+    // primitive literal), so a non-boolean non-number is reported as a bare token.
+    private fun primitiveShape(el: JsonPrimitive): String =
+        when {
+            el.isString -> "a JSON string"
+            el.booleanOrNull != null -> "a JSON boolean"
+            el.longOrNull != null || el.doubleOrNull != null -> "a JSON number"
+            else -> "a bare token"
+        }
 
     /** Parse a JSON-object arguments string into a typed [McpToolArgs] of scalars. */
 }
