@@ -2,7 +2,6 @@ package ai.rever.boss.window
 
 import ai.rever.boss.window.MacToolbarRuntime.clazz
 import ai.rever.boss.window.MacToolbarRuntime.pointer
-import ai.rever.boss.window.MacToolbarRuntime.selector
 import ai.rever.boss.window.MacToolbarRuntime.send
 import ai.rever.boss.window.MacToolbarRuntime.string
 import com.sun.jna.Pointer
@@ -68,7 +67,9 @@ internal class MacToolbarAddressField {
         send(view, "setSendsWholeSearchString:", 1.toByte())
         send(view, "setSendsSearchStringImmediately:", 0.toByte())
         send(view, "setTarget:", target)
-        send(view, "setAction:", selector("submitAddress:"))
+        // NSSearchField also sends its action when cleared. Only the delegate's
+        // insertNewline command should navigate, never a search-field change action.
+        send(view, "setAction:", null)
         copyButton.install(view, target)
         installNativeAddressBackground(item, view)
         send(item, "setMinSize:", ToolbarIconSize(180.0, 24.0))
