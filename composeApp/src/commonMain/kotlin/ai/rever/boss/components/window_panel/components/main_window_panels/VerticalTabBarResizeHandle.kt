@@ -1,5 +1,6 @@
 package ai.rever.boss.components.window_panel.components.main_window_panels
 
+import ai.rever.boss.components.sidebar.sidebarResizePreview
 import ai.rever.boss.platform.CursorUtil.cursorForHorizontalResize
 import ai.rever.boss.window.TabBarVerticalWidthRange
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -39,6 +40,7 @@ internal fun BoxScope.VerticalTabBarResizeHandle(
     currentWidth: Float,
     onPreview: (Float) -> Unit,
     onCommit: (Float) -> Unit,
+    onCancel: () -> Unit,
 ) {
     if (!enabled) return
 
@@ -48,6 +50,7 @@ internal fun BoxScope.VerticalTabBarResizeHandle(
     val latestWidth by rememberUpdatedState(currentWidth)
     val latestPreview by rememberUpdatedState(onPreview)
     val latestCommit by rememberUpdatedState(onCommit)
+    val latestCancel by rememberUpdatedState(onCancel)
 
     Box(
         modifier =
@@ -66,16 +69,16 @@ internal fun BoxScope.VerticalTabBarResizeHandle(
                             startWidth = latestWidth
                             accumulated = 0f
                         },
-                        onDragEnd = { latestCommit(clampBarWidth(startWidth + accumulated.toDp().value)) },
-                        onDragCancel = { latestCommit(clampBarWidth(startWidth + accumulated.toDp().value)) },
+                        onDragEnd = { latestCommit(startWidth + accumulated.toDp().value) },
+                        onDragCancel = { latestCancel() },
                     ) { change, dragAmount ->
                         change.consume()
                         accumulated += dragAmount.x
-                        latestPreview(clampBarWidth(startWidth + accumulated.toDp().value))
+                        latestPreview(sidebarResizePreview(startWidth + accumulated.toDp().value))
                     }
                 },
     )
 }
 
-/** A width the bar can actually be. The one place the range is applied to a dragged value. */
+/** Persisted expanded widths share the appearance slider range; drag previews may be narrower. */
 internal fun clampBarWidth(dp: Float): Float = dp.coerceIn(TabBarVerticalWidthRange)

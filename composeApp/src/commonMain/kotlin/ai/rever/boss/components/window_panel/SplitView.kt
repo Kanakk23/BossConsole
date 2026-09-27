@@ -14,6 +14,7 @@ import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
 import ai.rever.boss.components.sidebar.HiddenSidebarHoverEdge
 import ai.rever.boss.components.sidebar.integratedSidebarToggle
 import ai.rever.boss.components.sidebar.sidebarRegion
+import ai.rever.boss.components.sidebar.sidebarResizeResult
 import ai.rever.boss.components.sidebar.windowSidebarModifier
 import ai.rever.boss.components.window_panel.components.BossResizablePanel
 import ai.rever.boss.components.window_panel.components.main_window_panels.BossMainPanel
@@ -2837,12 +2838,12 @@ private fun WindowBarRow(
                     enabled = !bar.railShown,
                     currentWidth = barWidth.value,
                     onPreview = { width -> draggedWidth = width },
+                    onCancel = { draggedWidth = null },
                     onCommit = { width ->
                         draggedWidth = null
                         barWidthScope.launch {
                             WindowAppearanceSettingsManager.updateSettings(
-                                WindowAppearanceSettingsManager.currentSettings.value
-                                    .copy(tabBarVerticalWidth = width),
+                                sidebarResizeResult(WindowAppearanceSettingsManager.currentSettings.value, width),
                             )
                         }
                     },
