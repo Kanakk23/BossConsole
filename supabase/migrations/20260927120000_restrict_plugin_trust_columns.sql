@@ -39,6 +39,13 @@
 -- other column keep working exactly as the row policies allow, and INSERT of
 -- `org_id` keeps working under its own policy check.
 --
+-- The row policy "Users with plugins.admin.publish can update any plugin"
+-- still gives an admin's own session row access for UPDATE, but only to the
+-- columns granted here. An admin tool outside this repository that sets
+-- `verified` or moves `org_id` through PostgREST as `authenticated` now gets
+-- 42501, and has to go through the edge function's admin route
+-- (plugin-store routes/admin.ts), which is the sanctioned writer.
+--
 -- How: a table-level grant cannot be narrowed by revoking one column, so where
 -- a client role holds table-level INSERT or UPDATE, that grant is replaced by a
 -- column-level grant of the same privilege on every current column except the
@@ -50,7 +57,15 @@
 --
 -- Consequence for later migrations, as in 20260918000000: a new column added to
 -- public.plugins is not client-writable until a migration grants it. That is
--- the fail-closed direction and the price of a column-level grant.
+-- the fail-closed direction and the price of a column-level grant, and
+-- plugin_trust_columns_test.sql pins the exact set of closed columns, so such a
+-- column fails the suite until someone decides whether clients may write it.
+--
+-- Do not copy this block to protect a third column. It acts only on a
+-- table-level grant, and after it has run none remains, so has_table_privilege
+-- is false and the block would do nothing. With the grants per-column, a later
+-- migration closes a column directly: REVOKE UPDATE (<column>) ON public.plugins
+-- FROM anon, authenticated (and INSERT likewise if needed).
 -- ============================================================================
 
 DO $restrict_plugin_trust_columns$

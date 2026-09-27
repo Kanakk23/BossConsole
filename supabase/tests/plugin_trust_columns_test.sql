@@ -8,7 +8,7 @@
 -- Client statements run under `set local role authenticated` with a JWT claim,
 -- the same privileges PostgREST applies; fixtures are staged as the test owner.
 begin;
-select plan(13);
+select plan(17);
 
 insert into auth.users (id, email) values
     ('e1900000-0000-4000-8000-000000000001', 'author@pgtap.test'),
@@ -99,6 +99,34 @@ select ok(
     has_column_privilege('authenticated', 'public.plugins', 'display_name', 'UPDATE')
     and has_column_privilege('authenticated', 'public.plugins', 'display_name', 'INSERT'),
     'authenticated keeps write access to the ordinary columns');
+
+-- ---- The closed set, exactly. A column added to public.plugins is not
+-- client-writable until a migration grants it; these fail until someone decides
+-- whether it should be, and either grants it or adds it here on purpose.
+select is(
+    (select array_agg(a.attname::text order by a.attname) from pg_attribute a
+     where a.attrelid = 'public.plugins'::regclass and a.attnum > 0 and not a.attisdropped
+       and not has_column_privilege('authenticated', 'public.plugins', a.attname, 'UPDATE')),
+    array['org_id', 'verified'],
+    'exactly verified and org_id are closed to an authenticated UPDATE');
+select is(
+    (select array_agg(a.attname::text order by a.attname) from pg_attribute a
+     where a.attrelid = 'public.plugins'::regclass and a.attnum > 0 and not a.attisdropped
+       and not has_column_privilege('authenticated', 'public.plugins', a.attname, 'INSERT')),
+    array['verified'],
+    'exactly verified is closed to an authenticated INSERT');
+select is(
+    (select array_agg(a.attname::text order by a.attname) from pg_attribute a
+     where a.attrelid = 'public.plugins'::regclass and a.attnum > 0 and not a.attisdropped
+       and not has_column_privilege('anon', 'public.plugins', a.attname, 'UPDATE')),
+    array['org_id', 'verified'],
+    'and the same two for anon UPDATE');
+select is(
+    (select array_agg(a.attname::text order by a.attname) from pg_attribute a
+     where a.attrelid = 'public.plugins'::regclass and a.attnum > 0 and not a.attisdropped
+       and not has_column_privilege('anon', 'public.plugins', a.attname, 'INSERT')),
+    array['verified'],
+    'and verified alone for anon INSERT');
 
 select * from finish();
 rollback;
