@@ -239,7 +239,7 @@ object RecentBrowserPagesManager {
      */
     private val promoKeys: Set<String> by lazy { POPULAR_DEV_SITES.map { canonicalUrlKey(it.url) }.toSet() }
 
-    private val loadGuard = RecentPagesLoadGuard()
+    private val loadGuard = InFlightListLoadGuard<RecentBrowserPage>()
 
     // Register before launch: a Clear before the IO coroutine starts must also win.
     internal val initialLoad: Job = loadGuard.begin().let { ticket -> scope.launch { loadAsync(ticket) } }
@@ -252,7 +252,7 @@ object RecentBrowserPagesManager {
      * as [RecentFilesManager]'s already is; production still reaches it only from `init`.
      */
     internal suspend fun loadAsync(
-        ticket: RecentPagesLoadGuard.Ticket = loadGuard.begin(),
+        ticket: InFlightListLoadGuard.Ticket<RecentBrowserPage> = loadGuard.begin(),
         read: suspend (File) -> String = { it.readText() },
         historyFile: File = BossDirectories.resolve("browser-history.json"),
     ) = withContext(Dispatchers.IO) {
@@ -307,7 +307,7 @@ object RecentBrowserPagesManager {
      * This provides initial data when no recent pages have been recorded yet.
      */
     private suspend fun bootstrapFromBrowserHistory(
-        ticket: RecentPagesLoadGuard.Ticket,
+        ticket: InFlightListLoadGuard.Ticket<RecentBrowserPage>,
         read: suspend (File) -> String,
         browserHistoryFile: File,
     ) = withContext(Dispatchers.IO) {
