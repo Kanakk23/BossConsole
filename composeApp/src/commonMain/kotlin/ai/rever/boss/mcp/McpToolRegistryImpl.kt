@@ -11,6 +11,7 @@ import ai.rever.boss.mcp.secrets.SecretPreparation
 import ai.rever.boss.mcp.secrets.SecretRecord
 import ai.rever.boss.mcp.secrets.SecretReferenceResolver
 import ai.rever.boss.mcp.secrets.withSecrets
+import ai.rever.boss.mcp.update.AppUpdateMcpToolProvider
 import ai.rever.boss.plugin.api.McpToolArgs
 import ai.rever.boss.plugin.api.McpToolDefinition
 import ai.rever.boss.plugin.api.McpToolProvider
@@ -163,6 +164,7 @@ object McpToolRegistryImpl : McpToolRegistry {
         registerProvider(WorkspaceMcpToolProvider)
         registerProvider(WorkspacePortabilityMcpToolProvider)
         registerProvider(DownloadHistoryMcpToolProvider)
+        registerProvider(AppUpdateMcpToolProvider())
         registerProvider(SnippetMcpToolProvider)
         registerProvider(NotificationMcpToolProvider)
         registerProvider(IntrospectionMcpToolProvider)

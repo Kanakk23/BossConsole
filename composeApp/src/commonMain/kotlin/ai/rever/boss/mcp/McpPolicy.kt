@@ -171,6 +171,10 @@ object McpMutatingToolCatalog {
      */
     val KNOWN_MUTATING_TOOLS: Set<String> =
         setOf(
+            // Application updater
+            "app_update_check",
+            "app_update_download",
+            "app_update_install",
             // Kubernetes
             "k8s_delete",
             "k8s_exec",
