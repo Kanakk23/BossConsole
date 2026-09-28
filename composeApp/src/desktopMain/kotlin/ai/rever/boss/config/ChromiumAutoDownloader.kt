@@ -830,6 +830,11 @@ object ChromiumAutoDownloader {
         }
 
         if (entry.isDirectory) {
+            // closeEntry() drains unread content without going through copyBounded. Reject
+            // directory payloads before that unbudgeted decompression can take place.
+            if (zis.read() != -1) {
+                throw SecurityException("Chromium archive directory entry contains data")
+            }
             Files.createDirectories(targetPath)
             return
         }

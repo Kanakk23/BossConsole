@@ -51,6 +51,30 @@ import kotlin.test.assertTrue
  * local of one composable, so it is checked by reading rather than by a test.
  */
 class InSessionRecoveryTest {
+    @Test
+    fun `failed set write preserves the record and allows the next write to retry`() {
+        var setWritable = false
+        val records = mutableListOf<LayoutWorkspace>()
+        val coordinator =
+            LastSessionCoordinator(
+                save = { true },
+                saveSet = { setWritable },
+                saveRecord = { records.add(it) },
+            )
+        val fresh = record("fresh")
+        coordinator.register(windowId = "owner", isFirstWindow = true, extractLayout = { fresh })
+
+        assertFalse(coordinator.writeInSession("owner", fresh, set("a" to "fresh")))
+        assertTrue(records.isEmpty())
+        // Deleting an obsolete set is also a write whose failure must preserve the pair.
+        assertFalse(coordinator.writeInSession("owner", fresh, null))
+        assertTrue(records.isEmpty())
+
+        setWritable = true
+        assertTrue(coordinator.writeInSession("owner", fresh, set("a" to "fresh")))
+        assertEquals(listOf(fresh), records)
+    }
+
     private val dirs = mutableListOf<File>()
 
     @AfterTest

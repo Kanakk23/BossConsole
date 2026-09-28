@@ -25,6 +25,18 @@ import kotlin.test.assertTrue
  * shared or restored.
  */
 class ChromiumExtractionLimitsTest {
+    @Test
+    fun `directory payload is rejected before closeEntry can inflate outside the budget`() {
+        val name = "directory/"
+        val zip = zipOf(name to ByteArray(1_000_000))
+        val target = targetDirFor(zip)
+
+        assertFailsWith<SecurityException> {
+            ChromiumAutoDownloader.extractWithJava(zip, target, maxBytes = overhead(name) + 100)
+        }
+        assertFalse(target.resolve(name).exists())
+    }
+
     private val tempDirs = mutableListOf<Path>()
 
     @AfterTest

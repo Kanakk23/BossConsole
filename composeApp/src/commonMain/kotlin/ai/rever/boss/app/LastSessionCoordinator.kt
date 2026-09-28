@@ -200,8 +200,10 @@ class LastSessionCoordinator internal constructor(
                 false
             } else {
                 try {
-                    saveSet(set)
-                    saveRecord(record)
+                    // Restore prefers the set. If it could not be replaced (or removed),
+                    // preserve the previous record too rather than report a fresh recovery
+                    // beside a stale set. A later watcher write can retry the whole pair.
+                    saveSet(set) && saveRecord(record)
                 } catch (e: Exception) {
                     logger.warn(
                         LogCategory.WORKSPACE,
