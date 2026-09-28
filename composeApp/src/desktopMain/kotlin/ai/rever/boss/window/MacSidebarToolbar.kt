@@ -114,7 +114,7 @@ internal class MacSidebarToolbar(
         send(toolbar, "setAllowsUserCustomization:", 0.toByte())
         send(toolbar, "setShowsBaselineSeparator:", 0.toByte())
         send(window, "setToolbar:", toolbar)
-        send(window, "setToolbarStyle:", 3L) // NSWindowToolbarStyleUnified, as in BossTerm.
+        send(window, "setToolbarStyle:", 4L) // NSWindowToolbarStyleUnifiedCompact, as in BossTerm.
         val notifications = pointer(clazz("NSNotificationCenter"), "defaultCenter")
         // Updates include fullscreen toolbar reveal/hide; publish only changed measurements.
         listOf(

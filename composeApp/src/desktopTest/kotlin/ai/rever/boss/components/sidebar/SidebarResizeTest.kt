@@ -11,6 +11,25 @@ class SidebarResizeTest {
     private val settings = WindowAppearanceSettings(tabBarVerticalWidth = 240f, tabBarCollapsed = false)
 
     @Test
+    fun `widening a legacy narrow sidebar does not collapse it`() {
+        for (savedWidth in listOf(120f, 160f, 199f, 200f, 240f)) {
+            val original = settings.copy(tabBarVerticalWidth = savedWidth)
+            val requested = sidebarResizeStartWidth(savedWidth) + 10f
+            val result = sidebarResizeResult(original, requested)
+            assertFalse(result.tabBarCollapsed, "outward drag from $savedWidth")
+            assertEquals(requested, result.tabBarVerticalWidth)
+        }
+    }
+
+    @Test
+    fun `inward drag crosses threshold and can reverse before release`() {
+        val start = sidebarResizeStartWidth(160f)
+        assertEquals(200f, start)
+        assertTrue(sidebarResizeResult(settings, start - 10f).tabBarCollapsed)
+        assertFalse(sidebarResizeResult(settings, start - 10f + 20f).tabBarCollapsed)
+    }
+
+    @Test
     fun `release below minimum collapses and preserves expanded width`() {
         val result = sidebarResizeResult(settings, SIDEBAR_RESIZE_COLLAPSE_WIDTH - 1f)
         assertTrue(result.tabBarCollapsed)

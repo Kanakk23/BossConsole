@@ -90,7 +90,9 @@ internal class MacWindowGlass(
         send(window, "setAppearance:", appearance)
         if (MacToolbarRuntime.supports(effect, "setStyle:")) {
             send(effect, "setStyle:", if (request.clear) 1L else 0L)
-            send(effect, "setCornerRadius:", if (request.fullscreen) 0.0 else 20.0)
+            // BossTerm lets the native frame shape the backdrop; a second rounded lens
+            // changes the edge refraction and appearance of the sidebar and toolbar.
+            send(effect, "setCornerRadius:", 0.0)
         }
     }
 

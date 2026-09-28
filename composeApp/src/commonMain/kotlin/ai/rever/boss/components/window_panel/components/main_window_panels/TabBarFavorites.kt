@@ -25,6 +25,7 @@ import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -74,9 +75,6 @@ private val FAVORITE_TILE_RADIUS = 10.dp
 /** Gap between tiles, in both directions. */
 private val FAVORITE_TILE_GAP = 6.dp
 
-/** Tiles per row before wrapping. Four 40dp tiles and three 6dp gaps fit inside a 200dp bar. */
-private const val FAVORITES_PER_ROW = 4
-
 /**
  * Arc's Favorites: an icon-only grid of bookmarks pinned above everything else in the sidebar.
  *
@@ -121,7 +119,7 @@ private const val FAVORITES_PER_ROW = 4
  * @param trailing the collapse chevron or the pin, on the SAME line as the label. It lived on a
  *   row of its own first, which spent a whole line of a narrow bar on one 16dp glyph.
  * @param onOpen opens the Bookmarks panel, or null when there is no panel to open. The shelf
- *   shows four favourites; the label is the way to the rest of them, which is what a section
+ *   shows pinned favourites; the label opens all bookmarks, which is what a section
  *   header pointing at a plugin should do. Null leaves the label inert rather than clickable and
  *   silent - see [TabBarFavorites] for when.
  */
@@ -256,7 +254,7 @@ fun TabBarFavorites(
     }
 }
 
-/** The tiles, wrapped [FAVORITES_PER_ROW] to a row. */
+/** Fixed-size tiles that wrap according to the available sidebar width. */
 @Composable
 private fun FavoritesGrid(
     bookmarks: List<Bookmark>,
@@ -265,22 +263,19 @@ private fun FavoritesGrid(
     homeSelected: Boolean,
     onHome: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(FAVORITE_TILE_GAP)) {
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(FAVORITE_TILE_GAP),
+        verticalArrangement = Arrangement.spacedBy(FAVORITE_TILE_GAP),
+    ) {
         // Home is a built-in favorite, independent of the optional bookmark store.
-        (listOf<Bookmark?>(null) + bookmarks).chunked(FAVORITES_PER_ROW).forEach { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(FAVORITE_TILE_GAP)) {
-                row.forEach { bookmark ->
-                    if (bookmark == null) {
-                        HomeNavigationButton(selected = homeSelected, onClick = onHome)
-                    } else {
-                        FavoriteTile(
-                            bookmark = bookmark,
-                            onOpen = { onOpen(bookmark) },
-                            onRemove = { onRemove(bookmark) },
-                        )
-                    }
-                }
-            }
+        HomeNavigationButton(selected = homeSelected, onClick = onHome)
+        bookmarks.forEach { bookmark ->
+            FavoriteTile(
+                bookmark = bookmark,
+                onOpen = { onOpen(bookmark) },
+                onRemove = { onRemove(bookmark) },
+            )
         }
     }
 }
