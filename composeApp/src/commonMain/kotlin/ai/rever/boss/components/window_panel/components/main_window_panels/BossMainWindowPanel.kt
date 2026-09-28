@@ -71,6 +71,8 @@ import ai.rever.boss.run.RUNNER_TERMINAL_PREFIX
 import ai.rever.boss.run.RunnerTerminalService
 import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
 import ai.rever.boss.services.bookmarks.rememberBookmarkCollections
+import ai.rever.boss.theme.sidebarDividerColor
+import ai.rever.boss.theme.sidebarGlassEnabled
 import ai.rever.boss.utils.extractFileName
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -857,8 +859,14 @@ fun BossTabsComponent.rememberTabBarState(
             if (index < tabsState.value.tabs.size - 1) {
                 if (vertical) {
                     Divider(
-                        modifier = Modifier.padding(horizontal = 8.dp),
-                        color = BossTheme.colors.line,
+                        modifier =
+                            if (sidebarGlassEnabled) {
+                                Modifier.padding(start = 34.dp, end = 10.dp, top = 2.dp)
+                            } else {
+                                Modifier.padding(horizontal = 8.dp)
+                            },
+                        thickness = if (sidebarGlassEnabled) 0.5.dp else 1.dp,
+                        color = sidebarDividerColor(),
                     )
                 } else {
                     VDivider(modifier = Modifier.padding(vertical = 8.dp, horizontal = INTER_TAB_DIVIDER_PADDING))
@@ -1398,7 +1406,9 @@ fun BossTabsComponent.BossMainPanelContent(modifier: Modifier) {
     val selectedProject by windowProjectState?.selectedProject?.collectAsState()
         ?: remember { mutableStateOf(Project("No Project", "", 0L)) }
 
-    Box(modifier = modifier) {
+    // Own the content tint once, outside plugin surfaces, just as BossTerm's root does.
+    val glass = ai.rever.boss.theme.LocalWindowGlass.current
+    Box(modifier = modifier.background(if (glass.installed) BossTheme.colors.ink else Color.Transparent)) {
         val activeTab = tabsState.value.activeTab
         val activeComponent = getActiveComponent()
 

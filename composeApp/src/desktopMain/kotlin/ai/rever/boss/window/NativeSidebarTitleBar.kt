@@ -2,8 +2,9 @@ package ai.rever.boss.window
 
 import ai.rever.boss.plugin.browser.LocalAwtWindow
 import ai.rever.boss.plugin.ui.BossTheme
+import ai.rever.boss.theme.LocalWindowGlass
+import ai.rever.boss.theme.sidebarGlassEnabled
 import ai.rever.boss.utils.SystemUtils
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,6 +19,10 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.ComposeWindow
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.dp
@@ -48,17 +53,53 @@ internal actual fun NativeSidebarTitleBar(
     NativeBrowserFieldHosting(currentController, actions, headerHeight != null)
     NativeAddressSuggestions(currentController, actions)
     DisposableEffect(currentController) { onDispose { currentController?.close() } }
-    val background = BossTheme.colors.raised
+    val background =
+        (if (sidebarGlassEnabled) BossTheme.colors.panel else BossTheme.colors.raised)
+            .copy(alpha = LocalWindowGlass.current.chromeOpacity)
     val icons =
         actions
             .mapNotNull { action ->
                 action.textInput?.favicon?.let { action.id to rememberNativeFavicon(it) }
                     ?: action.icon?.let { action.id to rememberNativeToolbarIcon(it) }
             }.toMap()
-    SideEffect { currentController?.update(title, actions, background.luminance() < 0.5f, background.toArgb(), icons) }
-    // This is the actual native content inset, not an additional Compose title bar.
-    headerHeight?.let { Spacer(Modifier.fillMaxWidth().height(it.toFloat().dp).background(background)) }
+    val glass = LocalWindowGlass.current
+    // Compose owns the two glass fills; an NSWindow color would add a third layer.
+    val nativeBackground = if (glass.installed) Color.Transparent else background
+    SideEffect {
+        currentController?.update(title, actions, background.luminance() < 0.5f, nativeBackground.toArgb(), icons)
+    }
+    headerHeight?.let { GlassTitleBarInset(it, background, actions.firstOrNull { action -> action.id == "sidebar" }) }
     return headerHeight != null
+}
+
+/** Two sibling fills: the sidebar extends upward; content continues through the toolbar. */
+@Composable
+private fun GlassTitleBarInset(
+    height: Double,
+    background: Color,
+    sidebar: NativeTitleBarAction?,
+) {
+    val glass = LocalWindowGlass.current
+    val contentFill = if (glass.coverage == "window") Color.Transparent else BossTheme.colors.ink
+    val separateSidebar = sidebar?.takeIf { !it.active && it.sidebarWidth > 0f }
+    Spacer(
+        Modifier.fillMaxWidth().height(height.toFloat().dp).drawBehind {
+            if (!glass.installed) {
+                drawRect(background)
+            } else {
+                val left =
+                    separateSidebar
+                        ?.sidebarLeading
+                        ?.dp
+                        ?.toPx()
+                        ?.coerceIn(0f, size.width) ?: 0f
+                val width = separateSidebar?.sidebarWidth?.dp?.toPx() ?: 0f
+                val right = (left + width).coerceIn(left, size.width)
+                if (left > 0f) drawRect(contentFill, size = Size(left, size.height))
+                drawRect(contentFill, topLeft = Offset(right, 0f), size = Size(size.width - right, size.height))
+            }
+        },
+    )
 }
 
 /** Release the plugin fallback only after the native field exists, and restore it on disposal. */

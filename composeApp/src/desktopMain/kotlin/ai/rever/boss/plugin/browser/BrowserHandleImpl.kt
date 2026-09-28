@@ -1545,6 +1545,7 @@ internal class BrowserHandleImpl(
                             if (isValid) {
                                 navigationMainFrameOrNull(browser) {
                                     connectionDead.set(true)
+                                    BrowserTabOwnership.unbind(id)
                                     ActiveBrowserRegistry.republish()
                                     logger.debug(
                                         LogCategory.BROWSER,
@@ -2701,6 +2702,7 @@ internal class BrowserHandleImpl(
         } catch (e: Exception) {
             if (isTransportFailure(e)) {
                 connectionDead.set(true)
+                BrowserTabOwnership.unbind(id)
                 // isValid has just flipped without a disposal, and nothing unregisters here -
                 // the registration is only dropped later by reconcileOrphanedBrowsers or at
                 // window teardown. ActiveBrowserRegistry recomputes only on register/unregister,
@@ -3747,6 +3749,7 @@ internal class BrowserHandleImpl(
         // this browser, and the host cannot work it out for itself - the tab is a dynamic
         // plugin's component type, which host code cannot name.
         ownerTabId = tabId
+        BrowserTabOwnership.bind(tabId, id)
 
         audioSource.bind(tabId)
 
@@ -4517,6 +4520,7 @@ internal class BrowserHandleImpl(
             // for instance) must not skip the unregister - pinning the handle for the session is the
             // leak the BrowserClosed routing above exists to close.
             ActiveBrowserRegistry.unregister(id)
+            BrowserTabOwnership.unbind(id)
             // Do not turn a caller deadline into permission to close a live native call.
             // This also covers direct plugin/window disposal and local teardown failures.
             finishLocalBrowserDisposal(

@@ -1119,7 +1119,7 @@ private fun SidebarTitleBar(
         val sidebarWidth = if (expanded) appearance.tabBarVerticalWidth + 8f else 0f
         val actions =
             sidebarTitleActions(state, toggleSidebar, sidebarWidth, sidebarLeading, sidebarBelowTopChrome) +
-                spaceAction + nativeBrowserTitleActions(state)
+                spaceAction + nativeTerminalTitleLabel(state.splitViewState) + nativeBrowserTitleActions(state)
         val nativeReady = sidebarInHeader && NativeSidebarTitleBar(title, actions)
         NativeBrowserHostAvailability(state.windowId, nativeReady)
         NativeTerminalHostAvailability(state.windowId, nativeReady)

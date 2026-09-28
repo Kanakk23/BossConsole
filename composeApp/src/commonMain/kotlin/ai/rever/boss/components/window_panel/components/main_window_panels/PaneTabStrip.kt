@@ -132,7 +132,7 @@ internal fun PaneTabStrip(
             Modifier
                 .fillMaxWidth()
                 .height(PANE_STRIP_HEIGHT)
-                .background(BossTheme.colors.panel)
+                .background(paneStripBackground())
                 .contextMenu(items = menuItems),
         contentPadding = PaddingValues(horizontal = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -294,3 +294,7 @@ internal fun paneNewTabAction(
         MenuActionsHandler.triggerNewTab(windowId)
     }
 }
+
+@Composable
+private fun paneStripBackground() =
+    if (ai.rever.boss.theme.LocalWindowGlass.current.installed) BossTheme.colors.ink else BossTheme.colors.panel

@@ -4,6 +4,9 @@ import ai.rever.boss.components.window_panel.components.main_window_panels.clamp
 import ai.rever.boss.window.TabBarVerticalWidthRange
 import ai.rever.boss.window.WindowAppearanceSettings
 
+/** BossTerm collapses a resized sidebar below 200 dp; saved legacy widths remain valid. */
+internal const val SIDEBAR_RESIZE_COLLAPSE_WIDTH = 200f
+
 /** Allow a narrow preview, then decide whether to collapse on release, like BossTerm. */
 internal fun sidebarResizePreview(width: Float): Float = width.coerceIn(44f, TabBarVerticalWidthRange.endInclusive)
 
@@ -12,7 +15,7 @@ internal fun sidebarResizeResult(
     settings: WindowAppearanceSettings,
     requestedWidth: Float,
 ): WindowAppearanceSettings =
-    if (requestedWidth < TabBarVerticalWidthRange.start) {
+    if (requestedWidth < SIDEBAR_RESIZE_COLLAPSE_WIDTH) {
         settings.copy(tabBarCollapsed = true)
     } else {
         settings.copy(tabBarVerticalWidth = clampBarWidth(requestedWidth), tabBarCollapsed = false)

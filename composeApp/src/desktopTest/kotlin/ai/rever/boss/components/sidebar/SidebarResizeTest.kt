@@ -12,7 +12,7 @@ class SidebarResizeTest {
 
     @Test
     fun `release below minimum collapses and preserves expanded width`() {
-        val result = sidebarResizeResult(settings, TabBarVerticalWidthRange.start - 1f)
+        val result = sidebarResizeResult(settings, SIDEBAR_RESIZE_COLLAPSE_WIDTH - 1f)
         assertTrue(result.tabBarCollapsed)
         assertEquals(240f, result.tabBarVerticalWidth)
         assertEquals(settings, result.copy(tabBarCollapsed = false))
@@ -20,15 +20,15 @@ class SidebarResizeTest {
 
     @Test
     fun `release at minimum keeps the sidebar expanded`() {
-        val result = sidebarResizeResult(settings, TabBarVerticalWidthRange.start)
+        val result = sidebarResizeResult(settings, SIDEBAR_RESIZE_COLLAPSE_WIDTH)
         assertFalse(result.tabBarCollapsed)
-        assertEquals(TabBarVerticalWidthRange.start, result.tabBarVerticalWidth)
+        assertEquals(SIDEBAR_RESIZE_COLLAPSE_WIDTH, result.tabBarVerticalWidth)
     }
 
     @Test
     fun `resizing a revealed collapsed sidebar persists expanded state`() {
         val collapsed = settings.copy(tabBarCollapsed = true)
-        for (width in listOf(TabBarVerticalWidthRange.start, 300f)) {
+        for (width in listOf(SIDEBAR_RESIZE_COLLAPSE_WIDTH, 300f)) {
             val result = sidebarResizeResult(collapsed, width)
             assertEquals(settings.copy(tabBarVerticalWidth = width), result)
         }
@@ -38,9 +38,18 @@ class SidebarResizeTest {
     fun `drag can preview below minimum and reverse before release`() {
         assertEquals(80f, sidebarResizePreview(80f))
         assertEquals(44f, sidebarResizePreview(-50f))
-        val result = sidebarResizeResult(settings, 180f)
+        val result = sidebarResizeResult(settings, 220f)
         assertFalse(result.tabBarCollapsed)
-        assertEquals(180f, result.tabBarVerticalWidth)
+        assertEquals(220f, result.tabBarVerticalWidth)
+    }
+
+    @Test
+    fun `BossTerm threshold collapses widths that used to stay expanded`() {
+        for (width in listOf(120f, 180f, 199f)) {
+            val result = sidebarResizeResult(settings, width)
+            assertTrue(result.tabBarCollapsed)
+            assertEquals(240f, result.tabBarVerticalWidth)
+        }
     }
 
     @Test

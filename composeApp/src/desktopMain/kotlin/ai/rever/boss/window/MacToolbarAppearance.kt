@@ -39,7 +39,8 @@ internal class MacToolbarAppearance(
         send(window, "setBackgroundColor:", color)
         // Fullscreen chrome is no longer backed by the Compose title-bar inset. Let AppKit
         // paint its themed material there instead of exposing the dark fullscreen backing.
-        send(window, "setTitlebarAppearsTransparent:", if (fullscreen) 0.toByte() else 1.toByte())
+        val opaqueFullscreen = fullscreen && (argb ushr 24) != 0
+        send(window, "setTitlebarAppearsTransparent:", if (opaqueFullscreen) 0.toByte() else 1.toByte())
         applied = next
     }
 

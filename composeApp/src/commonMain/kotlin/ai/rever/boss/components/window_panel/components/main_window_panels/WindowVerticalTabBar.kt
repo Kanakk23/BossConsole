@@ -8,6 +8,7 @@ import ai.rever.boss.components.overlays.contextMenu
 import ai.rever.boss.components.plugin.MissingPluginOffer
 import ai.rever.boss.components.window_panel.SplitViewState
 import ai.rever.boss.plugin.ui.BossTheme
+import ai.rever.boss.theme.sidebarGlassEnabled
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import ai.rever.boss.window.LocalWindowId
@@ -37,6 +38,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.Dp
@@ -192,6 +194,7 @@ fun WindowVerticalTabBar(
     expansion: TabGroupExpansion,
     width: Dp,
     collapsed: Boolean = false,
+    surfacePainted: Boolean = false,
     onToggleCollapse: (() -> Unit)? = null,
     onPin: (() -> Unit)? = null,
     tabDragComponent: TabDraggableComponent? = null,
@@ -266,7 +269,7 @@ fun WindowVerticalTabBar(
 
     VerticalBar(
         width = verticalTabBarWidth(collapsed = collapsed, width = width),
-        backgroundColor = BossTheme.colors.panel,
+        backgroundColor = if (sidebarGlassEnabled && surfacePainted) Color.Transparent else BossTheme.colors.panel,
         modifier =
             Modifier
                 .hoverable(barInteraction)
@@ -565,7 +568,7 @@ private fun ExpandedGroups(
     onExitZoom: () -> Unit,
 ) {
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().padding(horizontal = if (sidebarGlassEnabled) 6.dp else 0.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         WindowTabBarFavorites(

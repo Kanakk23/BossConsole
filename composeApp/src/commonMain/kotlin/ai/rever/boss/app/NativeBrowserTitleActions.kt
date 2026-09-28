@@ -3,6 +3,7 @@ package ai.rever.boss.app
 import ai.rever.boss.cache.loadHighQualityFavicon
 import ai.rever.boss.components.common.rememberFaviconCacheKey
 import ai.rever.boss.plugin.browser.ActiveBrowserRegistry
+import ai.rever.boss.plugin.browser.BrowserTabOwnership
 import ai.rever.boss.plugin.browser.BrowserTitleBarBridge
 import ai.rever.boss.window.NativeTitleBarAction
 import ai.rever.boss.window.NativeTitleBarTextInput
@@ -18,7 +19,13 @@ import com.arkivanov.decompose.extensions.compose.subscribeAsState
 @Composable
 internal fun nativeBrowserTitleActions(state: BossAppState): List<NativeTitleBarAction> {
     val active by ActiveBrowserRegistry.activeHandleIdByWindow.collectAsState()
-    val handleId = active[state.windowId]
+    val tabHandles by BrowserTabOwnership.handleIds.collectAsState()
+    val component = state.splitViewState.getActiveTabsComponent()
+    val tabs = component?.tabsState?.subscribeAsState()?.value
+    val activeTabId = tabs?.tabs?.getOrNull(tabs.activeIndex)?.id
+    // Home replaces BrowserHandle.Content with a dashboard. Its tab still owns the handle
+    // and publishes navigation state, even though no webpage view is currently composed.
+    val handleId = tabHandles[activeTabId] ?: active[state.windowId]
     val browser = handleId?.let(BrowserTitleBarBridge::state)
     if (handleId == null || browser == null) return emptyList()
     val favicon = activeBrowserFavicon(state, browser.url)

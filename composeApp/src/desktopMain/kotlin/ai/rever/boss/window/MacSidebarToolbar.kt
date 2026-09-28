@@ -49,7 +49,7 @@ internal class MacSidebarToolbar(
         if (toolbar == null) install()
         appearance?.update(dark, background)
         val space = actions["space"]
-        val windowTitle = space?.label ?: title
+        val windowTitle = actions["terminal_title"]?.label ?: space?.label ?: title
         send(window, "setTitle:", string(windowTitle))
         send(window, "setSubtitle:", string(space?.subtitle.orEmpty()))
         send(window, "setTitleVisibility:", if (space != null || windowTitle.isEmpty()) 1L else 0L)
@@ -81,10 +81,14 @@ internal class MacSidebarToolbar(
             add("sidebar")
             if (MacSidebarBoundary.trailingWidth(sidebar) > 0f) add("sidebar_boundary")
             if (actions.containsKey("space")) add("space")
+            if (actions.containsKey("terminal_title")) add("terminal_title")
             add("NSToolbarFlexibleSpaceItem")
             actions.keys.filter { it.startsWith("browser_") }.forEach { add(it) }
             if (actions.containsKey("browser_url")) add("NSToolbarFlexibleSpaceItem")
-            val trailing = actions.keys.filterNot { it.startsWith("browser_") } - setOf("sidebar", "space")
+            val trailing =
+                actions.keys.filterNot {
+                    it.startsWith("browser_") || it in setOf("sidebar", "space", "terminal_title")
+                }
             MacToolbarGroups.identifiers(trailing).forEachIndexed { index, id ->
                 if (index > 0 && id != "split_horizontal") add("NSToolbarSpaceItem")
                 add(id)
@@ -160,10 +164,7 @@ internal class MacSidebarToolbar(
         item: Pointer,
         action: NativeTitleBarAction,
     ) {
-        if (action.textInput != null) {
-            addressField.update(item, action.textInput, delegate, customIcons[action.id])
-            return
-        }
+        if (MacToolbarTitle.updateTextItem(item, action, addressField, delegate, customIcons[action.id])) return
         if (action.menu != null && action.symbol == null) {
             MacToolbarMenu.update(item, action, delegate)
             return

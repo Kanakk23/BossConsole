@@ -2543,3 +2543,58 @@ invalidates pending publication and clears scan status; it does not cancel detec
 Cancellation propagates without becoming a scan error. The internal scanner overload lets
 `RunConfigurationScanOwnershipTest` control completion order on the real manager without
 mutating a global detector or reading a user's project.
+
+
+## Native glass themes
+
+Liquid Glass Light/Dark are additional Blueprint palettes; existing platform defaults and
+Space-theme resolution stay unchanged. Glass coverage/style/tint live in app-theme-settings.json,
+independently of palette selection. Only the main macOS window installs a native backdrop;
+Windows/Linux retain opaque palettes. Browser surfaces and plugin-owned opaque backgrounds stay
+opaque. Do not change shared theme colors globally to alpha: dialog windows have no backdrop.
+
+`MacWindowGlass` follows BossTerm's NSGlassEffectView (macOS 26) / NSVisualEffectView approach.
+Use the existing AppKit main-queue dispatcher and exact Skiko NSWindow handle. Never replace
+AWT's contentView, use Auto Layout on it, or use a struct-return objc_msgSend mapping. Java stays
+undecorated/transparent on macOS so Skia retains alpha; AppKit restores the native frame and lights.
+The controller owns/releases only its backdrop, reattaches after frame changes, and respects Reduce
+Transparency. Close it with the window. `LocalWindowGlass` becomes installed only after success;
+failed/unsupported installation paints opaque without overwriting saved preferences. Native toolbar
+background and Compose chrome use the same tint. Menus and dialogs retain opaque theme tokens.
+
+`BOSS_TEST_NATIVE_GLASS=1 ./gradlew :composeApp:desktopTest --tests '*MacWindowGlassSmokeTest'`
+is an opt-in macOS smoke test using its own small unfocusable window. It verifies native install,
+light/clear updates, and detach; it does not establish visual correctness of an entire app layout.
+
+The vertical sidebar uses `SidebarGlass` washes only while the native backdrop is active.
+`IntegratedSidebarSurface` keeps the rounded outline; full-window glass tint belongs to the root.
+`WindowVerticalTabBar.surfacePainted` prevents duplicate fills for sidebar-only coverage. Favorites,
+selection fills and inset hairline separators follow BossTerm's sidebar treatment; do not change
+shared palette tokens, menu surfaces, or the non-glass layout to achieve this.
+
+Fullscreen glass has an owned `MacFullscreenBackdrop` behind the effect view. It reads the
+current display's wallpaper through NSWorkspace, caches the still image while windowed, and
+aspect-fills a CALayer in fullscreen; unreadable/dynamic-only wallpapers get a theme-colored
+fallback. Keep the controller alive across fullscreen transitions so the windowed image survives
+when a fullscreen Space has no desktop-image URL. Do not capture the user's screen, replace AWT's
+contentView, or leave the wallpaper view attached after exiting fullscreen or disabling glass.
+
+Native browser navigation follows `BrowserTabOwnership` for the active tab, with the composed
+browser registry as a fallback for other browser surfaces. Home removes BrowserHandle.Content
+from composition, so ActiveBrowserRegistry alone cannot drive its address field. Bind tab ownership
+when the plugin identifies its handle through setFullscreenHandler, and unbind by handle ID on
+transport failure/disposal so old cleanup cannot remove a replacement. This is host-only state;
+do not add plugin ABI requirements or keep an invisible browser view mounted behind Home.
+
+Host glass follows BossTerm's separate 50% tint / 50% background-opacity defaults.
+GlassAppSurfaces paints the combined main ink fill `1 - (1 - opacity) * (1 - tint)`
+through the title bar and content, excluding the rounded sidebar geometry. The sidebar paints
+its own tint once, including its header extension. This follows BossTerm's root drawBehind /
+sidebar cutout: never flatten the sidebar into the main fill or stack both fills beneath it.
+Scoped ink/panel tokens retain RGB but have zero alpha; MaterialTheme's background alpha
+remains the plugin capability signal. Opaque plugins and browser pages retain their own fills.
+
+Native NSWindow background stays clear in glass mode, including fullscreen. The Space selector keeps its Space name. A separate native NSTextField toolbar item immediately
+after it shows the focused terminal tab's live title and disappears on other tabs.
+GlassSurfaceRenderingTest renders the actual integrated sidebar and verifies that both surfaces
+continue through their headers without tint overlap, in both palettes.

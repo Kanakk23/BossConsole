@@ -12,6 +12,7 @@ import ai.rever.boss.components.plugin.PanelIds
 import ai.rever.boss.plugin.api.TabIcon
 import ai.rever.boss.plugin.bookmark.Bookmark
 import ai.rever.boss.plugin.ui.BossTheme
+import ai.rever.boss.theme.sidebarTileFill
 import ai.rever.boss.window.LocalWindowId
 import ai.rever.boss.window.MenuActionsHandler
 import androidx.compose.foundation.Image
@@ -336,7 +337,7 @@ private fun FavoriteTile(
                 .size(FAVORITE_TILE_SIZE)
                 .clip(RoundedCornerShape(FAVORITE_TILE_RADIUS))
                 // Hover lifts the tile rather than the icon, so the whole target reads as live.
-                .background(if (hovered) colors.signalWash else colors.raised)
+                .background(sidebarTileFill(hovered))
                 .hoverable(interactionSource)
                 .contextMenu(
                     items =
