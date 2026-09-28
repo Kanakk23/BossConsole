@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.ui.BossThemeController
 import ai.rever.boss.plugin.ui.BossThemes
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
+import ai.rever.boss.utils.logging.decodeFailure
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlin.time.Clock
 
 /**
@@ -590,6 +592,12 @@ class WorkspaceManager(
         val json = fileManager.loadDocument(LAST_SESSION_SET_FILE) ?: return null
         return try {
             LastSessionSetSerializer.deserialize(json)
+        } catch (e: SerializationException) {
+            // Saved session documents can contain tab URLs, project paths and terminal commands.
+            // kotlinx includes the input document in its decoder message, so keep only location
+            // and exception-type diagnostics.
+            logger.warn(LogCategory.WORKSPACE, "Last Session set could not be read", decodeFailure(e))
+            null
         } catch (e: Exception) {
             logger.warn(LogCategory.WORKSPACE, "Last Session set could not be read", error = e)
             null
@@ -639,6 +647,11 @@ class WorkspaceManager(
             }
 
             workspace
+        } catch (e: SerializationException) {
+            // Import JSON has the same private layout data as an on-disk Space. Do not route the
+            // caller-provided document back into logs through the decoder exception.
+            logger.warn(LogCategory.WORKSPACE, "Failed to import workspace from JSON", decodeFailure(e))
+            null
         } catch (e: Exception) {
             logger.warn(LogCategory.WORKSPACE, "Failed to import workspace from JSON", error = e)
             null
