@@ -39,22 +39,27 @@ import kotlin.math.roundToInt
 /**
  * What a drag would do to one panel, as far as that panel's highlight is concerned.
  *
- * Pure and coarse on purpose: three answers where the drop target has a panel id, an orientation
+ * Pure and coarse on purpose: five answers where the drop target has a panel id, an orientation
  * and an insertion index. Collapsing them here is what lets the overlay subscribe to something
  * that changes a handful of times in a drag rather than to the target itself, whose index moves
  * every time the pointer crosses a tab row in a bar.
  */
-internal enum class PanelDropHighlight { SPLIT_VERTICAL, SPLIT_HORIZONTAL, CENTRE }
+internal enum class PanelDropHighlight { LEFT, RIGHT, TOP, BOTTOM, CENTRE }
 
-private fun panelDropHighlightFor(
+internal fun panelDropHighlightFor(
     dropTarget: TabDropTarget?,
     panelId: String,
 ): PanelDropHighlight? =
     when {
         dropTarget is TabDropTarget.SplitPanel && dropTarget.panelId == panelId -> {
             when (dropTarget.orientation) {
-                SplitOrientation.VERTICAL -> PanelDropHighlight.SPLIT_VERTICAL
-                SplitOrientation.HORIZONTAL -> PanelDropHighlight.SPLIT_HORIZONTAL
+                SplitOrientation.VERTICAL -> {
+                    if (dropTarget.placeBefore) PanelDropHighlight.LEFT else PanelDropHighlight.RIGHT
+                }
+
+                SplitOrientation.HORIZONTAL -> {
+                    if (dropTarget.placeBefore) PanelDropHighlight.TOP else PanelDropHighlight.BOTTOM
+                }
             }
         }
 
@@ -111,15 +116,20 @@ internal fun PanelDropZoneOverlay(
 
 @Composable
 private fun BoxScope.PanelDropHighlightContent(highlight: PanelDropHighlight?) {
-    // Both edges of an axis light up together: a vertical split takes the left AND the right.
     when (highlight) {
-        PanelDropHighlight.SPLIT_VERTICAL -> {
+        PanelDropHighlight.LEFT -> {
             DropZoneBand(Alignment.CenterStart, acrossWidth = true)
+        }
+
+        PanelDropHighlight.RIGHT -> {
             DropZoneBand(Alignment.CenterEnd, acrossWidth = true)
         }
 
-        PanelDropHighlight.SPLIT_HORIZONTAL -> {
+        PanelDropHighlight.TOP -> {
             DropZoneBand(Alignment.TopCenter, acrossWidth = false)
+        }
+
+        PanelDropHighlight.BOTTOM -> {
             DropZoneBand(Alignment.BottomCenter, acrossWidth = false)
         }
 

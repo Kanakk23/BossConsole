@@ -3005,8 +3005,8 @@ private fun RenderSplitNode(
                         showTabBar = showPanelTabBar,
                     )
 
-                    // Show drop zone highlights when dragging over this panel
-                    if (isDragging && draggingTab != null && draggingTab.sourcePanelId != node.id) {
+                    // The source panel can also split at its edges; preview every valid target.
+                    if (isDragging && draggingTab != null) {
                         PanelDropZoneOverlay(
                             panelId = node.id,
                             tabDragComponent = tabDragComponent,
