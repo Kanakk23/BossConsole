@@ -22,6 +22,7 @@ internal class MacSidebarToolbar(
     private var toolbar: Pointer? = null
     private var delegate: Pointer? = null
     private val items = mutableMapOf<String, Pointer>()
+    private val groupedItems = mutableMapOf<String, List<String>>()
     private val customIcons = MacToolbarIcons()
     internal val addressField = MacToolbarAddressField()
     private var actions = emptyMap<String, NativeTitleBarAction>()
@@ -65,6 +66,9 @@ internal class MacSidebarToolbar(
             items[id]?.let { MacSidebarBoundary.update(it, actions["sidebar"], id == "sidebar_leading") }
         }
         actions.forEach { (id, action) -> items[id]?.let { updateItem(it, action) } }
+        MacToolbarGroups.members.keys.forEach { id ->
+            items[id]?.let { MacToolbarGroups.update(id, it, actions, groupedItems, ::makeItem) }
+        }
         measure()
     }
 
@@ -81,7 +85,7 @@ internal class MacSidebarToolbar(
             actions.keys.filter { it.startsWith("browser_") }.forEach { add(it) }
             if (actions.containsKey("browser_url")) add("NSToolbarFlexibleSpaceItem")
             val trailing = actions.keys.filterNot { it.startsWith("browser_") } - setOf("sidebar", "space")
-            trailing.forEachIndexed { index, id ->
+            MacToolbarGroups.identifiers(trailing).forEachIndexed { index, id ->
                 if (index > 0 && id != "split_horizontal") add("NSToolbarSpaceItem")
                 add(id)
             }
@@ -130,7 +134,11 @@ internal class MacSidebarToolbar(
         val id = pointer(identifier, "UTF8String")?.getString(0)
         val action = id?.let(actions::get)
         if (action == null) {
-            return if (id == "sidebar_boundary" || id == "sidebar_leading") {
+            return if (id in MacToolbarGroups.members) {
+                items.getOrPut(checkNotNull(id)) { MacToolbarGroups.create(id) }.also {
+                    MacToolbarGroups.update(id, it, actions, groupedItems, ::makeItem)
+                }
+            } else if (id == "sidebar_boundary" || id == "sidebar_leading") {
                 items.getOrPut(id) { MacSidebarBoundary.create(identifier) }.also {
                     MacSidebarBoundary.update(it, actions["sidebar"], id == "sidebar_leading")
                 }
@@ -197,7 +205,18 @@ internal class MacSidebarToolbar(
                 pointer(sender, "itemIdentifier")
             }
         val id = pointer(identifier, "UTF8String")?.getString(0) ?: return
-        SwingUtilities.invokeLater { if (!closed) onAction(id) }
+        SwingUtilities.invokeLater {
+            if (!closed) {
+                // Opening a status menu is not a service toggle. Restore AppKit's click selection
+                // from the live service state, even when the action does not recompose the host.
+                dispatchSafely {
+                    MacToolbarGroups.members.keys.forEach { groupId ->
+                        items[groupId]?.let { MacToolbarGroups.update(groupId, it, actions, groupedItems, ::makeItem) }
+                    }
+                }
+                onAction(id)
+            }
+        }
     }
 
     fun measure() {

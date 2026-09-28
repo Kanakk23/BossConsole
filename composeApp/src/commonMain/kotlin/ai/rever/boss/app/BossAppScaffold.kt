@@ -990,6 +990,8 @@ internal fun BossAppScaffold(
                 ToastOverlay(toastState = toastState)
             }
 
+            TerminalCallOverlay(state.windowId)
+
             // MRU tab-switcher overlay (Ctrl+Tab in most-recently-used mode)
             TabCycleOverlayHost(
                 data = state.tabCycleOverlay,
@@ -1120,6 +1122,7 @@ private fun SidebarTitleBar(
                 spaceAction + nativeBrowserTitleActions(state)
         val nativeReady = sidebarInHeader && NativeSidebarTitleBar(title, actions)
         NativeBrowserHostAvailability(state.windowId, nativeReady)
+        NativeTerminalHostAvailability(state.windowId, nativeReady)
         SideEffect { onNativeReadyChange(nativeReady) }
         DisposableEffect(Unit) { onDispose { onNativeReadyChange(false) } }
         if (nativeReady) return
@@ -1133,6 +1136,7 @@ private fun SidebarTitleBar(
 }
 
 /** Native buttons call the same window-scoped entry points as their Compose counterparts. */
+@Composable
 private fun sidebarTitleActions(
     state: BossAppState,
     toggleSidebar: () -> Unit,
@@ -1153,6 +1157,7 @@ private fun sidebarTitleActions(
             ),
         )
         addAll(nativeSessionTitleActions(state))
+        addAll(nativeTerminalTitleActions(state.windowId))
         add(NativeTitleBarAction("search", "Search", "magnifyingglass") { state.showGlobalSearchDialog = true })
         add(NativeTitleBarAction("tools", "Tools menu", "square.grid.2x2") { state.showToolLauncherDialog = true })
         state.draggablePanelComponent.toolboxSidebarItem()?.let { item ->
