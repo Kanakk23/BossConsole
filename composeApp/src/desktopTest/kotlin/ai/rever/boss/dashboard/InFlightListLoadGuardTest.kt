@@ -12,6 +12,14 @@ class InFlightListLoadGuardTest {
     )
 
     @Test
+    fun `remove and clear cannot regain an optional mutation callback`() {
+        val methodNames = InFlightListLoadGuard::class.java.declaredMethods.map { it.name }
+
+        assertFalse("remove\$default" in methodNames)
+        assertFalse("clear\$default" in methodNames)
+    }
+
+    @Test
     fun `an untouched load publishes every decoded item in order`() {
         val guard = InFlightListLoadGuard<Entry>()
         val ticket = guard.begin()
@@ -25,7 +33,7 @@ class InFlightListLoadGuardTest {
         val guard = InFlightListLoadGuard<Entry>()
         val ticket = guard.begin()
 
-        guard.remove({ it.id == "a" })
+        guard.remove({ it.id == "a" }) {}
 
         assertEquals(listOf(Entry("b")), guard.publish(ticket, listOf(Entry("a"), Entry("b"))) { it })
     }
@@ -35,7 +43,7 @@ class InFlightListLoadGuardTest {
         val guard = InFlightListLoadGuard<Entry>()
         val ticket = guard.begin()
 
-        guard.remove({ it.id.startsWith("gone-") })
+        guard.remove({ it.id.startsWith("gone-") }) {}
 
         val surviving =
             guard.publish(ticket, listOf(Entry("gone-a"), Entry("keep"), Entry("gone-b"))) { it }
@@ -48,7 +56,7 @@ class InFlightListLoadGuardTest {
         val ticket = guard.begin()
         val loaded = listOf(Entry("a"), Entry("b"))
 
-        guard.remove({ it.id == "elsewhere" })
+        guard.remove({ it.id == "elsewhere" }) {}
 
         assertEquals(loaded, guard.publish(ticket, loaded) { it })
     }
@@ -58,8 +66,8 @@ class InFlightListLoadGuardTest {
         val guard = InFlightListLoadGuard<Entry>()
         val ticket = guard.begin()
 
-        guard.remove({ it.id == "a" })
-        guard.remove({ it.id == "c" })
+        guard.remove({ it.id == "a" }) {}
+        guard.remove({ it.id == "c" }) {}
 
         val surviving =
             guard.publish(ticket, listOf(Entry("a"), Entry("b"), Entry("c"), Entry("d"))) { it }
@@ -71,7 +79,7 @@ class InFlightListLoadGuardTest {
         val guard = InFlightListLoadGuard<Entry>()
         val ticket = guard.begin()
 
-        guard.clear()
+        guard.clear {}
 
         assertTrue(guard.publish(ticket, listOf(Entry("a"), Entry("b"))) { it }.isEmpty())
     }
@@ -84,9 +92,9 @@ class InFlightListLoadGuardTest {
         guard.remove({
             evaluated = true
             false
-        })
+        }) {}
 
-        guard.clear()
+        guard.clear {}
         guard.publish(ticket, listOf(Entry("a"))) { it }
 
         assertFalse(evaluated, "a cleared ticket must not retain or evaluate obsolete predicates")
@@ -96,9 +104,9 @@ class InFlightListLoadGuardTest {
     fun `a removal after clear cannot weaken the clear`() {
         val guard = InFlightListLoadGuard<Entry>()
         val ticket = guard.begin()
-        guard.clear()
+        guard.clear {}
 
-        guard.remove({ it.id == "a" })
+        guard.remove({ it.id == "a" }) {}
 
         assertTrue(guard.publish(ticket, listOf(Entry("a"), Entry("b"))) { it }.isEmpty())
     }
@@ -151,7 +159,7 @@ class InFlightListLoadGuardTest {
         val first = guard.begin()
         val second = guard.begin()
 
-        guard.remove({ it.id == "a" })
+        guard.remove({ it.id == "a" }) {}
 
         assertEquals(listOf(Entry("b")), guard.publish(first, listOf(Entry("a"), Entry("b"))) { it })
         assertEquals(listOf(Entry("c")), guard.publish(second, listOf(Entry("a"), Entry("c"))) { it })
@@ -164,7 +172,7 @@ class InFlightListLoadGuardTest {
         val active = guard.begin()
         guard.end(ended)
 
-        guard.remove({ it.id == "a" })
+        guard.remove({ it.id == "a" }) {}
 
         assertEquals(listOf(Entry("a")), guard.publish(ended, listOf(Entry("a"))) { it })
         assertTrue(guard.publish(active, listOf(Entry("a"))) { it }.isEmpty())
@@ -173,7 +181,7 @@ class InFlightListLoadGuardTest {
     @Test
     fun `a mutation before a load begins is not attached to that future load`() {
         val guard = InFlightListLoadGuard<Entry>()
-        guard.remove({ it.id == "a" })
+        guard.remove({ it.id == "a" }) {}
 
         val later = guard.begin()
 
@@ -186,7 +194,7 @@ class InFlightListLoadGuardTest {
         val ended = guard.begin()
         guard.end(ended)
 
-        guard.clear()
+        guard.clear {}
 
         assertEquals(listOf(Entry("a")), guard.publish(ended, listOf(Entry("a"))) { it })
     }
@@ -206,7 +214,7 @@ class InFlightListLoadGuardTest {
     fun `publish returns the merge result rather than only the filtered list`() {
         val guard = InFlightListLoadGuard<Entry>()
         val ticket = guard.begin()
-        guard.remove({ it.id == "a" })
+        guard.remove({ it.id == "a" }) {}
 
         val count = guard.publish(ticket, listOf(Entry("a"), Entry("b"))) { it.size }
 

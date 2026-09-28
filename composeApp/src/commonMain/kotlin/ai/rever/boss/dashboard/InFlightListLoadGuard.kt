@@ -27,15 +27,22 @@ internal class InFlightListLoadGuard<E> {
         synchronized(lock) { active.remove(ticket) }
     }
 
+    /**
+     * Record [predicate] and apply the matching state [mutation] in one critical section.
+     *
+     * [mutation] intentionally has no default: registering a predicate while mutating the real
+     * state later would reopen the load-publication race this guard closes.
+     */
     fun remove(
         predicate: (E) -> Boolean,
-        mutation: () -> Unit = {},
+        mutation: () -> Unit,
     ) = synchronized(lock) {
         active.filterNot { it.cleared }.forEach { it.removals.add(predicate) }
         mutation()
     }
 
-    fun clear(mutation: () -> Unit = {}) =
+    /** Record the clear and apply the required state [mutation] in one critical section. */
+    fun clear(mutation: () -> Unit) =
         synchronized(lock) {
             active.forEach {
                 it.cleared = true
