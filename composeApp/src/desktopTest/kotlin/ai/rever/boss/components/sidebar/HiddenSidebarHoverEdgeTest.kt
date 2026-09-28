@@ -4,6 +4,7 @@ import ai.rever.boss.components.window_panel.components.main_window_panels.TabBa
 import ai.rever.boss.components.window_panel.components.main_window_panels.TabBarRevealState
 import ai.rever.boss.components.window_panel.components.main_window_panels.rememberTabBarRevealState
 import ai.rever.boss.plugin.ui.LocalHeavyweightOverlays
+import ai.rever.boss.window.LocalWindowFullscreen
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -92,15 +93,24 @@ class HiddenSidebarHoverEdgeTest {
         rule.runOnIdle { assertFalse(reveal.drawerVisible) }
     }
 
+    @Test
+    fun fullscreenDoesNotRevealFromEdge() {
+        render(focused = true, enabled = true, fullscreen = true)
+        enterEdge()
+        rule.runOnIdle { assertFalse(reveal.drawerVisible) }
+    }
+
     private fun render(
         focused: Boolean,
         enabled: Boolean,
         integratedPanel: Boolean = false,
+        fullscreen: Boolean = false,
     ) {
         rule.mainClock.autoAdvance = false
         rule.setContent {
             CompositionLocalProvider(
                 LocalHeavyweightOverlays provides false,
+                LocalWindowFullscreen provides fullscreen,
                 LocalWindowInfo provides
                     object : WindowInfo {
                         override val isWindowFocused = focused

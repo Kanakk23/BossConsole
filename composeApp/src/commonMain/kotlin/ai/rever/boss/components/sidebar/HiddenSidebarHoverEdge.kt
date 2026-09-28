@@ -3,6 +3,7 @@ package ai.rever.boss.components.sidebar
 import ai.rever.boss.components.overlays.OverlayCorner
 import ai.rever.boss.components.overlays.overlayCornerIsHeavyweight
 import ai.rever.boss.components.window_panel.components.main_window_panels.TabBarRevealState
+import ai.rever.boss.window.LocalWindowFullscreen
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -24,6 +25,7 @@ internal fun BoxScope.HiddenSidebarHoverEdge(
     region: IntRect?,
     enabled: Boolean,
 ) {
+    if (LocalWindowFullscreen.current) return
     if (!enabled || reveal.drawerVisible || !LocalWindowInfo.current.isWindowFocused) return
     // Match BossTerm: the hidden target is as wide as its 44 dp collapsed tab strip.
     val edgeWidth = 44.dp

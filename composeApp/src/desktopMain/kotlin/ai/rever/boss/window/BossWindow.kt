@@ -1126,6 +1126,7 @@ fun ApplicationScope.BossWindow(
         // inside this subtree and must opt back out - see SettingsWindow.
         CompositionLocalProvider(
             LocalAwtWindow provides window,
+            LocalWindowFullscreen provides isFullScreen,
             LocalHeavyweightOverlays provides true,
         ) {
             // Create independent component context for this window
