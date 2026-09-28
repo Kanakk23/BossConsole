@@ -424,6 +424,11 @@ private fun focusModeEntries() =
 private fun themeEntries() =
     section(SettingsSection.THEME) {
         group("App Theme")
+        group("Glass")
+        setting("Glass coverage", "Glass", "liquid", "sidebar", "window", "transparency")
+        setting("Glass style", "Glass", "liquid", "regular", "clear", "blur")
+        setting("Glass tint", "Glass", "liquid", "transparency")
+        setting("Background opacity", "Glass", "liquid", "transparency")
     }
 
 private fun windowAppearanceEntries() =

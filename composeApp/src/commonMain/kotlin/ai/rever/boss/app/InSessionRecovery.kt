@@ -16,8 +16,8 @@ import kotlinx.coroutines.withContext
  *
  * Only [LastSessionCoordinator.ownsSessionRecord]'s window writes, and it writes BOTH files, the
  * same pair the coordinator writes at shutdown. [set] is built before anything is written, on the
- * caller's dispatcher, because it reads the window's live Compose state; it is null for a window
- * running fewer than two Spaces, which removes a set an earlier session left rather than letting
+ * caller's dispatcher, because it reads the window's live Compose state. Even a single Space
+ * retains its identity in the set; a null set removes a stale recovery set instead of letting
  * it outrank the record (see `sessionSetOf`).
  *
  * The pair is [LastSessionCoordinator.writeInSession]: one blocking, non-suspending call, set
