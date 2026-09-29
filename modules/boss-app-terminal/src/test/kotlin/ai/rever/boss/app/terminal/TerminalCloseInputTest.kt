@@ -186,7 +186,7 @@ class TerminalCloseInputTest {
                 assertTrue(waitedMs >= QUEUE_TIMEOUT_MILLIS - 50, "gave up after only ${waitedMs}ms")
             } finally {
                 session.terminate()
-                withTimeout(5_000) {
+                withTimeoutOrNull(5_000) {
                     writer.join()
                 }
             }
