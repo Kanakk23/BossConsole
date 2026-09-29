@@ -451,3 +451,9 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/relay-admission/deno.json"
 entrypoint = "./functions/relay-admission/index.ts"
+
+[functions.app-sharing]
+verify_jwt = false
+
+[functions.app-sharing-maintenance]
+verify_jwt = false

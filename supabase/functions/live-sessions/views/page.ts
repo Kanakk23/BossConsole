@@ -182,7 +182,7 @@ const SCRIPT = `
   async function loadSessions(isPoll) {
     var requestGeneration = ++sessionRequestGeneration;
     if (!isPoll) show("loading");
-    var r = await api("/api/sessions?terminal_preferences=1");
+    var r = await api("/api/sessions?terminal_preferences=1&app_sessions=1");
     if (requestGeneration !== sessionRequestGeneration) return;
     if (r.status === 401) {
       terminalPreferences = null; preferencesOwner = null;
@@ -195,7 +195,7 @@ const SCRIPT = `
     var data = await r.json();
     if (requestGeneration !== sessionRequestGeneration) return;
     acceptTerminalPreferences(data);
-    render(data.sessions || [], data.email || "");
+    render(data.sessions || [], data.email || "", data.app_sessions || []);
   }
 
   // The viewer is embedded in an iframe rather than navigated to, so the address bar stays on
@@ -296,12 +296,13 @@ const SCRIPT = `
   window.addEventListener("message", onFrameMessage);
   window.addEventListener("popstate", function () { if (viewing) closeSession(""); });
 
-  function render(sessions, email) {
+  function render(sessions, email, appSessions) {
+    appSessions = appSessions || [];
     $("who").textContent = email || "";
     if (viewing) return; // the frame is up; leave the list alone until it closes (closeSession reloads)
     var ul = $("sessions");
     ul.innerHTML = "";
-    if (sessions.length === 1 && !cancelledAutoOpen && !openTimer) {
+    if (sessions.length === 1 && appSessions.length === 0 && !cancelledAutoOpen && !openTimer) {
       var s = sessions[0], url = safeHttpUrl(s.control_url);
       if (url) {
         var label = s.device_name + (s.session_name && s.session_name !== s.device_name ? " · " + s.session_name : "");
@@ -312,7 +313,7 @@ const SCRIPT = `
         return;
       }
     }
-    if (sessions.length === 0) {
+    if (sessions.length === 0 && appSessions.length === 0) {
       ul.innerHTML = '<li><div><div class="name">No live sessions</div><div class="meta">Share a tab from a signed-in BossTerm and it will appear here.</div></div></li>';
     }
     sessions.forEach(function (s) {
@@ -332,6 +333,13 @@ const SCRIPT = `
         ev.preventDefault();
         openSession(url, s.device_name + (s.session_name && s.session_name !== s.device_name ? " · " + s.session_name : ""));
       });
+      ul.appendChild(li);
+    });
+    appSessions.forEach(function (s) {
+      if (!s || typeof s.name !== "string" || !/^[0-9a-f-]{36}$/i.test(s.session_id)) return;
+      var li = document.createElement("li");
+      li.innerHTML = '<div><div class="name">' + esc(s.name) + '<span class="pill ok">BossConsole</span></div><div class="meta">Shared application windows · encrypted media</div></div><a class="btn" rel="noopener noreferrer" target="_blank">Open</a>';
+      li.querySelector("a").setAttribute("href", base + "/app-viewer/?session=" + encodeURIComponent(s.session_id));
       ul.appendChild(li);
     });
     show("list");

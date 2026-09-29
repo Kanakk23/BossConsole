@@ -35,6 +35,7 @@
  * origin. HTML only renders on the custom domain (see organisation/app.ts).
  */
 
+import { appSharingBrowser } from "./app-sharing-browser.ts"
 import { OpenAPIHono } from "@hono/zod-openapi"
 import { LIVE_WINDOW_SECONDS, publicBasePath, publicBaseUrl, readConfig } from "./utils/config.ts"
 import { htmlResponse, jsonResponse, redirectResponse } from "./utils/responses.ts"
@@ -256,11 +257,27 @@ app.get("/api/sessions", async (ctx) => {
   }
   if (rows.status !== 200 || !rows.rows) return jsonResponse({ error: "upstream" }, 502)
   const preferences = ctx.req.query("terminal_preferences") === "1" ? await fetchTerminalPreferences(cfg, token!) : null
+  let applicationSessions: unknown[] | null = null
+  if (ctx.req.query("app_sessions") === "1") {
+    try {
+      const result = await deps.fetch(`${cfg.supabaseUrl}/rest/v1/rpc/app_sharing_command`, {
+        method: "POST", headers: {apikey:cfg.anonKey, Authorization:`Bearer ${token}`, "Content-Type":"application/json"},
+        body:JSON.stringify({p_action:"list",p_body:{}}), signal:AbortSignal.timeout(4000),
+      })
+      if (result.ok) { const value=await result.json(); if(Array.isArray(value?.sessions)) applicationSessions=value.sessions }
+    } catch { /* Additive capability: older backends keep terminal discovery intact. */ }
+  }
   return jsonResponse({ sessions: rows.rows, email: emailFromJwt(token!),
+    ...(applicationSessions ? {app_sessions:applicationSessions} : {}),
     ...(ctx.req.query("terminal_preferences") === "1" ? { terminal_preferences_owner: jwtDisplayClaim(token!, "sub") } : {}),
     ...(preferences ? { terminal_preferences: preferences } : {}),
   }, 200, setCookies)
 })
+
+app.all("/api/app-sharing", (ctx) => appSharingBrowser(ctx.req.raw, deps.fetch))
+app.all("/api/app-sharing-bootstrap", (ctx) => appSharingBrowser(ctx.req.raw, deps.fetch))
+app.get("/app-viewer/*", (ctx) => appSharingBrowser(ctx.req.raw, deps.fetch))
+app.get("/app-viewer", (ctx) => redirectResponse(`${publicBasePath()}/app-viewer/${new URL(ctx.req.url).search}`, { status: 302 }))
 
 app.notFound(() => jsonResponse({ error: "not_found" }, 404))
 

@@ -291,9 +291,13 @@ fun ApplicationScope.BossWindow(
         // Register window for focus management (deep links, etc.) and keyboard interception
         DisposableEffect(windowState.id, window) {
             WindowFocusManager.registerWindow(windowState.id, window)
+            ai.rever.boss.sharing.AppSharingService
+                .registerWindow(windowState.id, window, window.title)
             AWTKeyboardInterceptor.registerWindow(window, windowState.id)
             onDispose {
                 WindowFocusManager.unregisterWindow(windowState.id)
+                ai.rever.boss.sharing.AppSharingService
+                    .unregisterWindow(windowState.id)
                 AWTKeyboardInterceptor.unregisterWindow(window)
                 MenuActionsHandler.cleanupWindow(windowState.id)
             }
@@ -947,6 +951,23 @@ fun ApplicationScope.BossWindow(
 
             // Window Menu
             Menu("Window") {
+                Item("Share BossConsole Window", onClick = {
+                    ai.rever.boss.sharing.AppSharingService
+                        .start(windowState.id)
+                })
+                // Capture consent stays in the native menu, outside remotely dispatched content input.
+                Item("Share Selected BossConsole Windows", onClick = {
+                    ai.rever.boss.sharing.AppSharingService
+                        .startSelectedWindows()
+                })
+                Item("Stop BossConsole Sharing", onClick = {
+                    ai.rever.boss.sharing.AppSharingService
+                        .stop()
+                })
+                Item("Sharing Settings", onClick = {
+                    MenuActionsHandler.triggerOpenSettings(windowState.id, "SHARING")
+                })
+                Separator()
                 Item(
                     "Close Window",
                     shortcut = shortcutBridge.getKeyShortcut(KeymapActions.WINDOW_CLOSE),
@@ -1145,19 +1166,21 @@ fun ApplicationScope.BossWindow(
             with(createBossAppContext) {
                 // Only the first window should load "Last Session" workspace (Issue #129)
                 val isFirstWindow = WindowManager.windowCount == 1
-                BossAppWithAuth(
-                    windowId = windowState.id,
-                    isFirstWindow = isFirstWindow,
-                    panelRegistry = panelRegistry,
-                    onToggleMaximize = {
-                        // Capture state before EDT dispatch to avoid race condition with rapid double-clicks
-                        val shouldMaximize = window.extendedState != Frame.MAXIMIZED_BOTH
-                        java.awt.EventQueue.invokeLater {
-                            window.extendedState = if (shouldMaximize) Frame.MAXIMIZED_BOTH else Frame.NORMAL
-                            // isMaximized will be updated by WindowStateListener
-                        }
-                    },
-                )
+                ai.rever.boss.sharing.AppSharingChrome(windowState.id) {
+                    BossAppWithAuth(
+                        windowId = windowState.id,
+                        isFirstWindow = isFirstWindow,
+                        panelRegistry = panelRegistry,
+                        onToggleMaximize = {
+                            // Capture state before EDT dispatch to avoid race condition with rapid double-clicks
+                            val shouldMaximize = window.extendedState != Frame.MAXIMIZED_BOTH
+                            java.awt.EventQueue.invokeLater {
+                                window.extendedState = if (shouldMaximize) Frame.MAXIMIZED_BOTH else Frame.NORMAL
+                                // isMaximized will be updated by WindowStateListener
+                            }
+                        },
+                    )
+                }
             }
 
             // CLI Installation Dialog

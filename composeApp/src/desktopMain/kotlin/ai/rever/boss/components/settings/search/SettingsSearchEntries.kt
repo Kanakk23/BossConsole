@@ -571,6 +571,16 @@ private fun gettingStartedEntries() =
         setting("Plugin Setup Wizard", "Getting Started")
     }
 
+private fun sharingEntries() =
+    section(SettingsSection.SHARING) {
+        group("BossConsole Sharing", "screen", "window", "remote", "mirror")
+        setting("Use media relay", "BossConsole Sharing")
+        group("Account Access", "approval", "same account")
+        setting("Allow my devices without approval", "Account Access")
+        setting("Allow my devices to take control", "Account Access")
+        group("Remote Connections", "connect", "view", "browser")
+    }
+
 /** Every built-in entry, in the order the sections appear in the nav rail. */
 internal val builtInEntries: List<SettingsSearchEntry> by lazy {
     gettingStartedEntries() +
@@ -580,6 +590,7 @@ internal val builtInEntries: List<SettingsSearchEntry> by lazy {
         runnerEntries() +
         workspaceEntries() +
         securityEntries() +
+        sharingEntries() +
         keymapEntries() +
         focusModeEntries() +
         themeEntries() +
