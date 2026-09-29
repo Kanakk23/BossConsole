@@ -192,6 +192,9 @@ object McpToolRegistryImpl : McpToolRegistry {
 
     fun registerProvider(provider: McpToolProvider) = core.registerProvider(provider)
 
+    /** Capture plugin-owned metadata once so restore does not re-invoke its metadata getters. */
+    internal fun snapshotProvider(provider: McpToolProvider): McpToolProvider = core.snapshotProvider(provider)
+
     fun unregisterProvider(providerId: String) = core.unregisterProvider(providerId)
 
     override fun setToolEnabled(
@@ -662,43 +665,66 @@ internal class McpToolRegistryCore(
     private val _tools = MutableStateFlow<List<RegisteredMcpTool>>(emptyList())
     val tools: StateFlow<List<RegisteredMcpTool>> = _tools.asStateFlow()
 
-    fun registerProvider(provider: McpToolProvider) {
-        // Query the plugin's tools() OUTSIDE the lock — see mutationLock KDoc.
-        // A throwing provider registers with an empty tool set (and a warning)
-        // rather than being silently dropped: its id stays tracked so teardown
-        // and re-registration behave normally.
-        val defs =
+    /** Host-owned marker that prevents prepared registration metadata being copied again on replay. */
+    private interface ProviderSnapshot :
+        McpToolProvider,
+        McpToolAliasProvider
+
+    /**
+     * Snapshot [provider] without re-entering its metadata getters during a later replay. Tool
+     * definitions may still own handler closures supplied by the plugin; the snapshot guarantee
+     * is about stable registration metadata, not severing every reference to plugin code.
+     */
+    internal fun snapshotProvider(provider: McpToolProvider): McpToolProvider {
+        val providerId = provider.providerId
+        val definitions =
             try {
-                provider.tools()
+                provider.tools().toList()
             } catch (t: Throwable) {
                 logger.warn(
                     LogCategory.SYSTEM,
                     "MCP provider tools() failed; registering with no tools",
-                    mapOf("providerId" to provider.providerId, "error" to (t.message ?: t::class.simpleName)),
+                    mapOf("providerId" to providerId, "error" to (t.message ?: t::class.simpleName)),
                 )
                 emptyList()
             }
         // Read alongside tools() outside the lock - same plugin-code discipline.
-        val aliases = (provider as? McpToolAliasProvider)?.toolAliases.orEmpty()
+        val aliases = (provider as? McpToolAliasProvider)?.toolAliases.orEmpty().toMap()
+        return object : ProviderSnapshot {
+            override val providerId = providerId
+
+            override fun tools(): List<McpToolDefinition> = definitions
+
+            override val toolAliases: Map<String, String> = aliases
+        }
+    }
+
+    fun registerProvider(provider: McpToolProvider) {
+        // Query the plugin's tools() OUTSIDE the lock - see mutationLock KDoc. Window arbitration
+        // passes a snapshot provider here, so restoring another window reuses its cached list.
+        val prepared = if (provider is ProviderSnapshot) provider else snapshotProvider(provider)
+        val providerId = prepared.providerId
+        val defs = prepared.tools()
+        val aliases = (prepared as? McpToolAliasProvider)?.toolAliases.orEmpty()
         synchronized(mutationLock) {
-            if (_providers.value.containsKey(provider.providerId)) {
+            if (_providers.value.containsKey(providerId)) {
                 // Same-id re-registration replaces the previous provider. Legitimate on
                 // plugin reload, but worth a trace: two plugins sharing an id would
                 // clobber each other and the first teardown would kill both tool sets.
                 logger.warn(
                     LogCategory.SYSTEM,
                     "MCP tool provider re-registered (replacing previous)",
-                    mapOf("providerId" to provider.providerId),
+                    mapOf("providerId" to providerId),
                 )
             }
-            _providers.update { it + (provider.providerId to defs) }
-            _providerAliases.update { it + (provider.providerId to aliases) }
+            _providers.update { it + (providerId to defs) }
+            _providerAliases.update { it + (providerId to aliases) }
             recompute()
         }
         logger.info(
             LogCategory.SYSTEM,
             "MCP tool provider registered",
-            mapOf("providerId" to provider.providerId, "tools" to defs.size),
+            mapOf("providerId" to providerId, "tools" to defs.size),
         )
     }
 
@@ -957,7 +983,10 @@ internal class McpToolRegistryCore(
         // its name says (#804), so it gets the mutating default - ASK under the factory
         // config - rather than being auto-allowed for avoiding the catalog's name patterns.
         val savedPolicy = policyEngine.policyFor(canonicalName, tool.providerId, tool.definition.readOnly)
-        val policy = askBeforeDestructiveShell(canonicalName, args, savedPolicy)
+        // Stated rather than inferred from a policy change, so the prompt and the ledger row
+        // read the same answer and a second rule that also moves the policy cannot pass as one.
+        val escalated = escalatesToAsk(canonicalName, args, savedPolicy)
+        val policy = if (escalated) McpPolicyAction.ASK else savedPolicy
         val startTime = System.nanoTime()
         // The secret pre-pass runs before the audit boundary below on purpose: nothing in it
         // executes the tool, and a cancellation while the vault is being read has nothing to
@@ -975,7 +1004,7 @@ internal class McpToolRegistryCore(
                 if (invalidArguments != null) {
                     McpApprovalDisposition.INVALID_ARGUMENTS to invalidArguments
                 } else {
-                    authorize(tool, args, effectivePolicy, revocation, secrets, escalated = policy != savedPolicy)
+                    authorize(tool, args, effectivePolicy, revocation, secrets, escalated)
                 }
             disposition = authorization.first
             val denial = authorization.second
@@ -1027,6 +1056,7 @@ internal class McpToolRegistryCore(
                             else -> null
                         },
                     secretRefs = secrets.references.map { it.ledgerName },
+                    escalated = escalated,
                 )
             }
         }
@@ -1229,20 +1259,14 @@ internal class McpToolRegistryCore(
      * its name and already weighed when the policy was saved. The ALLOW may be a tool rule or a
      * provider-wide "Trust This Plugin" rule; both are covered.
      */
-    private fun askBeforeDestructiveShell(
+    private fun escalatesToAsk(
         toolName: String,
         args: McpToolArgs,
         policy: McpPolicyAction,
-    ): McpPolicyAction =
-        if (
-            policy == McpPolicyAction.ALLOW &&
+    ): Boolean =
+        policy == McpPolicyAction.ALLOW &&
             DefaultMcpRiskEvaluator.isShellTool(toolName) &&
             DefaultMcpRiskEvaluator().evaluateRisk(toolName, args).level >= McpRiskLevel.CRITICAL
-        ) {
-            McpPolicyAction.ASK
-        } else {
-            policy
-        }
 
     /**
      * The secret pre-pass's refusal is final and never reaches the policy path; anything else
@@ -1292,7 +1316,9 @@ internal class McpToolRegistryCore(
         args: McpToolArgs,
         policy: McpPolicyAction,
         revocation: Long,
-        escalated: Boolean = false,
+        // No default: a caller that forgot it would silently answer "not escalated", which is the
+        // direction that lets a broader approval stick.
+        escalated: Boolean,
         secretRefs: List<SecretDescriptor> = emptyList(),
     ): Pair<McpApprovalDisposition, String?> =
         when (policy) {
