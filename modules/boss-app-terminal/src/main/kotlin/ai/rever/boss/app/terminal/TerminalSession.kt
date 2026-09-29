@@ -218,6 +218,7 @@ internal class TerminalSession(
      * Takes the same input mutex as [send], so a close never races a write on the same fd, and
      * waits for it on the same bounded queue: a caller behind a stalled writer is answered
      * RESOURCE_EXHAUSTED "Terminal input is busy" with a retry-after, exactly as a queued send is.
+     * Re-checks [ensureActive] after lock acquisition so a cancelled caller does not proceed to deliver EOF.
      *
      * Idempotent and safe after exit: a second call, or one after the process has died or a
      * failed write already closed the pipe, finds nothing left to close rather than throwing.
@@ -228,6 +229,7 @@ internal class TerminalSession(
             throw inputBusy(inputQueueTimeoutMillis)
         }
         try {
+            currentCoroutineContext().ensureActive()
             if (inputClosed) return
             inputClosedByCaller = true
             inputClosed = true

@@ -20,9 +20,11 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class TerminalSendQueueTest {
@@ -168,10 +170,33 @@ class TerminalSendQueueTest {
             }
         }
 
+    @Test
+    fun `cancelling a queued closeStdin abandons closing input`() =
+        runBlocking {
+            val process = BlockedInputProcess()
+            val session = TerminalSession("fixture", "/fixture", listOf("fixture"), process, 80, 24)
+            val holder = CompletableFuture.runAsync { runBlocking { session.send(byteArrayOf(0)) } }
+            try {
+                assertTrue(process.writeStarted.await(5, TimeUnit.SECONDS))
+                val queued = launch { session.closeStdin() }
+                delay(200)
+                assertTrue(queued.isActive)
+                // The caller gave up while closeStdin was queued on the input lock; once the pipe
+                // drains nothing may deliver EOF on a dead call's behalf.
+                queued.cancelAndJoin()
+                process.releaseWrite.countDown()
+                holder.get(5, TimeUnit.SECONDS)
+                assertFalse(process.stdinClosed.get(), "stdin must not be closed after cancellation")
+            } finally {
+                process.releaseWrite.countDown()
+            }
+        }
+
     private class BlockedInputProcess : Process() {
         val writeStarted = CountDownLatch(1)
         val releaseWrite = CountDownLatch(1)
         val writes = ConcurrentLinkedQueue<Byte>()
+        val stdinClosed = AtomicBoolean(false)
         private val stdin =
             object : OutputStream() {
                 override fun write(
@@ -190,6 +215,10 @@ class TerminalSendQueueTest {
                 }
 
                 override fun write(byte: Int) = write(byteArrayOf(byte.toByte()), 0, 1)
+
+                override fun close() {
+                    stdinClosed.set(true)
+                }
             }
 
         override fun getInputStream(): InputStream = ByteArrayInputStream(byteArrayOf())
