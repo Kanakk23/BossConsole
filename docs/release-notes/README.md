@@ -12,6 +12,7 @@ This directory contains detailed release notes for each version of BOSS.
 <!-- RELEASE_INDEX_START -->
 | Version | Date | Summary |
 |---------|------|---------|
+| [v9.5.32](v9.5.32.md) | 2026-09-29 | The browser engine moves to JxBrowser 9.5.2 (#1761). Corrupt keymap, zoom and Space settings files recover with a notice, local files that fail to decode are no longer written into logs, and the MCP ledger records escalated shell calls and `boss mcp ledger secrets` reports credential use (#1728). On macOS, favorites wrap to the sidebar width and glass settings apply immediately (#1765). |
 | [v9.5.31](v9.5.31.md) | 2026-09-28 | On macOS, new Liquid Glass Light and Dark themes put a native glass backdrop behind the main window, with the desktop wallpaper behind it in fullscreen and the focused terminal's title in the toolbar (#1756). Tab dragging needs a deliberate movement and previews directional splits, including on the source pane (#1755), and the hidden-sidebar edge no longer reveals the sidebar in fullscreen (#1753). |
 | [v9.5.30](v9.5.30.md) | 2026-09-28 | On macOS, the terminal's sharing, call and MCP controls move into the native window toolbar, grouped beside Search, Tools and Toolbox. Live call controls now follow the window rather than the selected tab, and the bottom status bar is hidden by default on desktop (#1754). |
 | [v9.5.29](v9.5.29.md) | 2026-09-27 | Clearing the address field in the native macOS title bar no longer navigates the browser. The page changes only when you press Enter (#1748). |
