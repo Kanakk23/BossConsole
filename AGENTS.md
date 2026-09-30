@@ -1029,7 +1029,11 @@ covering all eight duplicated packages rather than this one field.
 
 ## Deep Links
 
-App registers `boss://` protocol for authentication callbacks from external browsers.
+App registers `boss://` protocol for authentication callbacks from external browsers. That
+includes `boss://auth/callback`, the Google / Apple sign-in return, which is acted on only
+while a sign-in this process started is waiting (`OAuthSignInService`). Linux registers the
+scheme at startup through `LinuxProtocolHandler`, as Windows does through
+`WindowsProtocolHandler`.
 
 Because the scheme is registered with the OS, a `boss://` link is not evidence
 that the operator asked for anything - any program that can ask the OS to open a
@@ -2217,6 +2221,7 @@ workspace by selecting the tools you need." Tools install app-wide, not into a S
 - [RBAC Guide](docs/RBAC_GUIDE.md) - Role-based access control
 - [Role Creation](docs/ROLE_CREATION_GUIDE.md) - Creating and managing roles
 - [Windows Deep Link](docs/WINDOWS_DEEP_LINK_SETUP.md) - Windows protocol handler setup
+- [Google and Apple sign-in](docs/OAUTH_SIGN_IN_SETUP.md) - PKCE flow over `boss://auth/callback`, provider setup, Apple secret rotation
 - [Release Rebuild](docs/RELEASE_REBUILD_GUIDE.md) - Re-running release builds
 ### Governed MCP invocation (#371)
 
