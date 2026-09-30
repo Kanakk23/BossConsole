@@ -25,6 +25,7 @@ import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.ComponentLogger
 import ai.rever.boss.utils.logging.LogCategory
+import ai.rever.boss.utils.logging.decodeFailure
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -35,6 +36,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -1600,11 +1602,18 @@ internal class McpToolRegistryCore(
 
                 is JsonPrimitive -> primitiveShape(el)
             }
+        } catch (e: SerializationException) {
+            logger.debug(
+                LogCategory.SYSTEM,
+                "MCP tool arguments are not parseable JSON - refusing invocation",
+                decodeFailure(e),
+            )
+            "unparseable input"
         } catch (t: Throwable) {
             logger.debug(
                 LogCategory.SYSTEM,
                 "MCP tool arguments are not parseable JSON - refusing invocation",
-                mapOf("error" to t.toString()),
+                mapOf("error" to (t::class.simpleName ?: "Throwable")),
             )
             "unparseable input"
         }
@@ -1647,11 +1656,18 @@ internal fun parseMcpToolArgs(
                 (mcpArgsJson.parseToJsonElement(arguments) as? JsonObject)
                     ?.mapValues { (_, el) -> scalarOf(el) }
                     ?: emptyMap()
+            } catch (e: SerializationException) {
+                logger.debug(
+                    LogCategory.SYSTEM,
+                    "MCP tool arguments are not a JSON object - using empty args",
+                    decodeFailure(e),
+                )
+                emptyMap()
             } catch (t: Throwable) {
                 logger.debug(
                     LogCategory.SYSTEM,
                     "MCP tool arguments are not a JSON object - using empty args",
-                    mapOf("error" to t.toString()),
+                    mapOf("error" to (t::class.simpleName ?: "Throwable")),
                 )
                 emptyMap()
             }
