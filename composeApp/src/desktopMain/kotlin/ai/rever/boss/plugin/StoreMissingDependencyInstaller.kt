@@ -15,6 +15,7 @@ import ai.rever.boss.plugin.repository.PluginRepository
 import ai.rever.boss.plugin.repository.shortFailureReason
 import ai.rever.boss.utils.atomicMoveFrom
 import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.ComponentLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -47,6 +48,7 @@ import java.io.File
  *   later directory scan exactly like any other install
  * @param hooks everything this needs from outside itself; see [InstallerHooks]
  */
+@Suppress("TooManyFunctions")
 class StoreMissingDependencyInstaller(
     private val repository: () -> PluginRepository?,
     private val pluginDir: () -> File,
@@ -160,6 +162,7 @@ class StoreMissingDependencyInstaller(
         }
     }
 
+    @Suppress("NestedBlockDepth")
     override suspend fun installAllArtifacts(artifacts: List<ApprovedArtifact>): Result<Unit> {
         val acceptedArtifacts = artifacts.toList()
         return DETACHED_PLANS.run(
@@ -244,6 +247,7 @@ class StoreMissingDependencyInstaller(
             }
         }
 
+    @Suppress("ReturnCount")
     private suspend fun installFromStore(
         store: PluginRepository,
         pluginId: String,
@@ -273,25 +277,8 @@ class StoreMissingDependencyInstaller(
                     ?: "$pluginId was not found in the plugin store.",
             )
 
-        if (expectedVersion != null && expectedVersion.isNotBlank() && info.version != expectedVersion) {
-            logger.warn(
-                LogCategory.SYSTEM,
-                "Store version mismatch for plugin",
-                mapOf("pluginId" to pluginId, "storeVersion" to info.version, "expectedVersion" to expectedVersion),
-            )
-            return failure("Store version for $pluginId (${info.version}) does not match approved version $expectedVersion.")
-        }
-
-        if (expectedSha256 != null && expectedSha256.isNotBlank() &&
-            info.sha256.isNotBlank() && !info.sha256.equals(expectedSha256, ignoreCase = true)
-        ) {
-            logger.warn(
-                LogCategory.SYSTEM,
-                "Store SHA-256 mismatch for plugin",
-                mapOf("pluginId" to pluginId, "storeSha256" to info.sha256, "expectedSha256" to expectedSha256),
-            )
-            return failure("Store SHA-256 for $pluginId (${info.sha256}) does not match approved hash $expectedSha256.")
-        }
+        val metadataError = validateStoreArtifact(pluginId, info, expectedVersion, expectedSha256, logger)
+        if (metadataError != null) return failure(metadataError)
 
         // `<id_with_underscores>_<version>.jar` in the plugins directory, so a later directory
         // scan picks it up like any other install. Both parts are sanitised because both come
@@ -587,4 +574,38 @@ private fun failure(message: String): Result<Unit> = Result.failure(IllegalState
 private fun discard(jarPath: String) {
     runCatching { File(jarPath).delete() }
     runCatching { PluginSignatureSidecar.delete(jarPath) }
+}
+
+@Suppress("ReturnCount")
+private fun validateStoreArtifact(
+    pluginId: String,
+    info: PluginInfo,
+    expectedVersion: String?,
+    expectedSha256: String?,
+    logger: ComponentLogger,
+): String? {
+    if (!expectedVersion.isNullOrBlank() && info.version != expectedVersion) {
+        logger.warn(
+            LogCategory.SYSTEM,
+            "Store version mismatch for plugin",
+            mapOf("pluginId" to pluginId, "storeVersion" to info.version, "expectedVersion" to expectedVersion),
+        )
+        return "Store version for $pluginId (${info.version}) does not match approved version " +
+            "$expectedVersion."
+    }
+
+    val hashMismatch =
+        !expectedSha256.isNullOrBlank() &&
+            info.sha256.isNotBlank() &&
+            !info.sha256.equals(expectedSha256, ignoreCase = true)
+    if (hashMismatch) {
+        logger.warn(
+            LogCategory.SYSTEM,
+            "Store SHA-256 mismatch for plugin",
+            mapOf("pluginId" to pluginId, "storeSha256" to info.sha256, "expectedSha256" to expectedSha256),
+        )
+        return "Store SHA-256 for $pluginId (${info.sha256}) does not match approved hash " +
+            "$expectedSha256."
+    }
+    return null
 }

@@ -206,7 +206,7 @@ private const val DEFAULT_DENY_REASON = "Operator declined this action"
  * menu.
  */
 @Composable
-@Suppress("LongMethod") // Declarative Compose layout.
+@Suppress("LongMethod", "CyclomaticComplexMethod") // Declarative Compose layout.
 fun McpApprovalDialog(
     request: McpApprovalRequest,
     pendingQueueSize: Int = 1,
@@ -361,8 +361,9 @@ fun McpApprovalDialog(
                                                     color = colors.warn,
                                                 )
                                                 plugin.extraDependencies.forEach { dep ->
+                                                    val hashPreview = dep.sha256.take(12)
                                                     Text(
-                                                        text = "• ${dep.pluginId}@${dep.version} (${dep.sha256.take(12)}…)",
+                                                        text = "• ${dep.pluginId}@${dep.version} ($hashPreview…)",
                                                         fontSize = 10.sp,
                                                         fontFamily = FontFamily.Monospace,
                                                         color = colors.textSecondary,
@@ -384,8 +385,9 @@ fun McpApprovalDialog(
                                     packModel.rules.forEach { rule ->
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Column(modifier = Modifier.fillMaxWidth().padding(start = 6.dp)) {
+                                            val ruleHeader = "${rule.scope} / ${rule.subject}"
                                             Text(
-                                                text = "${rule.scope} / ${rule.subject}: ${rule.action} -> ${rule.outcome}",
+                                                text = "$ruleHeader: ${rule.action} -> ${rule.outcome}",
                                                 fontSize = 11.sp,
                                                 fontFamily = FontFamily.Monospace,
                                                 color = colors.textPrimary,
@@ -703,7 +705,9 @@ private fun ScopeOptions(
         }
         if (!request.allowStandingTrust) {
             Text(
-                text = "Pack applications require fresh approval for each plan and cannot be granted standing or session trust.",
+                text =
+                    "Pack applications require fresh approval for each plan and cannot be granted " +
+                        "standing or session trust.",
                 fontSize = 11.sp,
                 color = BossTheme.colors.textSecondary,
                 modifier = Modifier.padding(top = 4.dp),

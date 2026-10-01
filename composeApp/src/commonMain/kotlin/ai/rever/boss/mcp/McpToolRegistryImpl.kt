@@ -1012,7 +1012,7 @@ internal class McpToolRegistryCore(
             }
 
     // One boundary must cover denial, approval, execution, and the ledger write.
-    @Suppress("LongMethod", "CyclomaticComplexMethod")
+    @Suppress("LongMethod", "CyclomaticComplexMethod", "ReturnCount")
     suspend fun invoke(
         toolName: String,
         arguments: String,
@@ -1382,28 +1382,6 @@ internal class McpToolRegistryCore(
             DefaultMcpRiskEvaluator().evaluateRisk(toolName, args).level >= McpRiskLevel.CRITICAL
 
     /**
-     * The secret pre-pass's refusal is final and never reaches the policy path; anything else
-     * is authorized as before, with the descriptors carried into the prompt.
-     */
-    private suspend fun authorize(
-        tool: RegisteredMcpTool,
-        args: McpToolArgs,
-        policy: McpPolicyAction,
-        revocation: Long,
-        secrets: SecretPreparation,
-        escalated: Boolean,
-    ): Pair<McpApprovalDisposition, String?> =
-        when (secrets) {
-            is SecretPreparation.Refused -> {
-                secrets.disposition to secrets.message
-            }
-
-            else -> {
-                authorizeInvocation(tool, args, policy, revocation, escalated, secrets.descriptors)
-            }
-        }
-
-    /**
      * An approval of an escalated call counts as once, whatever scope came back (#1624). The dialog
      * never asks for more there, so a broader request came from another caller of the approval
      * bus: it is logged, or the ledger's APPROVED_ONCE would carry no explanation.
@@ -1476,7 +1454,7 @@ internal class McpToolRegistryCore(
     }
 
     @Suppress("LongParameterList")
-    private fun handleApprovalDecision(
+    private suspend fun handleApprovalDecision(
         tool: RegisteredMcpTool,
         decision: McpApprovalDecision,
         revocation: Long,

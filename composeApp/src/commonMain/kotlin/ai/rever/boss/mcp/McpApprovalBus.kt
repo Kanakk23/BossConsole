@@ -163,7 +163,7 @@ open class McpApprovalBus(
     // Queue overflow needs its own returns; the request carries the tool's full approval
     // context, from name and provider to its own read-only declaration and the secrets it
     // would receive. Folding those into a builder would move the same names one call deeper.
-    @Suppress("ReturnCount", "LongParameterList")
+    @Suppress("ReturnCount", "LongParameterList", "LongMethod")
     suspend fun requestApproval(
         toolName: String,
         providerId: String,

@@ -214,9 +214,12 @@ class PluginPackGovernanceTest {
         }
 
     private fun planChangeFixture(): FakePackEffects {
-        val gatewayListing = StoreListing.Published(latest = "1.0.0", versions = setOf("1.0.0"), latestSha256 = "sha-gateway-1.0")
-        val editorListing = StoreListing.Published(latest = "2.0.0", versions = setOf("2.0.0"), latestSha256 = "sha-editor-2.0")
-        val telemetryListing = StoreListing.Published(latest = "1.0.0", versions = setOf("1.0.0"), latestSha256 = "sha-telemetry-1.0")
+        val gatewayListing =
+            StoreListing.Published(latest = "1.0.0", versions = setOf("1.0.0"), latestSha256 = "sha-gateway-1.0")
+        val editorListing =
+            StoreListing.Published(latest = "2.0.0", versions = setOf("2.0.0"), latestSha256 = "sha-editor-2.0")
+        val telemetryListing =
+            StoreListing.Published(latest = "1.0.0", versions = setOf("1.0.0"), latestSha256 = "sha-telemetry-1.0")
 
         val fakeEffects =
             FakePackEffects(
@@ -253,7 +256,8 @@ class PluginPackGovernanceTest {
         runBlocking<Unit> {
             val fakeEffects = planChangeFixture()
             val h = Harness(fakeEffects)
-            val devPackArgs = """{"pack":"dev","plugins":["ai.rever.boss.gateway@1.0.0","ai.rever.boss.editor@2.0.0"]}"""
+            val devPackArgs =
+                """{"pack":"dev","plugins":["ai.rever.boss.gateway@1.0.0","ai.rever.boss.editor@2.0.0"]}"""
 
             val call = async { h.core.invoke("pack_apply", devPackArgs) }
             val request =
@@ -465,7 +469,12 @@ class PluginPackGovernanceTest {
             val policy = McpPolicyEngine(policyFile = null)
             val jobs = PluginPackJobs(PluginPackApplier(effects))
             val core =
-                McpToolRegistryCore(disabledFile = null, policyEngine = policy, approvalBus = bus, ledger = ledger).also {
+                McpToolRegistryCore(
+                    disabledFile = null,
+                    policyEngine = policy,
+                    approvalBus = bus,
+                    ledger = ledger,
+                ).also {
                     it.registerProvider(PluginPackMcpToolProvider(effects, jobs))
                 }
 
@@ -529,7 +538,8 @@ class PluginPackGovernanceTest {
             val started = Json.parseToJsonElement(call.await().text) as JsonObject
             val jobId = started.getValue("job").jsonPrimitive.content
 
-            val runningStatus = Json.parseToJsonElement(h.core.invoke("pack_status", """{"job":"$jobId"}""").text) as JsonObject
+            val rawRunning = h.core.invoke("pack_status", """{"job":"$jobId"}""").text
+            val runningStatus = Json.parseToJsonElement(rawRunning) as JsonObject
             assertEquals(JsonPrimitive("running"), runningStatus["state"])
 
             gate.complete(Unit)
@@ -537,7 +547,8 @@ class PluginPackGovernanceTest {
             assertEquals(PackJobState.FINISHED, finished.state)
             assertEquals(PackApplyStatus.APPLIED, finished.result?.status)
 
-            val finishedStatus = Json.parseToJsonElement(h.core.invoke("pack_status", """{"job":"$jobId"}""").text) as JsonObject
+            val rawFinished = h.core.invoke("pack_status", """{"job":"$jobId"}""").text
+            val finishedStatus = Json.parseToJsonElement(rawFinished) as JsonObject
             assertEquals(JsonPrimitive("finished"), finishedStatus["state"])
             assertEquals(JsonPrimitive("applied"), finishedStatus["status"])
         }

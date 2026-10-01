@@ -168,6 +168,7 @@ data class PreparedPackApply(
  *
  * An optional plugin that cannot be satisfied is reported but does not make the pack partial.
  */
+@Suppress("TooManyFunctions")
 class PluginPackApplier(
     private val effects: PluginPackEffects,
 ) {
@@ -205,6 +206,7 @@ class PluginPackApplier(
         return PackApplyResult(prepared.pack.id, statusOf(plan, pluginResults, ruleResults), pluginResults, ruleResults)
     }
 
+    @Suppress("ReturnCount", "CyclomaticComplexMethod")
     fun isPlanChanged(
         prepared: PreparedPackApply,
         freshSnapshot: PackSnapshot,

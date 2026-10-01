@@ -65,6 +65,7 @@ class PluginPackMcpToolProvider(
             ),
         )
 
+    @Suppress("ReturnCount", "LongMethod")
     override suspend fun prepareInvocation(
         toolName: String,
         args: McpToolArgs,
@@ -92,41 +93,8 @@ class PluginPackMcpToolProvider(
 
         // Reject an apply whose dependency closure is unresolved, cyclic, truncated, or too large to display fully.
         for (step in plan.plugins) {
-            val closure = step.closure ?: continue
-            if (closure.cyclic) {
-                return McpPreparationResult.Rejected(
-                    McpToolResult(
-                        "Cannot apply pack '${pack.id}': dependency cycle detected for plugin '${step.plugin.pluginId}'.",
-                        isError = true,
-                    ),
-                )
-            }
-            if (closure.truncated) {
-                return McpPreparationResult.Rejected(
-                    McpToolResult(
-                        "Cannot apply pack '${pack.id}': dependency closure for plugin '${step.plugin.pluginId}' was truncated.",
-                        isError = true,
-                    ),
-                )
-            }
-            if (closure.unresolved.isNotEmpty()) {
-                return McpPreparationResult.Rejected(
-                    McpToolResult(
-                        "Cannot apply pack '${pack.id}': unresolved dependencies for plugin '${step.plugin.pluginId}': ${closure.unresolved.sorted().joinToString(
-                            ", ",
-                        )}.",
-                        isError = true,
-                    ),
-                )
-            }
-            if (closure.order.size > MAX_CLOSURE_DISPLAY_SIZE) {
-                return McpPreparationResult.Rejected(
-                    McpToolResult(
-                        "Cannot apply pack '${pack.id}': dependency closure for plugin '${step.plugin.pluginId}' is too large to display (${closure.order.size} plugins).",
-                        isError = true,
-                    ),
-                )
-            }
+            val rejection = validateClosure(pack.id, step)
+            if (rejection != null) return rejection
         }
 
         val pluginsDisplay =
@@ -206,6 +174,52 @@ class PluginPackMcpToolProvider(
             executionObject = prepared,
             requiresFreshApproval = true,
         )
+    }
+
+    @Suppress("ReturnCount")
+    private fun validateClosure(
+        packId: String,
+        step: PluginStep,
+    ): McpPreparationResult.Rejected? {
+        val closure = step.closure ?: return null
+        if (closure.cyclic) {
+            return McpPreparationResult.Rejected(
+                McpToolResult(
+                    "Cannot apply pack '$packId': dependency cycle detected for plugin " +
+                        "'${step.plugin.pluginId}'.",
+                    isError = true,
+                ),
+            )
+        }
+        if (closure.truncated) {
+            return McpPreparationResult.Rejected(
+                McpToolResult(
+                    "Cannot apply pack '$packId': dependency closure for plugin " +
+                        "'${step.plugin.pluginId}' was truncated.",
+                    isError = true,
+                ),
+            )
+        }
+        if (closure.unresolved.isNotEmpty()) {
+            val unresolved = closure.unresolved.sorted().joinToString(", ")
+            return McpPreparationResult.Rejected(
+                McpToolResult(
+                    "Cannot apply pack '$packId': unresolved dependencies for plugin " +
+                        "'${step.plugin.pluginId}': $unresolved.",
+                    isError = true,
+                ),
+            )
+        }
+        if (closure.order.size > MAX_CLOSURE_DISPLAY_SIZE) {
+            return McpPreparationResult.Rejected(
+                McpToolResult(
+                    "Cannot apply pack '$packId': dependency closure for plugin '${step.plugin.pluginId}' " +
+                        "is too large to display (${closure.order.size} plugins).",
+                    isError = true,
+                ),
+            )
+        }
+        return null
     }
 
     private suspend fun plan(args: McpToolArgs): McpToolResult {
