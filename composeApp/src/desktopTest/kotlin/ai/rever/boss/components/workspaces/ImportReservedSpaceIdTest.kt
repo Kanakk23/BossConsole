@@ -119,5 +119,22 @@ class ImportReservedSpaceIdTest {
         val importBody = source.substringAfter("fun importWorkspace(").substringBefore("\n    fun ")
 
         assertTrue("withImportableId()" in importBody, "importWorkspace must fix the identity with withImportableId")
+        assertTrue("uniqueWorkspaceName(" in importBody, "importWorkspace must ensure unique name")
+    }
+
+    @Test
+    fun `whitespace-only id returns null without throwing`() {
+        assertNull(reservedWorkspaceStoreFileName("   "))
+        assertNull(reservedWorkspaceStoreFileName("   .json"))
+        val space = imported("   ")
+        assertTrue(space.id.startsWith("workspace-"), "blank id is re-minted to a stable id")
+    }
+
+    @Test
+    fun `uniqueWorkspaceName ensures imported name does not duplicate existing Space names`() {
+        val taken = setOf("Last Session", "Dev Space", "Dev Space 2")
+        assertEquals("Last Session 2", uniqueWorkspaceName("Last Session", taken))
+        assertEquals("Dev Space 3", uniqueWorkspaceName("Dev Space", taken))
+        assertEquals("New Space", uniqueWorkspaceName("New Space", taken))
     }
 }

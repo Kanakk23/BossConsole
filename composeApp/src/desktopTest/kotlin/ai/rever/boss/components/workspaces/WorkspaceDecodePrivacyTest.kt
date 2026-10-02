@@ -8,10 +8,12 @@ import ai.rever.boss.plugin.workspace.PanelConfig
 import ai.rever.boss.plugin.workspace.SplitConfig
 import ai.rever.boss.plugin.workspace.WorkspaceSerializer
 import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.ComponentLogger
 import ai.rever.boss.utils.logging.LogEntry
 import ai.rever.boss.utils.logging.LogListener
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -95,7 +97,6 @@ class WorkspaceDecodePrivacyTest {
             val (_, logged) =
                 captureHostLogs {
                     runBlocking {
-                        val before = WorkspaceEventBus.subscriptionCount.value
                         val logListener =
                             LogListener { entry ->
                                 if (entry.message == "Workspace load from CLI failed") {
@@ -104,19 +105,17 @@ class WorkspaceDecodePrivacyTest {
                             }
                         BossLogger.addListener(logListener)
                         try {
-                            val subscription =
-                                subscribeWorkspaceLoadEvents(
-                                    windowId = "window-cli-test",
-                                    logger = logger,
-                                    onLoadSpace = { _, workspace -> loadedWorkspace = workspace },
+                            withSubscribedWorkspaceLoadEvents(
+                                windowId = "window-cli-test",
+                                logger = logger,
+                                onLoadSpace = { _, workspace -> loadedWorkspace = workspace },
+                            ) {
+                                WorkspaceEventBus.loadWorkspace(
+                                    workspacePath = corruptFile.absolutePath,
+                                    sourceWindowId = "window-cli-test",
                                 )
-                            WorkspaceEventBus.subscriptionCount.first { it > before }
-                            WorkspaceEventBus.loadWorkspace(
-                                workspacePath = corruptFile.absolutePath,
-                                sourceWindowId = "window-cli-test",
-                            )
-                            withTimeout(5_000) { loggedSignal.await() }
-                            subscription.cancelAndJoin()
+                                loggedSignal.await()
+                            }
                         } finally {
                             BossLogger.removeListener(logListener)
                         }
@@ -155,32 +154,29 @@ class WorkspaceDecodePrivacyTest {
             val (_, logged) =
                 captureHostLogs {
                     runBlocking {
-                        val before = WorkspaceEventBus.subscriptionCount.value
-                        val subscription =
-                            subscribeWorkspaceLoadEvents(
-                                windowId = "window-active",
-                                logger = logger,
-                                onLoadSpace = { event, _ ->
-                                    if (event.sourceWindowId == "window-other") {
-                                        otherDispatched = true
-                                    }
-                                    if (event.sourceWindowId == "window-active") {
-                                        activeDispatched = true
-                                        activeSignal.complete(Unit)
-                                    }
-                                },
+                        withSubscribedWorkspaceLoadEvents(
+                            windowId = "window-active",
+                            logger = logger,
+                            onLoadSpace = { event, _ ->
+                                if (event.sourceWindowId == "window-other") {
+                                    otherDispatched = true
+                                }
+                                if (event.sourceWindowId == "window-active") {
+                                    activeDispatched = true
+                                    activeSignal.complete(Unit)
+                                }
+                            },
+                        ) {
+                            WorkspaceEventBus.loadWorkspace(
+                                workspacePath = corruptFileOther.absolutePath,
+                                sourceWindowId = "window-other",
                             )
-                        WorkspaceEventBus.subscriptionCount.first { it > before }
-                        WorkspaceEventBus.loadWorkspace(
-                            workspacePath = corruptFileOther.absolutePath,
-                            sourceWindowId = "window-other",
-                        )
-                        WorkspaceEventBus.loadWorkspace(
-                            workspacePath = validFileActive.absolutePath,
-                            sourceWindowId = "window-active",
-                        )
-                        withTimeout(5_000) { activeSignal.await() }
-                        subscription.cancelAndJoin()
+                            WorkspaceEventBus.loadWorkspace(
+                                workspacePath = validFileActive.absolutePath,
+                                sourceWindowId = "window-active",
+                            )
+                            activeSignal.await()
+                        }
                     }
                 }
 
@@ -213,24 +209,21 @@ class WorkspaceDecodePrivacyTest {
             val (_, logged) =
                 captureHostLogs {
                     runBlocking {
-                        val before = WorkspaceEventBus.subscriptionCount.value
-                        val subscription =
-                            subscribeWorkspaceLoadEvents(
-                                windowId = "window-valid",
-                                logger = logger,
-                                onLoadSpace = { event, workspace ->
-                                    loadedEvent = event
-                                    loadedSpace = workspace
-                                    loadedSignal.complete(Unit)
-                                },
+                        withSubscribedWorkspaceLoadEvents(
+                            windowId = "window-valid",
+                            logger = logger,
+                            onLoadSpace = { event, workspace ->
+                                loadedEvent = event
+                                loadedSpace = workspace
+                                loadedSignal.complete(Unit)
+                            },
+                        ) {
+                            WorkspaceEventBus.loadWorkspace(
+                                workspacePath = validFile.absolutePath,
+                                sourceWindowId = "window-valid",
                             )
-                        WorkspaceEventBus.subscriptionCount.first { it > before }
-                        WorkspaceEventBus.loadWorkspace(
-                            workspacePath = validFile.absolutePath,
-                            sourceWindowId = "window-valid",
-                        )
-                        withTimeout(5_000) { loadedSignal.await() }
-                        subscription.cancelAndJoin()
+                            loadedSignal.await()
+                        }
                     }
                 }
 
@@ -255,7 +248,6 @@ class WorkspaceDecodePrivacyTest {
             val (_, logged) =
                 captureHostLogs {
                     runBlocking {
-                        val before = WorkspaceEventBus.subscriptionCount.value
                         val logListener =
                             LogListener { entry ->
                                 if (entry.message == "Workspace load from CLI failed") {
@@ -264,19 +256,16 @@ class WorkspaceDecodePrivacyTest {
                             }
                         BossLogger.addListener(logListener)
                         try {
-                            val subscription =
-                                subscribeWorkspaceLoadEvents(
-                                    windowId = "window-io-test",
-                                    logger = logger,
-                                    onLoadSpace = { _, _ -> },
+                            withSubscribedWorkspaceLoadEvents(
+                                windowId = "window-io-test",
+                                logger = logger,
+                            ) {
+                                WorkspaceEventBus.loadWorkspace(
+                                    workspacePath = subDir.absolutePath,
+                                    sourceWindowId = "window-io-test",
                                 )
-                            WorkspaceEventBus.subscriptionCount.first { it > before }
-                            WorkspaceEventBus.loadWorkspace(
-                                workspacePath = subDir.absolutePath,
-                                sourceWindowId = "window-io-test",
-                            )
-                            withTimeout(5_000) { loggedSignal.await() }
-                            subscription.cancelAndJoin()
+                                loggedSignal.await()
+                            }
                         } finally {
                             BossLogger.removeListener(logListener)
                         }
@@ -302,7 +291,6 @@ class WorkspaceDecodePrivacyTest {
             val (_, logged) =
                 captureHostLogs {
                     runBlocking {
-                        val before = WorkspaceEventBus.subscriptionCount.value
                         val logListener =
                             LogListener { entry ->
                                 if (entry.message == "Workspace load from CLI failed") {
@@ -311,19 +299,16 @@ class WorkspaceDecodePrivacyTest {
                             }
                         BossLogger.addListener(logListener)
                         try {
-                            val subscription =
-                                subscribeWorkspaceLoadEvents(
-                                    windowId = "window-path-test",
-                                    logger = logger,
-                                    onLoadSpace = { _, _ -> },
+                            withSubscribedWorkspaceLoadEvents(
+                                windowId = "window-path-test",
+                                logger = logger,
+                            ) {
+                                WorkspaceEventBus.loadWorkspace(
+                                    workspacePath = corruptFile.absolutePath,
+                                    sourceWindowId = "window-path-test",
                                 )
-                            WorkspaceEventBus.subscriptionCount.first { it > before }
-                            WorkspaceEventBus.loadWorkspace(
-                                workspacePath = corruptFile.absolutePath,
-                                sourceWindowId = "window-path-test",
-                            )
-                            withTimeout(5_000) { loggedSignal.await() }
-                            subscription.cancelAndJoin()
+                                loggedSignal.await()
+                            }
                         } finally {
                             BossLogger.removeListener(logListener)
                         }
@@ -334,6 +319,29 @@ class WorkspaceDecodePrivacyTest {
             val failure = logged.single { it.message == "Workspace load from CLI failed" }
             assertEquals(corruptFile.absolutePath, failure.data?.get("spacePath"))
             assertNotNull(failure.data?.get("path"), "JSON path from decodeFailure must be preserved")
+        }
+    }
+
+    private suspend fun withSubscribedWorkspaceLoadEvents(
+        windowId: String,
+        logger: ComponentLogger,
+        onLoadSpace: (WorkspaceLoadEvent, LayoutWorkspace) -> Unit = { _, _ -> },
+        block: suspend () -> Unit,
+    ) = coroutineScope {
+        val before = WorkspaceEventBus.subscriptionCount.value
+        val subscription =
+            subscribeWorkspaceLoadEvents(
+                windowId = windowId,
+                logger = logger,
+                onLoadSpace = onLoadSpace,
+            )
+        try {
+            withTimeout(5_000) {
+                WorkspaceEventBus.subscriptionCount.first { it > before }
+                block()
+            }
+        } finally {
+            subscription.cancelAndJoin()
         }
     }
 
