@@ -368,8 +368,8 @@ fun McpApprovalDialog(
                                                         color = colors.warn,
                                                     )
                                                     plugin.extraDependencies.forEach { dep ->
-                                                        val hashPreview =
-                                                            dep.sha256.takeIf { it.isNotBlank() }?.let { " (${it.take(12)}…)" }.orEmpty()
+                                                        val depHash = dep.sha256.takeIf { it.isNotBlank() }
+                                                        val hashPreview = if (depHash != null) " (${depHash.take(12)}…)" else ""
                                                         Text(
                                                             text = "• ${dep.pluginId}@${dep.version}$hashPreview",
                                                             fontSize = 10.sp,
