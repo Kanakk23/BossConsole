@@ -1016,7 +1016,7 @@ internal class McpToolRegistryCore(
             }
 
     // One boundary must cover denial, approval, execution, and the ledger write.
-    @Suppress("LongMethod", "CyclomaticComplexMethod", "ReturnCount")
+    @Suppress("LongMethod", "CyclomaticComplexMethod", "ReturnCount", "NestedBlockDepth")
     suspend fun invoke(
         toolName: String,
         arguments: String,
@@ -1141,12 +1141,7 @@ internal class McpToolRegistryCore(
                         executionStarted = true
                         val executionArgs = secrets.executionArgs(effectiveArgs)
                         finalExecutionArgs = executionArgs
-                        if (prepared is McpPreparationResult.Prepared && prepared.executionObject != null) {
-                            if (executionArgs !== effectiveArgs) {
-                                consumeExecutionObject(effectiveArgs)
-                            }
-                            executionArgs.withExecutionObject(prepared.executionObject)
-                        }
+                        bindExecutionObject(prepared, effectiveArgs, executionArgs)
                         executeAuthorized(tool, executionArgs, secrets.resultFilter())
                     }
                 }
@@ -1213,6 +1208,18 @@ internal class McpToolRegistryCore(
 
     private fun isAvailable(tool: RegisteredMcpTool): Boolean =
         _tools.value.any { it.providerId == tool.providerId && it.definition === tool.definition }
+
+    private fun bindExecutionObject(
+        prepared: McpPreparationResult?,
+        effectiveArgs: McpToolArgs,
+        executionArgs: McpToolArgs,
+    ) {
+        if (prepared !is McpPreparationResult.Prepared || prepared.executionObject == null) return
+        if (executionArgs !== effectiveArgs) {
+            consumeExecutionObject(effectiveArgs)
+        }
+        executionArgs.withExecutionObject(prepared.executionObject)
+    }
 
     /** Validate argument shape and schema before raising an approval or invoking a handler. */
     private fun invalidArguments(

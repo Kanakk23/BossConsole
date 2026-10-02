@@ -29,7 +29,7 @@ class DesktopPluginPackEffectsClosureTest {
                 Result.failure(NoSuchElementException("Plugin $pluginId not found"))
             }
 
-        override suspend fun getPluginVersions(pluginId: String): Result<List<PluginInfo>> = Result.success(versions[pluginId].orEmpty())
+        override suspend fun getPluginVersions(pluginId: String) = Result.success(versions[pluginId].orEmpty())
 
         override suspend fun listPlugins(): Result<List<PluginInfo>> = Result.success(emptyList())
 
@@ -59,6 +59,18 @@ class DesktopPluginPackEffectsClosureTest {
         override suspend fun install(pluginId: String): Result<Unit> = error("unused")
     }
 
+    private fun plugin(
+        id: String,
+        version: String = "1.0.0",
+        sha256: String = "",
+    ): PluginInfo =
+        PluginInfo(
+            pluginId = id,
+            displayName = id,
+            version = version,
+            sha256 = sha256,
+        )
+
     @Test
     fun `closureFor marks members as unresolved when store lookup fails`() =
         runBlocking<Unit> {
@@ -74,7 +86,7 @@ class DesktopPluginPackEffectsClosureTest {
                 FakeRepo(
                     plugins =
                         mapOf(
-                            "root.ok" to PluginInfo("root.ok", displayName = "Root", version = "1.0.0", sha256 = "sha-root"),
+                            "root.ok" to plugin("root.ok", version = "1.0.0", sha256 = "sha-root"),
                             // dep.failed is omitted, simulating a lookup failure
                         ),
                 )
@@ -100,12 +112,12 @@ class DesktopPluginPackEffectsClosureTest {
                 FakeRepo(
                     plugins =
                         mapOf(
-                            "root.ok" to PluginInfo("root.ok", displayName = "Root", version = "1.0.0", sha256 = "sha-root"),
-                            "dep.nohash" to PluginInfo("dep.nohash", displayName = "Dep", version = "2.0.0", sha256 = ""),
+                            "root.ok" to plugin("root.ok", version = "1.0.0", sha256 = "sha-root"),
+                            "dep.nohash" to plugin("dep.nohash", version = "2.0.0", sha256 = ""),
                         ),
                     versions =
                         mapOf(
-                            "dep.nohash" to listOf(PluginInfo("dep.nohash", displayName = "Dep", version = "2.0.0", sha256 = "")),
+                            "dep.nohash" to listOf(plugin("dep.nohash", version = "2.0.0", sha256 = "")),
                         ),
                 )
 
@@ -130,8 +142,8 @@ class DesktopPluginPackEffectsClosureTest {
                 FakeRepo(
                     plugins =
                         mapOf(
-                            "root.ok" to PluginInfo("root.ok", displayName = "Root", version = "1.0.0", sha256 = "sha-root"),
-                            "dep.ok" to PluginInfo("dep.ok", displayName = "Dep", version = "2.0.0", sha256 = "sha-dep"),
+                            "root.ok" to plugin("root.ok", version = "1.0.0", sha256 = "sha-root"),
+                            "dep.ok" to plugin("dep.ok", version = "2.0.0", sha256 = "sha-dep"),
                         ),
                 )
 

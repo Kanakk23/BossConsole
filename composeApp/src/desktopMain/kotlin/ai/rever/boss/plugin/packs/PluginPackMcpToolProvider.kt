@@ -230,6 +230,14 @@ class PluginPackMcpToolProvider(
                 ),
             )
         }
+        return validateClosureArtifacts(packId, step, closure)
+    }
+
+    private fun validateClosureArtifacts(
+        packId: String,
+        step: PluginStep,
+        closure: InstallClosure,
+    ): McpPreparationResult.Rejected? {
         if (closure.artifacts.size != closure.order.size) {
             return McpPreparationResult.Rejected(
                 McpToolResult(

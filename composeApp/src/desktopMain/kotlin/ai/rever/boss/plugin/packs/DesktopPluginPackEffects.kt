@@ -149,26 +149,8 @@ class DesktopPluginPackEffects(
             }
         }
         val repository = store() ?: return Result.failure(IllegalStateException(STORE_UNAVAILABLE))
-        val targetArtifact = approvedArtifacts.firstOrNull { it.pluginId == pluginId }
-        val expectedSha = targetArtifact?.sha256
-        if (!expectedSha.isNullOrBlank()) {
-            val versions = flatten { repository.getPluginVersions(pluginId) }.getOrNull().orEmpty()
-            val versionInfo = versions.firstOrNull { it.version == version }
-            val fallbackInfo = runCatching { repository.getPlugin(pluginId).getOrNull() }.getOrNull()
-            val storeSha = versionInfo?.sha256?.takeIf { it.isNotBlank() } ?: fallbackInfo?.sha256.orEmpty()
-            if (storeSha.isBlank()) {
-                return Result.failure(
-                    IllegalStateException("Store provides no SHA-256 hash for $pluginId; expected $expectedSha."),
-                )
-            }
-            if (!storeSha.equals(expectedSha, ignoreCase = true)) {
-                return Result.failure(
-                    IllegalStateException(
-                        "Store SHA-256 for $pluginId ($storeSha) does not match approved hash $expectedSha.",
-                    ),
-                )
-            }
-        }
+        val hashError = verifyApprovedArtifactHash(repository, pluginId, version, approvedArtifacts)
+        if (hashError != null) return hashError
         return StoreVersionInstaller(pluginDir = { PluginStoreSetup.getPluginDir() })
             .install(
                 store = repository,
@@ -186,6 +168,7 @@ class DesktopPluginPackEffects(
             ).map { }
     }
 
+    @Suppress("ReturnCount")
     override suspend fun changeVersion(
         pluginId: String,
         version: String,
@@ -193,29 +176,38 @@ class DesktopPluginPackEffects(
     ): Result<Unit> {
         val window = manager() ?: return noWindow()
         val repository = store() ?: return Result.failure(IllegalStateException(STORE_UNAVAILABLE))
-        val targetArtifact = approvedArtifacts.firstOrNull { it.pluginId == pluginId }
-        val expectedSha = targetArtifact?.sha256
-        if (!expectedSha.isNullOrBlank()) {
-            val versions = flatten { repository.getPluginVersions(pluginId) }.getOrNull().orEmpty()
-            val versionInfo = versions.firstOrNull { it.version == version }
-            val fallbackInfo = runCatching { repository.getPlugin(pluginId).getOrNull() }.getOrNull()
-            val storeSha = versionInfo?.sha256?.takeIf { it.isNotBlank() } ?: fallbackInfo?.sha256.orEmpty()
-            if (storeSha.isBlank()) {
-                return Result.failure(
-                    IllegalStateException("Store provides no SHA-256 hash for $pluginId; expected $expectedSha."),
-                )
-            }
-            if (!storeSha.equals(expectedSha, ignoreCase = true)) {
-                return Result.failure(
-                    IllegalStateException(
-                        "Store SHA-256 for $pluginId ($storeSha) does not match approved hash $expectedSha.",
-                    ),
-                )
-            }
-        }
+        val hashError = verifyApprovedArtifactHash(repository, pluginId, version, approvedArtifacts)
+        if (hashError != null) return hashError
         return PluginStoreVersionBridge
             .installStoreVersion(pluginId, version, sourceUrl = null, manager = window)
             .map { }
+    }
+
+    private suspend fun verifyApprovedArtifactHash(
+        repository: PluginRepository,
+        pluginId: String,
+        version: String,
+        approvedArtifacts: List<ApprovedArtifact>,
+    ): Result<Unit>? {
+        val targetArtifact = approvedArtifacts.firstOrNull { it.pluginId == pluginId }
+        val expectedSha = targetArtifact?.sha256?.takeIf { it.isNotBlank() } ?: return null
+        val versions = flatten { repository.getPluginVersions(pluginId) }.getOrNull().orEmpty()
+        val versionInfo = versions.firstOrNull { it.version == version }
+        val fallbackInfo = runCatching { repository.getPlugin(pluginId).getOrNull() }.getOrNull()
+        val storeSha = versionInfo?.sha256?.takeIf { it.isNotBlank() } ?: fallbackInfo?.sha256.orEmpty()
+        if (storeSha.isBlank()) {
+            return Result.failure(
+                IllegalStateException("Store provides no SHA-256 hash for $pluginId; expected $expectedSha."),
+            )
+        }
+        if (!storeSha.equals(expectedSha, ignoreCase = true)) {
+            return Result.failure(
+                IllegalStateException(
+                    "Store SHA-256 for $pluginId ($storeSha) does not match approved hash $expectedSha.",
+                ),
+            )
+        }
+        return null
     }
 
     override suspend fun enable(pluginId: String): Result<Unit> {
@@ -426,21 +418,11 @@ internal suspend fun closureFor(
     val unresolved = plan.unresolved.toMutableSet()
     val artifacts = mutableListOf<ApprovedArtifact>()
     for (id in plan.order) {
-        val info = runCatching { repository?.getPlugin(id)?.getOrNull() }.getOrNull()
-        var version = info?.version?.takeIf { it.isNotBlank() }
-        var sha256 = info?.sha256.orEmpty()
-        if (sha256.isBlank()) {
-            val versions = runCatching { repository?.getPluginVersions(id)?.getOrNull() }.getOrNull().orEmpty()
-            val match = if (version != null) versions.firstOrNull { it.version == version } else versions.firstOrNull()
-            if (match != null) {
-                if (version == null && match.version.isNotBlank()) version = match.version
-                if (match.sha256.isNotBlank()) sha256 = match.sha256
-            }
-        }
-        if (info == null || version == null || sha256.isBlank()) {
+        val artifact = resolveArtifactForId(repository, id)
+        if (artifact == null) {
             unresolved.add(id)
         } else {
-            artifacts.add(ApprovedArtifact(id, version, sha256))
+            artifacts.add(artifact)
         }
     }
     return InstallClosure(
@@ -451,4 +433,26 @@ internal suspend fun closureFor(
         truncated = plan.truncated,
         artifacts = artifacts,
     )
+}
+
+private suspend fun resolveArtifactForId(
+    repository: PluginRepository?,
+    id: String,
+): ApprovedArtifact? {
+    val info = runCatching { repository?.getPlugin(id)?.getOrNull() }.getOrNull()
+    var version = info?.version?.takeIf { it.isNotBlank() }
+    var sha256 = info?.sha256.orEmpty()
+    if (sha256.isBlank()) {
+        val versions = runCatching { repository?.getPluginVersions(id)?.getOrNull() }.getOrNull().orEmpty()
+        val match = if (version != null) versions.firstOrNull { it.version == version } else versions.firstOrNull()
+        if (match != null) {
+            if (version == null && match.version.isNotBlank()) version = match.version
+            if (match.sha256.isNotBlank()) sha256 = match.sha256
+        }
+    }
+    return if (info != null && version != null && sha256.isNotBlank()) {
+        ApprovedArtifact(id, version, sha256)
+    } else {
+        null
+    }
 }
