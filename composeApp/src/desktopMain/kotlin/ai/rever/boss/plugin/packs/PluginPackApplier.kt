@@ -74,6 +74,7 @@ interface PluginPackEffects {
     suspend fun changeVersion(
         pluginId: String,
         version: String,
+        approvedArtifacts: List<ApprovedArtifact> = emptyList(),
     ): Result<Unit>
 
     suspend fun enable(pluginId: String): Result<Unit>
@@ -194,7 +195,7 @@ class PluginPackApplier(
             plan.plugins.map { step ->
                 currentCoroutineContext().ensureActive()
                 onProgress(done, total, step.plugin.pluginId)
-                applyPlugin(step).also { done++ }
+                applyPlugin(step, prepared.artifacts).also { done++ }
             }
         val ruleResults =
             plan.rules.map { step ->
@@ -273,8 +274,14 @@ class PluginPackApplier(
         return PackApplyResult(pack.id, statusOf(plan, pluginResults, ruleResults), pluginResults, ruleResults)
     }
 
-    private suspend fun applyPlugin(step: PluginStep): PluginResult {
+    private suspend fun applyPlugin(
+        step: PluginStep,
+        preparedArtifacts: List<ApprovedArtifact> = emptyList(),
+    ): PluginResult {
         val pluginId = step.plugin.pluginId
+        val approvedArtifacts =
+            step.closure?.artifacts?.takeIf { it.isNotEmpty() }
+                ?: preparedArtifacts.filter { it.pluginId == pluginId }
         val attempt: Result<Unit>? =
             when (step.kind) {
                 PluginStepKind.SATISFIED, PluginStepKind.UNAVAILABLE, PluginStepKind.STORE_UNREACHABLE -> {
@@ -292,13 +299,19 @@ class PluginPackApplier(
                             checkNotNull(step.targetVersion),
                             step.targetIsLatest,
                             step.closure?.order.orEmpty(),
-                            step.closure?.artifacts.orEmpty(),
+                            approvedArtifacts,
                         )
                     }
                 }
 
                 PluginStepKind.CHANGE_VERSION -> {
-                    guarded { effects.changeVersion(pluginId, checkNotNull(step.targetVersion)) }
+                    guarded {
+                        effects.changeVersion(
+                            pluginId,
+                            checkNotNull(step.targetVersion),
+                            approvedArtifacts,
+                        )
+                    }
                 }
             }
         val failure = attempt?.exceptionOrNull()

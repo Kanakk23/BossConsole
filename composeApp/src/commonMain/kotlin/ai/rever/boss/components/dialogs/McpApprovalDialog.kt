@@ -297,111 +297,128 @@ fun McpApprovalDialog(
                                 color = colors.textPrimary,
                             )
                             Spacer(modifier = Modifier.height(4.dp))
-                            Column(
+                            val planScrollState = rememberScrollState()
+                            Box(
                                 modifier =
                                     Modifier
                                         .fillMaxWidth()
                                         .heightIn(max = 200.dp)
-                                        .verticalScroll(rememberScrollState())
                                         .background(colors.raised, RoundedCornerShape(4.dp))
-                                        .border(1.dp, colors.line, RoundedCornerShape(4.dp))
-                                        .padding(8.dp),
+                                        .border(1.dp, colors.line, RoundedCornerShape(4.dp)),
                             ) {
-                                if (packModel.plugins.isNotEmpty()) {
-                                    Text(
-                                        text = "Plugins (${packModel.plugins.size}):",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = colors.signal,
-                                    )
-                                    packModel.plugins.forEach { plugin ->
-                                        Spacer(modifier = Modifier.height(4.dp))
-                                        Column(modifier = Modifier.fillMaxWidth().padding(start = 6.dp)) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text(
-                                                    text = "${plugin.pluginId} [${plugin.action}]",
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    color = colors.textPrimary,
-                                                )
-                                                if (plugin.optional) {
+                                Column(
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .verticalScroll(planScrollState)
+                                            .padding(8.dp),
+                                ) {
+                                    if (packModel.plugins.isNotEmpty()) {
+                                        Text(
+                                            text = "Plugins (${packModel.plugins.size}):",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = colors.signal,
+                                        )
+                                        packModel.plugins.forEach { plugin ->
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Column(modifier = Modifier.fillMaxWidth().padding(start = 6.dp)) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
                                                     Text(
-                                                        text = " (optional)",
-                                                        fontSize = 10.sp,
-                                                        color = colors.textSecondary,
+                                                        text = "${plugin.pluginId} [${plugin.action}]",
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        color = colors.textPrimary,
                                                     )
-                                                }
-                                            }
-                                            val versionDetails =
-                                                buildString {
-                                                    if (plugin.installedVersion != null) {
-                                                        append("installed: ${plugin.installedVersion} -> ")
-                                                    }
-                                                    if (plugin.targetVersion != null) {
-                                                        append("target: ${plugin.targetVersion}")
-                                                    }
-                                                    if (plugin.targetSha256 != null) {
-                                                        append(" (${plugin.targetSha256.take(12)}…)")
+                                                    if (plugin.optional) {
+                                                        Text(
+                                                            text = " (optional)",
+                                                            fontSize = 10.sp,
+                                                            color = colors.textSecondary,
+                                                        )
                                                     }
                                                 }
-                                            if (versionDetails.isNotBlank()) {
-                                                Text(
-                                                    text = versionDetails,
-                                                    fontSize = 10.sp,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    color = colors.textSecondary,
-                                                )
-                                            }
-                                            if (plugin.extraDependencies.isNotEmpty()) {
-                                                Text(
-                                                    text = "Also installs:",
-                                                    fontSize = 10.sp,
-                                                    fontWeight = FontWeight.Medium,
-                                                    color = colors.warn,
-                                                )
-                                                plugin.extraDependencies.forEach { dep ->
-                                                    val hashPreview = dep.sha256.take(12)
+                                                val versionDetails =
+                                                    buildString {
+                                                        if (plugin.installedVersion != null) {
+                                                            append("installed: ${plugin.installedVersion} -> ")
+                                                        }
+                                                        if (plugin.targetVersion != null) {
+                                                            append("target: ${plugin.targetVersion}")
+                                                        }
+                                                        val hash = plugin.targetSha256?.takeIf { it.isNotBlank() }
+                                                        if (hash != null) {
+                                                            append(" (${hash.take(12)}…)")
+                                                        }
+                                                    }
+                                                if (versionDetails.isNotBlank()) {
                                                     Text(
-                                                        text = "• ${dep.pluginId}@${dep.version} ($hashPreview…)",
+                                                        text = versionDetails,
                                                         fontSize = 10.sp,
                                                         fontFamily = FontFamily.Monospace,
                                                         color = colors.textSecondary,
-                                                        modifier = Modifier.padding(start = 6.dp),
+                                                    )
+                                                }
+                                                if (plugin.extraDependencies.isNotEmpty()) {
+                                                    Text(
+                                                        text = "Also installs:",
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        color = colors.warn,
+                                                    )
+                                                    plugin.extraDependencies.forEach { dep ->
+                                                        val hashPreview =
+                                                            dep.sha256.takeIf { it.isNotBlank() }?.let { " (${it.take(12)}…)" }.orEmpty()
+                                                        Text(
+                                                            text = "• ${dep.pluginId}@${dep.version}$hashPreview",
+                                                            fontSize = 10.sp,
+                                                            fontFamily = FontFamily.Monospace,
+                                                            color = colors.textSecondary,
+                                                            modifier = Modifier.padding(start = 6.dp),
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (packModel.rules.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = "Policy Rules (${packModel.rules.size}):",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = colors.signal,
+                                        )
+                                        packModel.rules.forEach { rule ->
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Column(modifier = Modifier.fillMaxWidth().padding(start = 6.dp)) {
+                                                val ruleHeader = "${rule.scope} / ${rule.subject}"
+                                                Text(
+                                                    text = "$ruleHeader: ${rule.action} -> ${rule.outcome}",
+                                                    fontSize = 11.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = colors.textPrimary,
+                                                )
+                                                if (rule.existing != null) {
+                                                    Text(
+                                                        text = "replaces existing: ${rule.existing}",
+                                                        fontSize = 10.sp,
+                                                        color = colors.textSecondary,
                                                     )
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                if (packModel.rules.isNotEmpty()) {
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Text(
-                                        text = "Policy Rules (${packModel.rules.size}):",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = colors.signal,
-                                    )
-                                    packModel.rules.forEach { rule ->
-                                        Spacer(modifier = Modifier.height(4.dp))
-                                        Column(modifier = Modifier.fillMaxWidth().padding(start = 6.dp)) {
-                                            val ruleHeader = "${rule.scope} / ${rule.subject}"
-                                            Text(
-                                                text = "$ruleHeader: ${rule.action} -> ${rule.outcome}",
-                                                fontSize = 11.sp,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = colors.textPrimary,
-                                            )
-                                            if (rule.existing != null) {
-                                                Text(
-                                                    text = "replaces existing: ${rule.existing}",
-                                                    fontSize = 10.sp,
-                                                    color = colors.textSecondary,
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
+                                VerticalScrollbar(
+                                    adapter = rememberScrollbarAdapter(planScrollState),
+                                    modifier =
+                                        Modifier
+                                            .matchParentSize()
+                                            .wrapContentWidth(Alignment.End)
+                                            .padding(vertical = 2.dp, horizontal = 2.dp),
+                                )
                             }
                         }
 

@@ -470,7 +470,8 @@ interface MissingDependencyInstaller {
         return Result.success(Unit)
     }
 
-    suspend fun installArtifact(artifact: ApprovedArtifact): Result<Unit> = install(artifact.pluginId)
+    suspend fun installArtifact(artifact: ApprovedArtifact): Result<Unit> =
+        Result.failure(UnsupportedOperationException("installArtifact must be implemented to bind version and SHA-256"))
 
     suspend fun installAllArtifacts(artifacts: List<ApprovedArtifact>): Result<Unit> {
         val root = artifacts.lastOrNull()

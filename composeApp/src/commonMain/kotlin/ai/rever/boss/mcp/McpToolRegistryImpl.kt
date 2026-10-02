@@ -467,31 +467,19 @@ internal interface McpToolAliasProvider {
     val toolAliases: Map<String, String>
 }
 
-/**
- * Testable core behind [McpToolRegistryImpl]. Extracted so unit tests can
- * exercise the registration/permission/persistence/dispatch logic against a
- * throwaway instance and a temp file, instead of the process-wide singleton
- * (which resolves a real file under the user's `~/.boss` directory and would
- * make tests mutate live state / interfere with each other).
- *
- * [disabledFile] is nullable: passing `null` skips persistence entirely (pure
- * in-memory), which is convenient for tests that don't care about it.
- * [invokeTimeoutMs] defaults to production's 60s but is overridable so tests
- * can exercise the timeout path in milliseconds instead of actually waiting.
- * [maxResultChars] is the same story for the result-size backstop: production
- * gets [MAX_MCP_RESULT_CHARS], tests get a number they can overshoot in a line.
- * [onFault] is how a kill-switch persistence failure reaches the operator (the
- * façade turns it into a status-bar message); it is also mirrored into [fault].
- */
-private val executionObjects = java.util.Collections.synchronizedMap(java.util.WeakHashMap<McpToolArgs, Any>())
+private val executionObjects = java.util.Collections.synchronizedMap(java.util.IdentityHashMap<McpToolArgs, Any>())
 
 fun McpToolArgs.withExecutionObject(obj: Any): McpToolArgs {
     executionObjects[this] = obj
     return this
 }
 
-@Suppress("UNCHECKED_CAST")
-fun <T> McpToolArgs.executionObject(): T? = executionObjects[this] as? T
+fun consumeExecutionObject(args: McpToolArgs): Any? = executionObjects.remove(args)
+
+inline fun <reified T> McpToolArgs.executionObject(): T? {
+    val obj = consumeExecutionObject(this) ?: return null
+    return obj as? T
+}
 
 /** The outcome of a host-side preparation hook. */
 sealed interface McpPreparationResult {
@@ -517,6 +505,22 @@ interface McpToolPreparer {
     ): McpPreparationResult?
 }
 
+/**
+ * Testable core behind [McpToolRegistryImpl]. Extracted so unit tests can
+ * exercise the registration/permission/persistence/dispatch logic against a
+ * throwaway instance and a temp file, instead of the process-wide singleton
+ * (which resolves a real file under the user's `~/.boss` directory and would
+ * make tests mutate live state / interfere with each other).
+ *
+ * [disabledFile] is nullable: passing `null` skips persistence entirely (pure
+ * in-memory), which is convenient for tests that don't care about it.
+ * [invokeTimeoutMs] defaults to production's 60s but is overridable so tests
+ * can exercise the timeout path in milliseconds instead of actually waiting.
+ * [maxResultChars] is the same story for the result-size backstop: production
+ * gets [MAX_MCP_RESULT_CHARS], tests get a number they can overshoot in a line.
+ * [onFault] is how a kill-switch persistence failure reaches the operator (the
+ * façade turns it into a status-bar message); it is also mirrored into [fault].
+ */
 // 7 of these arrived with the governance work (policy engine, approval bus, ledger); this
 // change adds the 8th, `maxResultChars`, purely as a test seam alongside `invokeTimeoutMs`.
 // Suppressed rather than hidden behind mutable state: the count is a real signal that this
@@ -1049,16 +1053,18 @@ internal class McpToolRegistryCore(
         var disposition = McpApprovalDisposition.AUTO_ALLOWED
         var result: McpToolResult? = null
         var executionStarted = false
+        var effectiveArgs: McpToolArgs = args
+        var finalExecutionArgs: McpToolArgs? = null
         try {
-            if (effectivePolicy == McpPolicyAction.DENY) {
-                disposition = McpApprovalDisposition.POLICY_DENIED
-                result = McpToolResult("MCP tool rejected by policy (DENY)", isError = true)
-                return result
-            }
-
             if (invalidArguments != null) {
                 disposition = McpApprovalDisposition.INVALID_ARGUMENTS
                 result = McpToolResult(invalidArguments, isError = true)
+                return result
+            }
+
+            if (effectivePolicy == McpPolicyAction.DENY) {
+                disposition = McpApprovalDisposition.POLICY_DENIED
+                result = McpToolResult("MCP tool rejected by policy (DENY)", isError = true)
                 return result
             }
 
@@ -1070,7 +1076,6 @@ internal class McpToolRegistryCore(
 
             val preparer = _preparers[tool.providerId]
             val prepared = preparer?.prepareInvocation(toolName, args)
-            val effectiveArgs: McpToolArgs
             val displayModel: Any?
             val allowStandingTrust: Boolean
             val forceAsk: Boolean
@@ -1134,7 +1139,15 @@ internal class McpToolRegistryCore(
 
                     else -> {
                         executionStarted = true
-                        executeAuthorized(tool, secrets.executionArgs(effectiveArgs), secrets.resultFilter())
+                        val executionArgs = secrets.executionArgs(effectiveArgs)
+                        finalExecutionArgs = executionArgs
+                        if (prepared is McpPreparationResult.Prepared && prepared.executionObject != null) {
+                            if (executionArgs !== effectiveArgs) {
+                                consumeExecutionObject(effectiveArgs)
+                            }
+                            executionArgs.withExecutionObject(prepared.executionObject)
+                        }
+                        executeAuthorized(tool, executionArgs, secrets.resultFilter())
                     }
                 }
             return requireNotNull(result)
@@ -1147,6 +1160,9 @@ internal class McpToolRegistryCore(
                 }
             throw cancelled
         } finally {
+            consumeExecutionObject(args)
+            consumeExecutionObject(effectiveArgs)
+            finalExecutionArgs?.let { consumeExecutionObject(it) }
             // NonCancellable because a cancelled invoke is still an event the audit journal
             // must capture; Dispatchers.IO because invoke() is callable from any dispatcher
             // (including Main), and record() still runs argument sanitization plus the queue
@@ -1425,8 +1441,10 @@ internal class McpToolRegistryCore(
 
             // YOLO answers the prompt, and only the prompt: DENY above, the kill switch and RBAC
             // are all decided before this branch is reached. A secret-bearing call still asks:
-            // YOLO answers for the tool, never for the vault.
-            McpPolicyAction.ASK if policyEngine.yoloMode.value && secretRefs.isEmpty() -> {
+            // YOLO answers for the tool, never for the vault. Tools requiring fresh approval
+            // (forceAsk) also prompt every time, because a prepared single-use plan requires
+            // explicit operator consent.
+            McpPolicyAction.ASK if policyEngine.yoloMode.value && secretRefs.isEmpty() && !forceAsk -> {
                 McpApprovalDisposition.YOLO_ALLOWED to null
             }
 

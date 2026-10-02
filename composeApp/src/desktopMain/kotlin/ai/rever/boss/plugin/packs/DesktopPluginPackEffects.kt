@@ -151,12 +151,20 @@ class DesktopPluginPackEffects(
         val repository = store() ?: return Result.failure(IllegalStateException(STORE_UNAVAILABLE))
         val targetArtifact = approvedArtifacts.firstOrNull { it.pluginId == pluginId }
         val expectedSha = targetArtifact?.sha256
-        if (expectedSha != null && expectedSha.isNotBlank()) {
-            val lookup = runCatching { repository.getPlugin(pluginId) }.getOrNull()?.getOrNull()
-            if (lookup != null && lookup.sha256.isNotBlank() && !lookup.sha256.equals(expectedSha, ignoreCase = true)) {
+        if (!expectedSha.isNullOrBlank()) {
+            val versions = flatten { repository.getPluginVersions(pluginId) }.getOrNull().orEmpty()
+            val versionInfo = versions.firstOrNull { it.version == version }
+            val fallbackInfo = runCatching { repository.getPlugin(pluginId).getOrNull() }.getOrNull()
+            val storeSha = versionInfo?.sha256?.takeIf { it.isNotBlank() } ?: fallbackInfo?.sha256.orEmpty()
+            if (storeSha.isBlank()) {
+                return Result.failure(
+                    IllegalStateException("Store provides no SHA-256 hash for $pluginId; expected $expectedSha."),
+                )
+            }
+            if (!storeSha.equals(expectedSha, ignoreCase = true)) {
                 return Result.failure(
                     IllegalStateException(
-                        "Store SHA-256 for $pluginId (${lookup.sha256}) does not match approved hash $expectedSha.",
+                        "Store SHA-256 for $pluginId ($storeSha) does not match approved hash $expectedSha.",
                     ),
                 )
             }
@@ -181,8 +189,30 @@ class DesktopPluginPackEffects(
     override suspend fun changeVersion(
         pluginId: String,
         version: String,
+        approvedArtifacts: List<ApprovedArtifact>,
     ): Result<Unit> {
         val window = manager() ?: return noWindow()
+        val repository = store() ?: return Result.failure(IllegalStateException(STORE_UNAVAILABLE))
+        val targetArtifact = approvedArtifacts.firstOrNull { it.pluginId == pluginId }
+        val expectedSha = targetArtifact?.sha256
+        if (!expectedSha.isNullOrBlank()) {
+            val versions = flatten { repository.getPluginVersions(pluginId) }.getOrNull().orEmpty()
+            val versionInfo = versions.firstOrNull { it.version == version }
+            val fallbackInfo = runCatching { repository.getPlugin(pluginId).getOrNull() }.getOrNull()
+            val storeSha = versionInfo?.sha256?.takeIf { it.isNotBlank() } ?: fallbackInfo?.sha256.orEmpty()
+            if (storeSha.isBlank()) {
+                return Result.failure(
+                    IllegalStateException("Store provides no SHA-256 hash for $pluginId; expected $expectedSha."),
+                )
+            }
+            if (!storeSha.equals(expectedSha, ignoreCase = true)) {
+                return Result.failure(
+                    IllegalStateException(
+                        "Store SHA-256 for $pluginId ($storeSha) does not match approved hash $expectedSha.",
+                    ),
+                )
+            }
+        }
         return PluginStoreVersionBridge
             .installStoreVersion(pluginId, version, sourceUrl = null, manager = window)
             .map { }
@@ -254,11 +284,13 @@ class DesktopPluginPackEffects(
                         versionArtifacts[v.version] = ApprovedArtifact(pluginId, v.version, v.sha256)
                     }
                 }
-                versionArtifacts[latest] = ApprovedArtifact(pluginId, latest, latestSha256)
+                val resolvedLatestSha256 =
+                    versionArtifacts[latest]?.sha256?.takeIf { it.isNotBlank() } ?: latestSha256
+                versionArtifacts[latest] = ApprovedArtifact(pluginId, latest, resolvedLatestSha256)
                 StoreListing.Published(
                     latest = latest,
                     versions = (versions.map { it.version } + latest).toSet(),
-                    latestSha256 = latestSha256,
+                    latestSha256 = resolvedLatestSha256,
                     versionArtifacts = versionArtifacts,
                 )
             }
@@ -372,7 +404,7 @@ private fun McpPolicyEngine.deniedCause(providerId: String?): RuleWrite =
  * File level for the same reason as [providerFor]: it needs only its two arguments.
  */
 @Suppress("TooGenericExceptionCaught") // A store walk fails in both shapes; neither may abort the plan.
-private suspend fun closureFor(
+internal suspend fun closureFor(
     installer: MissingDependencyInstaller,
     pluginId: String,
     repository: PluginRepository?,
@@ -391,19 +423,30 @@ private suspend fun closureFor(
                 truncated = false,
             )
         }
-    val artifacts =
-        plan.order.mapNotNull { id ->
-            val info = runCatching { repository?.getPlugin(id)?.getOrNull() }.getOrNull()
-            if (info != null) {
-                ApprovedArtifact(id, info.version, info.sha256)
-            } else {
-                null
+    val unresolved = plan.unresolved.toMutableSet()
+    val artifacts = mutableListOf<ApprovedArtifact>()
+    for (id in plan.order) {
+        val info = runCatching { repository?.getPlugin(id)?.getOrNull() }.getOrNull()
+        var version = info?.version?.takeIf { it.isNotBlank() }
+        var sha256 = info?.sha256.orEmpty()
+        if (sha256.isBlank()) {
+            val versions = runCatching { repository?.getPluginVersions(id)?.getOrNull() }.getOrNull().orEmpty()
+            val match = if (version != null) versions.firstOrNull { it.version == version } else versions.firstOrNull()
+            if (match != null) {
+                if (version == null && match.version.isNotBlank()) version = match.version
+                if (match.sha256.isNotBlank()) sha256 = match.sha256
             }
         }
+        if (info == null || version == null || sha256.isBlank()) {
+            unresolved.add(id)
+        } else {
+            artifacts.add(ApprovedArtifact(id, version, sha256))
+        }
+    }
     return InstallClosure(
         order = plan.order,
         alsoInstalls = plan.order.filterNot { it == pluginId },
-        unresolved = plan.unresolved,
+        unresolved = unresolved,
         cyclic = plan.cyclic,
         truncated = plan.truncated,
         artifacts = artifacts,

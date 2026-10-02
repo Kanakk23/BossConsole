@@ -159,6 +159,17 @@ class PluginPackMcpToolProvider(
             }
         }
 
+        val blankArtifact = artifacts.firstOrNull { it.sha256.isBlank() }
+        if (blankArtifact != null) {
+            return McpPreparationResult.Rejected(
+                McpToolResult(
+                    "Cannot apply pack '${pack.id}': store provides no SHA-256 hash for plugin " +
+                        "'${blankArtifact.pluginId}'.",
+                    isError = true,
+                ),
+            )
+        }
+
         val prepared =
             PreparedPackApply(
                 pack = pack,
@@ -219,6 +230,25 @@ class PluginPackMcpToolProvider(
                 ),
             )
         }
+        if (closure.artifacts.size != closure.order.size) {
+            return McpPreparationResult.Rejected(
+                McpToolResult(
+                    "Cannot apply pack '$packId': incomplete artifact resolution for plugin " +
+                        "'${step.plugin.pluginId}'.",
+                    isError = true,
+                ),
+            )
+        }
+        val blankClosureArtifact = closure.artifacts.firstOrNull { it.sha256.isBlank() }
+        if (blankClosureArtifact != null) {
+            return McpPreparationResult.Rejected(
+                McpToolResult(
+                    "Cannot apply pack '$packId': store provides no SHA-256 hash for dependency " +
+                        "'${blankClosureArtifact.pluginId}'.",
+                    isError = true,
+                ),
+            )
+        }
         return null
     }
 
@@ -229,14 +259,13 @@ class PluginPackMcpToolProvider(
     }
 
     private fun apply(args: McpToolArgs): McpToolResult {
-        val prepared = args.executionObject<PreparedPackApply>()
-        val start =
-            if (prepared != null) {
-                jobs.start(prepared)
-            } else {
-                val pack = PluginPackParser.parse(args.raw).getOrElse { return invalid(it) }
-                jobs.start(pack)
-            }
+        val prepared =
+            args.executionObject<PreparedPackApply>()
+                ?: return McpToolResult(
+                    "Preparation was required for pack_apply but the prepared execution plan is missing.",
+                    isError = true,
+                )
+        val start = jobs.start(prepared)
         return when (start) {
             is PluginPackJobs.Start.Started -> {
                 McpToolResult(PluginPackJson.job(start.job).toString())

@@ -35,7 +35,12 @@ import kotlin.test.assertTrue
  * must be able to refuse it, while planning stays free to call.
  */
 class PluginPackGovernanceTest {
-    private val published = StoreListing.Published(latest = "2.0.0", versions = setOf("2.0.0"))
+    private val published =
+        StoreListing.Published(
+            latest = "2.0.0",
+            versions = setOf("2.0.0"),
+            latestSha256 = "sha-2.0.0",
+        )
     private val packArgs =
         """{"pack":"team","plugins":["com.example.terminal","com.example.codebase@2.0.0?"],""" +
             """"allow_tools":["run_tests"]}"""
@@ -552,6 +557,134 @@ class PluginPackGovernanceTest {
             assertEquals(JsonPrimitive("finished"), finishedStatus["state"])
             assertEquals(JsonPrimitive("applied"), finishedStatus["status"])
         }
+
+    @Test
+    fun `non-blank hash reaches installedArtifacts for both latest and pinned versions`() =
+        runBlocking<Unit> {
+            val h = harness()
+            val call = async { h.core.invoke("pack_apply", packArgs) }
+            val request =
+                withTimeout(5_000) {
+                    h.bus.pendingList
+                        .first { it.isNotEmpty() }
+                        .first()
+                }
+            h.bus.approve(request.id, trustForSession = false)
+            val started = Json.parseToJsonElement(call.await().text) as JsonObject
+            val jobId = started.getValue("job").jsonPrimitive.content
+            val finished = awaitJob(h.jobs, jobId)
+            assertEquals(PackApplyStatus.APPLIED, finished.result?.status)
+
+            val installed = h.effects.installedArtifacts
+            assertTrue(installed.isNotEmpty(), "Installed artifacts must not be empty")
+            assertTrue(installed.all { it.sha256.isNotBlank() }, "All installed artifacts must have non-blank SHA-256")
+            val terminal = installed.firstOrNull { it.pluginId == "com.example.terminal" }
+            assertNotNull(terminal)
+            assertEquals("sha-2.0.0", terminal.sha256)
+            val codebase = installed.firstOrNull { it.pluginId == "com.example.codebase" }
+            assertNotNull(codebase)
+            assertEquals("sha-2.0.0", codebase.sha256)
+        }
+
+    @Test
+    fun `pack_apply rejects blank store sha256 before operator approval`() =
+        runBlocking<Unit> {
+            val h = harness()
+            h.effects.store["com.example.terminal"] =
+                StoreListing.Published(
+                    latest = "2.0.0",
+                    versions = setOf("2.0.0"),
+                    latestSha256 = "",
+                )
+
+            val result = h.core.invoke("pack_apply", packArgs)
+            assertTrue(result.isError)
+            assertTrue(
+                result.text.contains("store provides no SHA-256 hash for plugin 'com.example.terminal'"),
+                result.text,
+            )
+            assertTrue(
+                h.bus.pendingList.value
+                    .isEmpty(),
+            )
+            assertTrue(h.effects.calls.isEmpty())
+            assertEquals(null, h.jobs.status(null))
+        }
+
+    @Test
+    fun `pack_apply rejects blank dependency sha256 in closure before operator approval`() =
+        runBlocking<Unit> {
+            val h = harness()
+            h.effects.closures["com.example.terminal"] =
+                InstallClosure(
+                    order = listOf("dep.lib", "com.example.terminal"),
+                    alsoInstalls = listOf("dep.lib"),
+                    unresolved = emptySet(),
+                    cyclic = false,
+                    truncated = false,
+                    artifacts =
+                        listOf(
+                            ApprovedArtifact("dep.lib", "1.0.0", ""),
+                            ApprovedArtifact("com.example.terminal", "2.0.0", "sha-2.0.0"),
+                        ),
+                )
+
+            val result = h.core.invoke("pack_apply", packArgs)
+            assertTrue(result.isError)
+            assertTrue(
+                result.text.contains("store provides no SHA-256 hash for dependency 'dep.lib'"),
+                result.text,
+            )
+            assertTrue(
+                h.bus.pendingList.value
+                    .isEmpty(),
+            )
+            assertTrue(h.effects.calls.isEmpty())
+            assertEquals(null, h.jobs.status(null))
+        }
+
+    @Test
+    fun `pack_apply cannot bypass operator approval via YOLO mode`() =
+        runBlocking<Unit> {
+            val h = harness()
+            h.policy.setYoloMode(true)
+
+            val call = async { h.core.invoke("pack_apply", packArgs) }
+            val request =
+                withTimeout(5_000) {
+                    h.bus.pendingList
+                        .first { it.isNotEmpty() }
+                        .first()
+                }
+
+            assertEquals("pack_apply", request.toolName)
+            h.bus.approve(request.id, trustForSession = false)
+            val started = Json.parseToJsonElement(call.await().text) as JsonObject
+            val jobId = started.getValue("job").jsonPrimitive.content
+            val finished = awaitJob(h.jobs, jobId)
+            assertEquals(PackApplyStatus.APPLIED, finished.result?.status)
+        }
+
+    @Test
+    fun `pack_apply directly invoked without prepared execution object returns error result`() {
+        val effects = FakePackEffects()
+        val jobs = PluginPackJobs(PluginPackApplier(effects))
+        val provider = PluginPackMcpToolProvider(effects, jobs)
+        val tool = provider.tools().first { it.name == "pack_apply" }
+
+        val result =
+            runBlocking {
+                tool.handler.call(
+                    ai.rever.boss.plugin.api
+                        .McpToolArgs(emptyMap(), packArgs),
+                )
+            }
+        assertTrue(result.isError)
+        assertTrue(
+            result.text.contains("Preparation was required for pack_apply but the prepared execution plan is missing"),
+            result.text,
+        )
+    }
 
     private suspend fun awaitJob(
         jobs: PluginPackJobs,

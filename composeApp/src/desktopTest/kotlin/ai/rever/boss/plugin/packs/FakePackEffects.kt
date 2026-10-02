@@ -72,7 +72,9 @@ internal class FakePackEffects(
     override suspend fun changeVersion(
         pluginId: String,
         version: String,
+        approvedArtifacts: List<ApprovedArtifact>,
     ): Result<Unit> {
+        installedArtifacts += approvedArtifacts
         calls += "changeVersion $pluginId $version"
         return outcome(pluginId) { installed[pluginId] = InstalledPlugin(version, enabled = true) }
     }

@@ -203,6 +203,10 @@ class StoreMissingDependencyInstaller(
         ) {
             val store = repository()
             when {
+                artifact.sha256.isBlank() -> {
+                    failure("Approved artifact for '${artifact.pluginId}' has a blank SHA-256 hash.")
+                }
+
                 isInstalled(artifact.pluginId) -> {
                     Result.success(Unit)
                 }
@@ -594,18 +598,24 @@ private fun validateStoreArtifact(
             "$expectedVersion."
     }
 
-    val hashMismatch =
-        !expectedSha256.isNullOrBlank() &&
-            info.sha256.isNotBlank() &&
-            !info.sha256.equals(expectedSha256, ignoreCase = true)
-    if (hashMismatch) {
-        logger.warn(
-            LogCategory.SYSTEM,
-            "Store SHA-256 mismatch for plugin",
-            mapOf("pluginId" to pluginId, "storeSha256" to info.sha256, "expectedSha256" to expectedSha256),
-        )
-        return "Store SHA-256 for $pluginId (${info.sha256}) does not match approved hash " +
-            "$expectedSha256."
+    if (!expectedSha256.isNullOrBlank()) {
+        if (info.sha256.isBlank()) {
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Store missing SHA-256 for plugin",
+                mapOf("pluginId" to pluginId, "expectedSha256" to expectedSha256),
+            )
+            return "Store provides no SHA-256 hash for $pluginId; expected $expectedSha256."
+        }
+        if (!info.sha256.equals(expectedSha256, ignoreCase = true)) {
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Store SHA-256 mismatch for plugin",
+                mapOf("pluginId" to pluginId, "storeSha256" to info.sha256, "expectedSha256" to expectedSha256),
+            )
+            return "Store SHA-256 for $pluginId (${info.sha256}) does not match approved hash " +
+                "$expectedSha256."
+        }
     }
     return null
 }
