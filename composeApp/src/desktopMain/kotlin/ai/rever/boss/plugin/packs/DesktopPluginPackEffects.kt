@@ -439,7 +439,7 @@ private suspend fun verifyApprovedArtifactHash(
 ): Result<Unit>? {
     val targetArtifact = approvedArtifacts.firstOrNull { it.pluginId == pluginId }
     val expectedSha = targetArtifact?.sha256?.takeIf { it.isNotBlank() } ?: return null
-    val versions = flatten { repository.getPluginVersions(pluginId) }.getOrNull().orEmpty()
+    val versions = runCatching { repository.getPluginVersions(pluginId).getOrNull() }.getOrNull().orEmpty()
     val versionInfo = versions.firstOrNull { it.version == version }
     val fallbackInfo = runCatching { repository.getPlugin(pluginId).getOrNull() }.getOrNull()
     val storeSha = versionInfo?.sha256?.takeIf { it.isNotBlank() } ?: fallbackInfo?.sha256.orEmpty()
