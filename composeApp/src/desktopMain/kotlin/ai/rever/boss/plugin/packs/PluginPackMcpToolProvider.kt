@@ -233,6 +233,7 @@ class PluginPackMcpToolProvider(
         return validateClosureArtifacts(packId, step, closure)
     }
 
+    @Suppress("ReturnCount")
     private fun validateClosureArtifacts(
         packId: String,
         step: PluginStep,

@@ -183,33 +183,6 @@ class DesktopPluginPackEffects(
             .map { }
     }
 
-    private suspend fun verifyApprovedArtifactHash(
-        repository: PluginRepository,
-        pluginId: String,
-        version: String,
-        approvedArtifacts: List<ApprovedArtifact>,
-    ): Result<Unit>? {
-        val targetArtifact = approvedArtifacts.firstOrNull { it.pluginId == pluginId }
-        val expectedSha = targetArtifact?.sha256?.takeIf { it.isNotBlank() } ?: return null
-        val versions = flatten { repository.getPluginVersions(pluginId) }.getOrNull().orEmpty()
-        val versionInfo = versions.firstOrNull { it.version == version }
-        val fallbackInfo = runCatching { repository.getPlugin(pluginId).getOrNull() }.getOrNull()
-        val storeSha = versionInfo?.sha256?.takeIf { it.isNotBlank() } ?: fallbackInfo?.sha256.orEmpty()
-        if (storeSha.isBlank()) {
-            return Result.failure(
-                IllegalStateException("Store provides no SHA-256 hash for $pluginId; expected $expectedSha."),
-            )
-        }
-        if (!storeSha.equals(expectedSha, ignoreCase = true)) {
-            return Result.failure(
-                IllegalStateException(
-                    "Store SHA-256 for $pluginId ($storeSha) does not match approved hash $expectedSha.",
-                ),
-            )
-        }
-        return null
-    }
-
     override suspend fun enable(pluginId: String): Result<Unit> {
         val window = manager() ?: return noWindow()
         return window.enablePlugin(pluginId)
@@ -455,4 +428,32 @@ private suspend fun resolveArtifactForId(
     } else {
         null
     }
+}
+
+@Suppress("ReturnCount")
+private suspend fun verifyApprovedArtifactHash(
+    repository: PluginRepository,
+    pluginId: String,
+    version: String,
+    approvedArtifacts: List<ApprovedArtifact>,
+): Result<Unit>? {
+    val targetArtifact = approvedArtifacts.firstOrNull { it.pluginId == pluginId }
+    val expectedSha = targetArtifact?.sha256?.takeIf { it.isNotBlank() } ?: return null
+    val versions = flatten { repository.getPluginVersions(pluginId) }.getOrNull().orEmpty()
+    val versionInfo = versions.firstOrNull { it.version == version }
+    val fallbackInfo = runCatching { repository.getPlugin(pluginId).getOrNull() }.getOrNull()
+    val storeSha = versionInfo?.sha256?.takeIf { it.isNotBlank() } ?: fallbackInfo?.sha256.orEmpty()
+    if (storeSha.isBlank()) {
+        return Result.failure(
+            IllegalStateException("Store provides no SHA-256 hash for $pluginId; expected $expectedSha."),
+        )
+    }
+    if (!storeSha.equals(expectedSha, ignoreCase = true)) {
+        return Result.failure(
+            IllegalStateException(
+                "Store SHA-256 for $pluginId ($storeSha) does not match approved hash $expectedSha.",
+            ),
+        )
+    }
+    return null
 }
