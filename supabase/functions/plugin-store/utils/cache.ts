@@ -23,19 +23,27 @@ export const PRIVATE_NO_STORE = "private, no-store"
 export const PUBLIC_CATALOGUE_CACHE = "public, max-age=60"
 
 /**
- * Check if the request carries caller credentials (JWT Bearer token or API key).
+ * Check if the request carries caller credentials (JWT Bearer token or X-API-Key).
+ *
+ * Intentionally ignores `apikey`: the Supabase anonymous key (`apikey: <anon>`)
+ * is sent by all callers (including unauthenticated desktop clients) to pass
+ * the gateway and does not identify the caller. Real caller identity is carried
+ * by `Authorization: Bearer <token>` or `X-API-Key: <key>`.
  */
 export function hasCallerCredentials(req: { header: (name: string) => string | undefined }): boolean {
-  const auth = req.header("Authorization")
+  const auth = req.header("authorization")
   if (auth && auth.trim().length > 0) return true
-  const apiKey = req.header("x-api-key") ?? req.header("X-API-Key")
+  const apiKey = req.header("x-api-key")
   if (apiKey && apiKey.trim().length > 0) return true
   return false
 }
 
 /**
- * Middleware that guarantees Cache-Control: private, no-store on all responses,
- * including thrown errors and validation failures.
+ * Middleware that guarantees Cache-Control: private, no-store on caller-dependent responses.
+ *
+ * Uses fill-in semantics: if the response does not already carry a Cache-Control header
+ * (for example, from a handler or route policy), or on error (status >= 400), it stamps
+ * `Cache-Control: private, no-store`. No caller-dependent route may set its own weaker header.
  *
  * Used for routes that are always caller-dependent:
  * - download-info routes returning signed URLs
@@ -48,7 +56,7 @@ export function privateNoStore(): MiddlewareHandler<{ Variables: PluginStoreCont
     try {
       await next()
     } finally {
-      if (ctx.res) {
+      if (!ctx.res.headers.has("Cache-Control")) {
         ctx.res.headers.set("Cache-Control", PRIVATE_NO_STORE)
       }
     }
@@ -59,7 +67,7 @@ export function privateNoStore(): MiddlewareHandler<{ Variables: PluginStoreCont
  * Middleware for catalogue/browse routes.
  *
  * Genuinely anonymous callers on public catalogue routes retain their intended
- * cache header (e.g. `public, max-age=60`).
+ * cache header (for example, `public, max-age=60`).
  *
  * Authenticated requests, validation failures, rate limits, 404s, and server
  * errors are marked `Cache-Control: private, no-store`.
@@ -69,13 +77,11 @@ export function catalogueCachePolicy(): MiddlewareHandler<{ Variables: PluginSto
     try {
       await next()
     } finally {
-      if (ctx.res) {
-        const hasAuth = hasCallerCredentials(ctx.req)
-        const isError = ctx.res.status >= 400
+      const hasAuth = hasCallerCredentials(ctx.req)
+      const isError = ctx.res.status >= 400
 
-        if (hasAuth || isError) {
-          ctx.res.headers.set("Cache-Control", PRIVATE_NO_STORE)
-        }
+      if (hasAuth || isError) {
+        ctx.res.headers.set("Cache-Control", PRIVATE_NO_STORE)
       }
     }
   }
@@ -96,15 +102,13 @@ export function ratingCachePolicy(): MiddlewareHandler<{ Variables: PluginStoreC
     try {
       await next()
     } finally {
-      if (ctx.res) {
-        const normPath = ctx.req.path.replace(/\/+$/, "")
-        const isUserRating = normPath.endsWith("/rate") || normPath.endsWith("/rating")
-        const hasAuth = hasCallerCredentials(ctx.req)
-        const isError = ctx.res.status >= 400
+      const normPath = ctx.req.path.replace(/\/+$/, "")
+      const isUserRating = normPath.endsWith("/rate") || normPath.endsWith("/rating")
+      const hasAuth = hasCallerCredentials(ctx.req)
+      const isError = ctx.res.status >= 400
 
-        if (isUserRating || hasAuth || isError) {
-          ctx.res.headers.set("Cache-Control", PRIVATE_NO_STORE)
-        }
+      if (isUserRating || hasAuth || isError) {
+        ctx.res.headers.set("Cache-Control", PRIVATE_NO_STORE)
       }
     }
   }

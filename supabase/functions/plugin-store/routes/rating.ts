@@ -11,7 +11,9 @@ import { newRouter } from "../utils/router.ts"
 import { ratingCachePolicy } from "../utils/cache.ts"
 
 const rating = newRouter()
-rating.use("*", ratingCachePolicy())
+rating.use("/:pluginId/rate", ratingCachePolicy())
+rating.use("/:pluginId/rating", ratingCachePolicy())
+rating.use("/:pluginId/ratings", ratingCachePolicy())
 
 // ============================================================================
 // POST /:pluginId/rate - Rate a plugin

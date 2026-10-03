@@ -6,7 +6,7 @@ import { newRouter } from "../utils/router.ts"
 import { privateNoStore } from "../utils/cache.ts"
 
 const admin = newRouter()
-admin.use("*", privateNoStore())
+admin.use("/admin/*", privateNoStore())
 
 // ============================================================================
 // Schemas
