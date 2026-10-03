@@ -40,7 +40,11 @@ import { newRouter } from "../utils/router.ts"
 import { privateNoStore } from "../utils/cache.ts"
 
 const publish = newRouter()
-publish.use("*", privateNoStore())
+publish.use("/publish", privateNoStore())
+publish.use("/github", privateNoStore())
+publish.use("/github/*", privateNoStore())
+publish.use("/version/finalize", privateNoStore())
+publish.use("/:pluginId/version", privateNoStore())
 
 // ============================================================================
 // POST /publish - Publish a new plugin
