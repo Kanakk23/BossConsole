@@ -2810,11 +2810,17 @@ object FluckEngine {
      * recorder, a gesture feature) must extend this callback rather than call `browser.set(...)`
      * again — a second registration replaces this one silently, with no compile error.
      */
-    fun setupSwingPopupDismissOnPageClick(browser: com.teamdev.jxbrowser.browser.Browser) {
+    fun setupSwingPopupDismissOnPageClick(browser: com.teamdev.jxbrowser.browser.Browser) = setupSwingPopupDismissOnPageClick(browser) { }
+
+    internal fun setupSwingPopupDismissOnPageClick(
+        browser: com.teamdev.jxbrowser.browser.Browser,
+        onPagePressed: () -> Unit,
+    ) {
         try {
             browser.set(
                 com.teamdev.jxbrowser.browser.callback.input.PressMouseCallback::class.java,
                 com.teamdev.jxbrowser.browser.callback.input.PressMouseCallback {
+                    onPagePressed()
                     // The callback arrives on a JxBrowser thread; MenuSelectionManager is
                     // Swing state and must only be touched on the EDT.
                     javax.swing.SwingUtilities.invokeLater {
@@ -2888,7 +2894,8 @@ object FluckEngine {
      * There the callback still suppresses the chord (so a page never sees it) but leaves the
      * dispatch to the AWT layer, which is the keymap's single source of truth.
      *
-     * Window-owned browsers suppress every key event while their AWT window is inactive.
+     * Window-owned browsers suppress key events while their AWT window is inactive, except
+     * a one-shot matching key dispatched by authenticated, window-scoped application control.
      *
      * @param ownerWindowId stable owner used for focus gating and shortcut dispatch; null preserves
      * legacy behavior for the old unscoped browser helper.
@@ -2908,12 +2915,61 @@ object FluckEngine {
         BrowserFindController.register(browser)
         installFindKeyProbe(browser)
         val suppressionLogged = AtomicBoolean(false)
+        if (ownerWindowId != null) {
+            ai.rever.boss.sharing.AppBrowserKeyDispatch
+                .register(browser)
+        }
+        // Chromium delivers typed/released events independently from key-down suppression.
+        browser.set(
+            com.teamdev.jxbrowser.browser.callback.input.TypeKeyCallback::class.java,
+            com.teamdev.jxbrowser.browser.callback.input.TypeKeyCallback {
+                if (ai.rever.boss.window
+                        .nativeAddressOwnsBrowserKeys(zoomTarget?.id)
+                ) {
+                    com.teamdev.jxbrowser.browser.callback.input.TypeKeyCallback.Response
+                        .suppress()
+                } else {
+                    com.teamdev.jxbrowser.browser.callback.input.TypeKeyCallback.Response
+                        .proceed()
+                }
+            },
+        )
+        browser.set(
+            com.teamdev.jxbrowser.browser.callback.input.ReleaseKeyCallback::class.java,
+            com.teamdev.jxbrowser.browser.callback.input.ReleaseKeyCallback {
+                if (ai.rever.boss.window
+                        .nativeAddressOwnsBrowserKeys(zoomTarget?.id)
+                ) {
+                    com.teamdev.jxbrowser.browser.callback.input.ReleaseKeyCallback.Response
+                        .suppress()
+                } else {
+                    com.teamdev.jxbrowser.browser.callback.input.ReleaseKeyCallback.Response
+                        .proceed()
+                }
+            },
+        )
         browser.set(
             com.teamdev.jxbrowser.browser.callback.input.PressKeyCallback::class.java,
             com.teamdev.jxbrowser.browser.callback.input.PressKeyCallback { params ->
                 val event = params.event()
                 val modifiers = event.keyModifiers()
                 val keyCode = event.keyCode()
+
+                val remoteKey =
+                    ai.rever.boss.sharing.AppBrowserKeyDispatch
+                        .consume(browser, event, ownerWindowId)
+                // The active AWT window is not enough: its native URL editor may own the key.
+                // Retire a remote permit before rejecting it, so it cannot authorize a later key.
+                if (ai.rever.boss.window
+                        .nativeAddressOwnsBrowserKeys(zoomTarget?.id)
+                ) {
+                    return@PressKeyCallback com.teamdev.jxbrowser.browser.callback.input.PressKeyCallback.Response
+                        .suppress()
+                }
+                if (remoteKey) {
+                    return@PressKeyCallback com.teamdev.jxbrowser.browser.callback.input.PressKeyCallback.Response
+                        .proceed()
+                }
 
                 val route =
                     resolveBrowserKeyEventRoute(
