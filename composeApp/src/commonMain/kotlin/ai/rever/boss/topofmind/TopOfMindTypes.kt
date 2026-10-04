@@ -13,24 +13,9 @@ data class ActiveTab(
     val panelId: String,
     val windowId: String,
     val splitPosition: String? = null, // "Left", "Right", "Top", "Bottom", or null for single panel
-) {
-    var isSelected: Boolean = false
-    var isPanelActive: Boolean = false
-
-    constructor(
-        tabInfo: TabInfo,
-        workspaceId: String,
-        workspaceName: String,
-        panelId: String,
-        windowId: String,
-        splitPosition: String? = null,
-        isSelected: Boolean = false,
-        isPanelActive: Boolean = false,
-    ) : this(tabInfo, workspaceId, workspaceName, panelId, windowId, splitPosition) {
-        this.isSelected = isSelected
-        this.isPanelActive = isPanelActive
-    }
-}
+    val isSelected: Boolean = false,
+    val isPanelActive: Boolean = false,
+)
 
 /**
  * Hierarchical structure for workspace tab sections

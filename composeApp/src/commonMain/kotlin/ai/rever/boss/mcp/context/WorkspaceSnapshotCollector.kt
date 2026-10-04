@@ -2,6 +2,7 @@ package ai.rever.boss.mcp.context
 
 import ai.rever.boss.components.dialogs.TabCollector
 import ai.rever.boss.components.window_panel.SplitViewStateRegistry
+import ai.rever.boss.components.workspaces.workspaceManager
 import ai.rever.boss.git.GitService
 import ai.rever.boss.plugin.api.TabInfo
 import ai.rever.boss.plugin.tab.codeeditor.EditorTabInfo
@@ -11,6 +12,7 @@ import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import ai.rever.boss.window.WindowProjectStateRegistry
 import java.lang.reflect.Method
+import java.net.URI
 import java.util.Optional
 import java.util.concurrent.ConcurrentHashMap
 
@@ -21,7 +23,7 @@ object WorkspaceSnapshotCollector {
 
     @Suppress("LongMethod")
     fun collect(
-        activeTabsSupplier: () -> List<ActiveTab> = { TabCollector.collectAllTabs() },
+        activeTabsSupplier: () -> List<ActiveTab> = { TabCollector.collectAllTabs(workspaceManager) },
         globalProjectPathSupplier: () -> String? = { GitService.getCurrentProjectPath() },
         projectPathResolver: (windowId: String) -> String? = { windowId ->
             WindowProjectStateRegistry
@@ -103,13 +105,13 @@ object WorkspaceSnapshotCollector {
     /**
      * Resolves the currently focused/active editor file in the actionable window.
      *
-     * Directly queries live [SplitViewStateRegistry] when available (checking the active tab
-     * of the active panel in the focused window first), with fallback to inspecting the
-     * collected [ActiveTab] list for tabs marked [ActiveTab.isPanelActive] and [ActiveTab.isSelected].
+     * Directly queries live [SplitViewStateRegistry] for the actionable window when available
+     * (checking the active tab of the active panel in that window only), with fallback to inspecting the
+     * collected [ActiveTab] list for tabs matching the actionable window and marked [ActiveTab.isPanelActive]
+     * and [ActiveTab.isSelected].
      */
-    @Suppress("CyclomaticComplexMethod", "NestedBlockDepth", "ReturnCount", "LongMethod")
     fun findActiveEditorFile(
-        activeTabsSupplier: () -> List<ActiveTab> = { TabCollector.collectAllTabs() },
+        activeTabsSupplier: () -> List<ActiveTab> = { TabCollector.collectAllTabs(workspaceManager) },
         globalProjectPathSupplier: () -> String? = { GitService.getCurrentProjectPath() },
         projectPathResolver: (windowId: String) -> String? = { windowId ->
             WindowProjectStateRegistry
@@ -124,39 +126,27 @@ object WorkspaceSnapshotCollector {
     ): ActiveEditorFileSnapshot? {
         val activeWindowId = activeWindowIdSupplier()
 
-        // 1. Direct inspection from SplitViewStateRegistry when live state is available
-        val registeredStates = SplitViewStateRegistry.getAllStates()
-        if (registeredStates.isNotEmpty()) {
-            val candidateWindows = mutableListOf<Pair<String, ai.rever.boss.components.window_panel.SplitViewState>>()
-            if (activeWindowId != null && registeredStates.containsKey(activeWindowId)) {
-                candidateWindows.add(activeWindowId to registeredStates.getValue(activeWindowId))
+        // 1. Direct inspection from SplitViewStateRegistry when the actionable window is registered
+        if (activeWindowId != null) {
+            val splitState = SplitViewStateRegistry.getState(activeWindowId)
+            if (splitState != null) {
+                return findEditorInSplitState(
+                    splitState = splitState,
+                    windowId = activeWindowId,
+                    projectPathResolver = projectPathResolver,
+                    globalProjectPathSupplier = globalProjectPathSupplier,
+                )
             }
-            registeredStates.forEach { (wId, state) ->
-                if (wId != activeWindowId) {
-                    candidateWindows.add(wId to state)
-                }
-            }
-
-            for ((windowId, splitState) in candidateWindows) {
-                findEditorInSplitState(splitState, windowId, projectPathResolver, globalProjectPathSupplier)?.let {
-                    return it
-                }
-            }
-            return null
         }
 
-        // 2. Fallback when using injected activeTabsSupplier (e.g. unit tests without registry)
+        // 2. Fallback when using injected activeTabsSupplier
+        // (e.g. unit tests without registry or unregistered window)
         val rawTabs = activeTabsSupplier()
         val focusedTab =
             rawTabs.firstOrNull {
-                it.windowId == activeWindowId && it.isPanelActive && it.isSelected &&
+                (activeWindowId == null || it.windowId == activeWindowId) &&
+                    it.isPanelActive && it.isSelected &&
                     categorizeTab(it.tabInfo.typeId.typeId) == "editor"
-            } ?: rawTabs.firstOrNull {
-                it.isPanelActive && it.isSelected && categorizeTab(it.tabInfo.typeId.typeId) == "editor"
-            } ?: rawTabs.firstOrNull {
-                it.windowId == activeWindowId && it.isSelected && categorizeTab(it.tabInfo.typeId.typeId) == "editor"
-            } ?: rawTabs.firstOrNull {
-                it.isSelected && categorizeTab(it.tabInfo.typeId.typeId) == "editor"
             }
 
         return focusedTab?.let { tab ->
@@ -167,14 +157,13 @@ object WorkspaceSnapshotCollector {
         }
     }
 
-    @Suppress("ReturnCount")
     private fun findEditorInSplitState(
         splitState: ai.rever.boss.components.window_panel.SplitViewState,
         windowId: String,
         projectPathResolver: (windowId: String) -> String?,
         globalProjectPathSupplier: () -> String?,
     ): ActiveEditorFileSnapshot? {
-        // Priority A: The active panel's active tab
+        // Only inspect the active panel of this actionable window
         val activePanel =
             splitState.getPanel(splitState.activePanelId) ?: splitState.getAllPanels().firstOrNull()
         val activeTab =
@@ -185,21 +174,6 @@ object WorkspaceSnapshotCollector {
                 ?.activeTab
         if (activeTab != null && categorizeTab(activeTab.typeId.typeId) == "editor") {
             val filePath = extractFilePath(activeTab)
-            if (filePath != null) {
-                val projPath = projectPathResolver(windowId) ?: globalProjectPathSupplier()
-                return toActiveEditorFileSnapshot(filePath, projPath)
-            }
-        }
-
-        // Priority B: An active tab in any other panel of this window's active workspace
-        val panelEditorTab =
-            splitState
-                .getAllPanels()
-                .asSequence()
-                .mapNotNull { it.tabsComponent.tabsState.value.activeTab }
-                .firstOrNull { categorizeTab(it.typeId.typeId) == "editor" }
-        if (panelEditorTab != null) {
-            val filePath = extractFilePath(panelEditorTab)
             if (filePath != null) {
                 val projPath = projectPathResolver(windowId) ?: globalProjectPathSupplier()
                 return toActiveEditorFileSnapshot(filePath, projPath)
@@ -242,22 +216,39 @@ object WorkspaceSnapshotCollector {
         return invokeGetter(tabInfo, "getFilePath")
     }
 
+    internal fun redactBrowserUrl(rawUrl: String): String {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isEmpty()) return trimmed
+        return try {
+            val uri = URI(trimmed)
+            if (uri.scheme != null && (uri.host != null || uri.rawAuthority != null)) {
+                val scheme = uri.scheme
+                val host = uri.host ?: uri.rawAuthority?.substringAfter('@')?.substringBefore(':') ?: ""
+                val port = if (uri.port != -1) ":${uri.port}" else ""
+                val path = uri.rawPath.orEmpty()
+                "$scheme://$host$port$path"
+            } else {
+                trimmed.substringBefore('?').substringBefore('#')
+            }
+        } catch (_: Exception) {
+            trimmed.substringBefore('?').substringBefore('#')
+        }
+    }
+
     @Suppress("ReturnCount")
     private fun extractBrowserUrl(tabInfo: TabInfo): String? {
         if (categorizeTab(tabInfo.typeId.typeId) != "browser") return null
 
-        if (tabInfo is ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo) {
-            return (tabInfo.currentUrl.ifBlank { null } ?: tabInfo.url.ifBlank { null })
-        }
+        val raw =
+            if (tabInfo is ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo) {
+                tabInfo.currentUrl.ifBlank { null } ?: tabInfo.url.ifBlank { null }
+            } else {
+                invokeGetter(tabInfo, "getCurrentUrl")
+                    ?: invokeGetter(tabInfo, "getInitialUrl")
+                    ?: invokeGetter(tabInfo, "getUrl")
+            }
 
-        // Reflection fallback: getCurrentUrl, then getInitialUrl, then getUrl
-        val currentUrl = invokeGetter(tabInfo, "getCurrentUrl")
-        if (currentUrl != null) return currentUrl
-
-        val initialUrl = invokeGetter(tabInfo, "getInitialUrl")
-        if (initialUrl != null) return initialUrl
-
-        return invokeGetter(tabInfo, "getUrl")
+        return raw?.let { redactBrowserUrl(it) }
     }
 
     @Suppress("TooGenericExceptionCaught")

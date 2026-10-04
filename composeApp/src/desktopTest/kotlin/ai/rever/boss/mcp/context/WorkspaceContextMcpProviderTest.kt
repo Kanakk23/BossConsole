@@ -1,9 +1,15 @@
 package ai.rever.boss.mcp.context
 
 import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
+import ai.rever.boss.components.window_panel.SplitOrientation
 import ai.rever.boss.components.window_panel.SplitViewState
 import ai.rever.boss.components.window_panel.SplitViewStateRegistry
+import ai.rever.boss.components.workspaces.workspaceManager
 import ai.rever.boss.mcp.McpMutatingToolCatalog
+import ai.rever.boss.mcp.McpPolicyAction
+import ai.rever.boss.mcp.McpPolicyEngine
+import ai.rever.boss.mcp.sandbox.DefaultMcpRiskEvaluator
+import ai.rever.boss.mcp.sandbox.McpRiskLevel
 import ai.rever.boss.plugin.api.McpToolArgs
 import ai.rever.boss.plugin.api.TabComponentWithUI
 import ai.rever.boss.plugin.api.TabIcon
@@ -14,6 +20,9 @@ import ai.rever.boss.plugin.api.TabTypeInfo
 import ai.rever.boss.plugin.tab.codeeditor.CodeEditorTabType
 import ai.rever.boss.plugin.tab.codeeditor.EditorTabInfo
 import ai.rever.boss.plugin.tab.fluck.FluckTabType
+import ai.rever.boss.plugin.workspace.LayoutWorkspace
+import ai.rever.boss.plugin.workspace.PanelConfig
+import ai.rever.boss.plugin.workspace.SplitConfig
 import ai.rever.boss.topofmind.ActiveTab
 import ai.rever.boss.topofmind.TopOfMindStateHolder
 import ai.rever.boss.window.Project
@@ -21,6 +30,7 @@ import ai.rever.boss.window.WindowProjectStateRegistry
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.arkivanov.decompose.ComponentContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlin.test.AfterTest
@@ -94,6 +104,7 @@ class WorkspaceContextMcpProviderTest {
     private companion object {
         const val TEST_WINDOW_1 = "test-window-1"
         const val TEST_WINDOW_2 = "test-window-2"
+        const val TEST_WORKSPACE_ID = "w1"
     }
 
     private val tabRegistry =
@@ -110,6 +121,7 @@ class WorkspaceContextMcpProviderTest {
         WindowProjectStateRegistry.getAllWindowIds().forEach {
             WindowProjectStateRegistry.unregister(it)
         }
+        workspaceManager.deleteWorkspaceById(TEST_WORKSPACE_ID)
         TopOfMindStateHolder.updateActiveTabs(emptyList())
     }
 
@@ -121,6 +133,7 @@ class WorkspaceContextMcpProviderTest {
         WindowProjectStateRegistry.getAllWindowIds().forEach {
             WindowProjectStateRegistry.unregister(it)
         }
+        workspaceManager.deleteWorkspaceById(TEST_WORKSPACE_ID)
         TopOfMindStateHolder.updateActiveTabs(emptyList())
     }
 
@@ -149,15 +162,11 @@ class WorkspaceContextMcpProviderTest {
             assertNull(snapshot.activeProjectPath)
             assertTrue(snapshot.openTabs.isEmpty())
             assertEquals(0, snapshot.tabCounts.total)
-            assertEquals(0, snapshot.tabCounts.editor)
-            assertEquals(0, snapshot.tabCounts.terminal)
-            assertEquals(0, snapshot.tabCounts.browser)
-            assertEquals(0, snapshot.tabCounts.other)
             assertNull(snapshot.activeEditorFile)
         }
 
     @Test
-    fun `categorizes tabs into editor, terminal, browser and other`(): Unit =
+    fun `get_workspace_context returns structured tabs and active editor`(): Unit =
         runBlocking {
             val tabs =
                 listOf(
@@ -169,7 +178,7 @@ class WorkspaceContextMcpProviderTest {
                         isSelected = true,
                         isPanelActive = true,
                     ),
-                    createActiveTab("t2", "terminal", "Terminal 1"),
+                    createActiveTab("t2", "terminal", "Terminal"),
                     createActiveTab("t3", "fluck", "Google", currentUrl = "https://google.com"),
                     createActiveTab("t4", "custom_plugin_tab", "Custom View"),
                 )
@@ -231,6 +240,37 @@ class WorkspaceContextMcpProviderTest {
 
             val browserTab = snapshot.openTabs.first { it.type == "browser" }
             assertEquals("https://example.com/initial", browserTab.browserUrl)
+        }
+
+    @Test
+    fun `browserUrl redacts query parameters, fragments, and userinfo`(): Unit =
+        runBlocking {
+            val testCases =
+                listOf(
+                    "https://example.com/live?token=secret123#section" to "https://example.com/live",
+                    "https://user:pass@example.com:8080/dashboard?key=val#frag" to
+                        "https://example.com:8080/dashboard",
+                    "http://localhost:3000/app?auth=token" to "http://localhost:3000/app",
+                    "boss://settings?category=mcp#top" to "boss://settings",
+                    "about:blank" to "about:blank",
+                )
+
+            for ((raw, expected) in testCases) {
+                val tab =
+                    createActiveTab(
+                        id = "b1",
+                        typeIdString = "fluck",
+                        title = "Browser",
+                        currentUrl = raw,
+                    )
+                val snapshot =
+                    WorkspaceSnapshotCollector.collect(
+                        activeTabsSupplier = { listOf(tab) },
+                        globalProjectPathSupplier = { null },
+                    )
+                val browserTab = snapshot.openTabs.first()
+                assertEquals(expected, browserTab.browserUrl, "URL $raw must be redacted to $expected")
+            }
         }
 
     @Test
@@ -320,9 +360,55 @@ class WorkspaceContextMcpProviderTest {
         }
 
     @Test
-    fun `only focused editor tab is returned as activeEditorFile - background editor tabs are ignored`(): Unit =
+    fun `only focused editor tab is returned as activeEditorFile on real SplitViewState`(): Unit =
         runBlocking {
-            // First editor tab is not selected (background), second editor tab IS selected and in active panel
+            val windowState = SplitViewState(tabRegistry, TEST_WINDOW_1)
+            windowState.preserveCurrentState("w1", "Workspace")
+            SplitViewStateRegistry.register(TEST_WINDOW_1, windowState)
+
+            val panel = windowState.getPanel("main")!!.tabsComponent
+            val backgroundEditor = EditorTabInfo(id = "e1", title = "Background.kt", filePath = "/repo/Background.kt")
+            val focusedEditor = EditorTabInfo(id = "e2", title = "Focused.kt", filePath = "/repo/Focused.kt")
+            val terminal =
+                FluckTabInfo(
+                    id = "b1",
+                    typeId = TabTypeId("fluck"),
+                    _title = "Browser",
+                    url = "https://example.com",
+                    _currentUrl = "https://example.com",
+                )
+
+            panel.addTab(backgroundEditor)
+            panel.addTab(focusedEditor)
+            panel.addTab(terminal)
+
+            // Select index 1 (Focused.kt)
+            panel.selectTab(1)
+
+            val activeFile =
+                WorkspaceSnapshotCollector.findActiveEditorFile(
+                    projectPathResolver = { "/repo" },
+                    activeWindowIdSupplier = { TEST_WINDOW_1 },
+                )
+
+            assertNotNull(activeFile)
+            assertEquals("Focused.kt", activeFile.fileName)
+            assertEquals("/repo/Focused.kt", activeFile.absolutePath)
+
+            // If selected tab in active panel is browser,
+            // no active editor file is returned even though editors are open
+            panel.selectTab(2)
+            val noActiveFile =
+                WorkspaceSnapshotCollector.findActiveEditorFile(
+                    projectPathResolver = { "/repo" },
+                    activeWindowIdSupplier = { TEST_WINDOW_1 },
+                )
+            assertNull(noActiveFile)
+        }
+
+    @Test
+    fun `fallback to activeTabsSupplier when window is not registered in SplitViewStateRegistry`(): Unit =
+        runBlocking {
             val tabs =
                 listOf(
                     createActiveTab(
@@ -332,14 +418,16 @@ class WorkspaceContextMcpProviderTest {
                         filePath = "/repo/Background.kt",
                         isSelected = false,
                         isPanelActive = true,
+                        windowId = "unregistered-window",
                     ),
                     createActiveTab(
                         "t2",
                         "editor",
-                        "Focused.kt",
-                        filePath = "/repo/Focused.kt",
+                        "FocusedFallback.kt",
+                        filePath = "/repo/FocusedFallback.kt",
                         isSelected = true,
                         isPanelActive = true,
+                        windowId = "unregistered-window",
                     ),
                 )
 
@@ -347,38 +435,125 @@ class WorkspaceContextMcpProviderTest {
                 WorkspaceSnapshotCollector.findActiveEditorFile(
                     activeTabsSupplier = { tabs },
                     projectPathResolver = { "/repo" },
+                    activeWindowIdSupplier = { "unregistered-window" },
                 )
 
             assertNotNull(activeFile)
-            assertEquals("Focused.kt", activeFile.fileName)
-            assertEquals("/repo/Focused.kt", activeFile.absolutePath)
+            assertEquals("FocusedFallback.kt", activeFile.fileName)
+        }
 
-            // If active tab is terminal, no active editor file is returned even if an editor tab is open
-            val terminalActiveTabs =
-                listOf(
-                    createActiveTab(
-                        "t1",
-                        "editor",
-                        "Background.kt",
-                        filePath = "/repo/Background.kt",
-                        isSelected = false,
-                        isPanelActive = true,
-                    ),
-                    createActiveTab(
-                        "t2",
-                        "terminal",
-                        "Terminal",
-                        isSelected = true,
-                        isPanelActive = true,
-                    ),
+    @Test
+    fun `findActiveEditorFile scopes to actionable window and never returns editor from non-focused window`(): Unit =
+        runBlocking {
+            // Window 1 (actionable): active panel has a browser tab
+            val window1State = SplitViewState(tabRegistry, TEST_WINDOW_1)
+            window1State.preserveCurrentState("w1", "Workspace1")
+            SplitViewStateRegistry.register(TEST_WINDOW_1, window1State)
+            val panel1 = window1State.getPanel("main")!!.tabsComponent
+            val browser =
+                FluckTabInfo(
+                    id = "b1",
+                    typeId = TabTypeId("fluck"),
+                    _title = "Browser",
+                    url = "https://example.com",
+                    _currentUrl = "https://example.com",
                 )
+            panel1.addTab(browser)
+            panel1.selectTab(0)
 
-            val noActiveFile =
+            // Window 2 (non-focused): active panel has an editor tab
+            val window2State = SplitViewState(tabRegistry, TEST_WINDOW_2)
+            window2State.preserveCurrentState("w2", "Workspace2")
+            SplitViewStateRegistry.register(TEST_WINDOW_2, window2State)
+            val panel2 = window2State.getPanel("main")!!.tabsComponent
+            val editor2 = EditorTabInfo(id = "e2", title = "WindowTwoEditor.kt", filePath = "/repo/WindowTwoEditor.kt")
+            panel2.addTab(editor2)
+            panel2.selectTab(0)
+
+            // Querying with Window 1 as actionable must return null (does not leak Window 2's editor)
+            val activeForWindow1 =
                 WorkspaceSnapshotCollector.findActiveEditorFile(
-                    activeTabsSupplier = { terminalActiveTabs },
                     projectPathResolver = { "/repo" },
+                    activeWindowIdSupplier = { TEST_WINDOW_1 },
                 )
-            assertNull(noActiveFile)
+            assertNull(
+                activeForWindow1,
+                "Actionable window has only a browser, must not return non-focused window's editor",
+            )
+
+            // Querying with Window 2 as actionable returns its editor
+            val activeForWindow2 =
+                WorkspaceSnapshotCollector.findActiveEditorFile(
+                    projectPathResolver = { "/repo" },
+                    activeWindowIdSupplier = { TEST_WINDOW_2 },
+                )
+            assertNotNull(activeForWindow2)
+            assertEquals("WindowTwoEditor.kt", activeForWindow2.fileName)
+            assertEquals("/repo/WindowTwoEditor.kt", activeForWindow2.absolutePath)
+        }
+
+    @Test
+    fun `findActiveEditorFile respects active panel in split view and ignores inactive panel editor`(): Unit =
+        runBlocking {
+            val windowState = SplitViewState(tabRegistry, TEST_WINDOW_1)
+            windowState.preserveCurrentState("w1", "Workspace1")
+            SplitViewStateRegistry.register(TEST_WINDOW_1, windowState)
+
+            val leftPanel = windowState.getPanel("main")!!
+            val rightPanelId = windowState.splitPanel(leftPanel.id, SplitOrientation.VERTICAL)
+            val rightPanel = windowState.getPanel(rightPanelId)!!
+
+            val leftEditor = EditorTabInfo(id = "e-left", title = "LeftEditor.kt", filePath = "/repo/LeftEditor.kt")
+            val rightEditor =
+                EditorTabInfo(id = "e-right", title = "RightEditor.kt", filePath = "/repo/RightEditor.kt")
+            val rightBrowser =
+                FluckTabInfo(
+                    id = "b-right",
+                    typeId = TabTypeId("fluck"),
+                    _title = "Browser",
+                    url = "https://example.com",
+                    _currentUrl = "https://example.com",
+                )
+
+            leftPanel.tabsComponent.addTab(leftEditor)
+            leftPanel.tabsComponent.selectTab(0)
+
+            rightPanel.tabsComponent.addTab(rightBrowser)
+            rightPanel.tabsComponent.addTab(rightEditor)
+            rightPanel.tabsComponent.selectTab(0) // rightBrowser selected
+
+            // Focus right panel: active tab in right panel is Browser. Left panel has LeftEditor.
+            delay(60L)
+            windowState.setActivePanel(rightPanelId)
+            assertEquals(rightPanelId, windowState.activePanelId)
+
+            val activeRightBrowser =
+                WorkspaceSnapshotCollector.findActiveEditorFile(
+                    projectPathResolver = { "/repo" },
+                    activeWindowIdSupplier = { TEST_WINDOW_1 },
+                )
+            assertNull(activeRightBrowser, "Active panel has browser, inactive left panel editor must be ignored")
+
+            // Select RightEditor in right panel
+            rightPanel.tabsComponent.selectTab(1)
+            val activeRightEditor =
+                WorkspaceSnapshotCollector.findActiveEditorFile(
+                    projectPathResolver = { "/repo" },
+                    activeWindowIdSupplier = { TEST_WINDOW_1 },
+                )
+            assertNotNull(activeRightEditor)
+            assertEquals("RightEditor.kt", activeRightEditor.fileName)
+
+            // Switch active panel to Left panel
+            delay(60L)
+            windowState.setActivePanel(leftPanel.id)
+            val activeLeftEditor =
+                WorkspaceSnapshotCollector.findActiveEditorFile(
+                    projectPathResolver = { "/repo" },
+                    activeWindowIdSupplier = { TEST_WINDOW_1 },
+                )
+            assertNotNull(activeLeftEditor)
+            assertEquals("LeftEditor.kt", activeLeftEditor.fileName)
         }
 
     @Test
@@ -401,10 +576,36 @@ class WorkspaceContextMcpProviderTest {
     }
 
     @Test
-    fun `live tabs read from SplitViewStateRegistry when cache is empty`(): Unit =
+    fun `workspace context tools evaluate to HIGH risk and require ASK in policy engine`() {
+        val evaluator = DefaultMcpRiskEvaluator()
+        val engine = McpPolicyEngine(policyFile = null)
+        val tools = listOf("get_workspace_context", "get_active_editor_file")
+
+        for (name in tools) {
+            val assessment = evaluator.evaluateRisk(name, McpToolArgs(emptyMap(), "{}"))
+            assertEquals(McpRiskLevel.HIGH, assessment.level, "Tool $name must evaluate to HIGH risk")
+            assertEquals(
+                McpPolicyAction.ASK,
+                engine.policyFor(name, declaredReadOnly = true),
+                "Tool $name must resolve to ASK default even when declared readOnly",
+            )
+        }
+    }
+
+    @Test
+    fun `live tabs read from SplitViewStateRegistry when cache is empty and resolves workspace name`(): Unit =
         runBlocking {
+            val ws =
+                LayoutWorkspace(
+                    id = TEST_WORKSPACE_ID,
+                    name = "My Project Space",
+                    description = "Test workspace",
+                    layout = SplitConfig.SinglePanel(PanelConfig("main", emptyList())),
+                )
+            workspaceManager.registerWorkspace(ws)
+
             val windowState = SplitViewState(tabRegistry, TEST_WINDOW_1)
-            windowState.preserveCurrentState("w1", "Workspace")
+            windowState.preserveCurrentState(TEST_WORKSPACE_ID, "My Project Space")
             SplitViewStateRegistry.register(TEST_WINDOW_1, windowState)
 
             val panel = windowState.getPanel("main")!!.tabsComponent
@@ -414,8 +615,8 @@ class WorkspaceContextMcpProviderTest {
                     id = "b1",
                     typeId = TabTypeId("fluck"),
                     _title = "RealBrowser",
-                    url = "https://example.com/live",
-                    _currentUrl = "https://example.com/live",
+                    url = "https://example.com/live?token=secret123#frag",
+                    _currentUrl = "https://example.com/live?token=secret123#frag",
                 )
 
             assertEquals(0, panel.addTab(editorInfo))
@@ -436,9 +637,12 @@ class WorkspaceContextMcpProviderTest {
             val editorTab = snapshot.openTabs.first { it.type == "editor" }
             assertEquals("/path/to/RealEditor.kt", editorTab.filePath)
             assertEquals("RealEditor.kt", editorTab.relativePath)
+            assertEquals("My Project Space", editorTab.workspaceName)
+            assertFalse(editorTab.workspaceName.startsWith("Space "), "workspaceName must not be placeholder Space")
             assertTrue(editorTab.isSelected)
 
             val browserTab = snapshot.openTabs.first { it.type == "browser" }
+            // Query params and fragment must be redacted
             assertEquals("https://example.com/live", browserTab.browserUrl)
 
             val activeFile = assertNotNull(snapshot.activeEditorFile)
