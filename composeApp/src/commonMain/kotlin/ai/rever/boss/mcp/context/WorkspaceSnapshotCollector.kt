@@ -24,7 +24,12 @@ object WorkspaceSnapshotCollector {
         activeTabsSupplier: () -> List<ActiveTab> = { TabCollector.collectAllTabs() },
         globalProjectPathSupplier: () -> String? = { GitService.getCurrentProjectPath() },
         projectPathResolver: (windowId: String) -> String? = { windowId ->
-            WindowProjectStateRegistry.get(windowId)?.selectedProject?.value?.path?.ifBlank { null }
+            WindowProjectStateRegistry
+                .get(windowId)
+                ?.selectedProject
+                ?.value
+                ?.path
+                ?.ifBlank { null }
                 ?: globalProjectPathSupplier()
         },
         activeWindowIdSupplier: () -> String? = { WindowFocusManager.resolveActionableWindowId() },
@@ -102,12 +107,17 @@ object WorkspaceSnapshotCollector {
      * of the active panel in the focused window first), with fallback to inspecting the
      * collected [ActiveTab] list for tabs marked [ActiveTab.isPanelActive] and [ActiveTab.isSelected].
      */
-    @Suppress("CyclomaticComplexMethod", "NestedBlockDepth", "ReturnCount")
+    @Suppress("CyclomaticComplexMethod", "NestedBlockDepth", "ReturnCount", "LongMethod")
     fun findActiveEditorFile(
         activeTabsSupplier: () -> List<ActiveTab> = { TabCollector.collectAllTabs() },
         globalProjectPathSupplier: () -> String? = { GitService.getCurrentProjectPath() },
         projectPathResolver: (windowId: String) -> String? = { windowId ->
-            WindowProjectStateRegistry.get(windowId)?.selectedProject?.value?.path?.ifBlank { null }
+            WindowProjectStateRegistry
+                .get(windowId)
+                ?.selectedProject
+                ?.value
+                ?.path
+                ?.ifBlank { null }
                 ?: globalProjectPathSupplier()
         },
         activeWindowIdSupplier: () -> String? = { WindowFocusManager.resolveActionableWindowId() },
@@ -128,29 +138,8 @@ object WorkspaceSnapshotCollector {
             }
 
             for ((windowId, splitState) in candidateWindows) {
-                // Priority A: The active panel's active tab
-                val activePanel =
-                    splitState.getPanel(splitState.activePanelId) ?: splitState.getAllPanels().firstOrNull()
-                val activeTab = activePanel?.tabsComponent?.tabsState?.value?.activeTab
-                if (activeTab != null && categorizeTab(activeTab.typeId.typeId) == "editor") {
-                    val filePath = extractFilePath(activeTab)
-                    if (filePath != null) {
-                        val projPath = projectPathResolver(windowId) ?: globalProjectPathSupplier()
-                        return toActiveEditorFileSnapshot(filePath, projPath)
-                    }
-                }
-
-                // Priority B: An active tab in any other panel of this window's active workspace
-                val panelEditorTab =
-                    splitState.getAllPanels().asSequence()
-                        .mapNotNull { it.tabsComponent.tabsState.value.activeTab }
-                        .firstOrNull { categorizeTab(it.typeId.typeId) == "editor" }
-                if (panelEditorTab != null) {
-                    val filePath = extractFilePath(panelEditorTab)
-                    if (filePath != null) {
-                        val projPath = projectPathResolver(windowId) ?: globalProjectPathSupplier()
-                        return toActiveEditorFileSnapshot(filePath, projPath)
-                    }
+                findEditorInSplitState(splitState, windowId, projectPathResolver, globalProjectPathSupplier)?.let {
+                    return it
                 }
             }
             return null
@@ -176,6 +165,47 @@ object WorkspaceSnapshotCollector {
                 toActiveEditorFileSnapshot(path, projPath)
             }
         }
+    }
+
+    @Suppress("ReturnCount")
+    private fun findEditorInSplitState(
+        splitState: ai.rever.boss.components.window_panel.SplitViewState,
+        windowId: String,
+        projectPathResolver: (windowId: String) -> String?,
+        globalProjectPathSupplier: () -> String?,
+    ): ActiveEditorFileSnapshot? {
+        // Priority A: The active panel's active tab
+        val activePanel =
+            splitState.getPanel(splitState.activePanelId) ?: splitState.getAllPanels().firstOrNull()
+        val activeTab =
+            activePanel
+                ?.tabsComponent
+                ?.tabsState
+                ?.value
+                ?.activeTab
+        if (activeTab != null && categorizeTab(activeTab.typeId.typeId) == "editor") {
+            val filePath = extractFilePath(activeTab)
+            if (filePath != null) {
+                val projPath = projectPathResolver(windowId) ?: globalProjectPathSupplier()
+                return toActiveEditorFileSnapshot(filePath, projPath)
+            }
+        }
+
+        // Priority B: An active tab in any other panel of this window's active workspace
+        val panelEditorTab =
+            splitState
+                .getAllPanels()
+                .asSequence()
+                .mapNotNull { it.tabsComponent.tabsState.value.activeTab }
+                .firstOrNull { categorizeTab(it.typeId.typeId) == "editor" }
+        if (panelEditorTab != null) {
+            val filePath = extractFilePath(panelEditorTab)
+            if (filePath != null) {
+                val projPath = projectPathResolver(windowId) ?: globalProjectPathSupplier()
+                return toActiveEditorFileSnapshot(filePath, projPath)
+            }
+        }
+        return null
     }
 
     private fun toActiveEditorFileSnapshot(
@@ -252,9 +282,10 @@ object WorkspaceSnapshotCollector {
         clazz: Class<*>,
         methodName: String,
     ): Method? =
-        methodCache.computeIfAbsent(clazz to methodName) {
-            Optional.ofNullable(runCatching { clazz.getMethod(methodName) }.getOrNull())
-        }.orElse(null)
+        methodCache
+            .computeIfAbsent(clazz to methodName) {
+                Optional.ofNullable(runCatching { clazz.getMethod(methodName) }.getOrNull())
+            }.orElse(null)
 
     @Suppress("ComplexCondition")
     internal fun computeSafeRelativePath(
