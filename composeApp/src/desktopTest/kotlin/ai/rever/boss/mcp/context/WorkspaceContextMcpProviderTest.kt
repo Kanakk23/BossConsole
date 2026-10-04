@@ -3,12 +3,12 @@ package ai.rever.boss.mcp.context
 import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
 import ai.rever.boss.components.window_panel.SplitViewState
 import ai.rever.boss.components.window_panel.SplitViewStateRegistry
-import ai.rever.boss.plugin.api.TabRegistry
-import ai.rever.boss.plugin.api.TabComponentWithUI
 import ai.rever.boss.mcp.McpMutatingToolCatalog
 import ai.rever.boss.plugin.api.McpToolArgs
+import ai.rever.boss.plugin.api.TabComponentWithUI
 import ai.rever.boss.plugin.api.TabIcon
 import ai.rever.boss.plugin.api.TabInfo
+import ai.rever.boss.plugin.api.TabRegistry
 import ai.rever.boss.plugin.api.TabTypeId
 import ai.rever.boss.plugin.api.TabTypeInfo
 import ai.rever.boss.plugin.tab.codeeditor.CodeEditorTabType

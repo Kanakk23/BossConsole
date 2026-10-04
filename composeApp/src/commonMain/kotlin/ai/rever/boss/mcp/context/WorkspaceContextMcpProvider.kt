@@ -28,7 +28,12 @@ import kotlinx.serialization.json.Json
  */
 class WorkspaceContextMcpProvider(
     private val projectPathResolver: (windowId: String) -> String? = { windowId ->
-        WindowProjectStateRegistry.get(windowId)?.selectedProject?.value?.path?.ifBlank { null }
+        WindowProjectStateRegistry
+            .get(windowId)
+            ?.selectedProject
+            ?.value
+            ?.path
+            ?.ifBlank { null }
             ?: GitService.getCurrentProjectPath()
     },
     private val activeWindowIdSupplier: () -> String? = { WindowFocusManager.resolveActionableWindowId() },
