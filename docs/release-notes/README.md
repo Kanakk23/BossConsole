@@ -12,6 +12,7 @@ This directory contains detailed release notes for each version of BOSS.
 <!-- RELEASE_INDEX_START -->
 | Version | Date | Summary |
 |---------|------|---------|
+| [v9.5.38](v9.5.38.md) | 2026-10-05 | Compatible plugin updates install automatically once their views close, with per-plugin opt-outs (#1812). The remaining macOS startup crash is fixed by loading the browser toolkit before the JVM starts its threads (#1815). |
 | [v9.5.37](v9.5.37.md) | 2026-10-04 | BossConsole sharing starts automatically after sign-in, and remote viewers get fullscreen and live cursor shapes (#1813). A rare macOS startup crash is fixed (#1780), and fullscreen browser pages take keyboard input again (#1814). |
 | [v9.5.36](v9.5.36.md) | 2026-10-04 | Automatic Updates download new releases in the background and install them after you quit (#1807). Window sharing streams continuously at up to 60 FPS with scoped remote control, and Windows and Linux X11 get native capture helpers (#1810). |
 | [v9.5.34](v9.5.34.md) | 2026-10-01 | Sign in to BOSS with Google or Apple, through the system browser with a PKCE flow (#1767). Links clicked in terminal tabs ask where to open again (#1798), and the window sharing status sits below the macOS title bar (#1782). |
