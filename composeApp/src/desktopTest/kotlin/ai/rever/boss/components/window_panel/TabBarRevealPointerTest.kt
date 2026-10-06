@@ -3,6 +3,7 @@
 package ai.rever.boss.components.window_panel
 
 import ai.rever.boss.components.window_panel.components.main_window_panels.TabBarRevealState
+import ai.rever.boss.components.window_panel.components.main_window_panels.edgeRevealTracking
 import ai.rever.boss.components.window_panel.components.main_window_panels.pointerReachesSidebarEdge
 import ai.rever.boss.components.window_panel.components.main_window_panels.pointerWithinSidebarMargin
 import ai.rever.boss.components.window_panel.components.main_window_panels.rememberTabBarRevealState
@@ -29,6 +30,14 @@ class TabBarRevealPointerTest {
         assertFalse(pointerReachesSidebarEdge(40, 100, 50, window))
         assertTrue(pointerWithinSidebarMargin(380, window, region.left + 240f))
         assertFalse(pointerWithinSidebarMargin(381, window, region.left + 240f))
+    }
+
+    @Test
+    fun `fullscreen turns the edge tracker off, as #1753 did for the hover strip`() {
+        assertTrue(edgeRevealTracking(railShown = true, hoverExpand = true, fullscreen = false))
+        assertFalse(edgeRevealTracking(railShown = true, hoverExpand = true, fullscreen = true))
+        assertFalse(edgeRevealTracking(railShown = false, hoverExpand = true, fullscreen = false))
+        assertFalse(edgeRevealTracking(railShown = true, hoverExpand = false, fullscreen = false))
     }
 
     @Test

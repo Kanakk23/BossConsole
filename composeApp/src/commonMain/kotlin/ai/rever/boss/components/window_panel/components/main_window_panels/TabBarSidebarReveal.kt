@@ -41,6 +41,17 @@ internal fun hoverRevealTarget(
     drawerBusy: Boolean = false,
 ): Boolean = enabled && railShown && (pointerOnRail || pointerOnDrawer || drawerBusy)
 
+/**
+ * Whether the native edge tracker runs at all. Off in fullscreen, as the edge reveal has been since
+ * #1753: #1828 moved activation from the hover strip (which still checks fullscreen) to this tracker,
+ * which did not, so a fullscreen window opened the drawer whenever the pointer touched its left edge.
+ */
+internal fun edgeRevealTracking(
+    railShown: Boolean,
+    hoverExpand: Boolean,
+    fullscreen: Boolean,
+): Boolean = railShown && hoverExpand && !fullscreen
+
 /** Exact edge activation, with crossing detection for cursor movements that skip the edge. */
 internal fun pointerReachesSidebarEdge(
     x: Int,

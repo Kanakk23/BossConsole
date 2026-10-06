@@ -26,6 +26,7 @@ import ai.rever.boss.components.window_panel.components.main_window_panels.Verti
 import ai.rever.boss.components.window_panel.components.main_window_panels.WindowRevealedTabBarDrawer
 import ai.rever.boss.components.window_panel.components.main_window_panels.WindowVerticalTabBar
 import ai.rever.boss.components.window_panel.components.main_window_panels.createBossAppContext
+import ai.rever.boss.components.window_panel.components.main_window_panels.edgeRevealTracking
 import ai.rever.boss.components.window_panel.components.main_window_panels.overlayRegionInWindow
 import ai.rever.boss.components.window_panel.components.main_window_panels.paneGlyphs
 import ai.rever.boss.components.window_panel.components.main_window_panels.paneLabel
@@ -60,6 +61,7 @@ import ai.rever.boss.topofmind.ActiveTab
 import ai.rever.boss.utils.extractFileName
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
+import ai.rever.boss.window.LocalWindowFullscreen
 import ai.rever.boss.window.WindowAppearanceSettingsManager
 import ai.rever.boss.window.WindowProjectStateRegistry
 import androidx.compose.foundation.background
@@ -2708,7 +2710,7 @@ fun SplitViewPanel(
 
     TrackTabBarRevealPointer(
         state = reveal,
-        enabled = bar.railShown && bar.hoverExpand,
+        enabled = edgeRevealTracking(bar.railShown, bar.hoverExpand, LocalWindowFullscreen.current),
         region = contentRegion,
         sidebarWidth = bar.width + if (sidebarToggleRequests != null) 0.dp else tabBarRailWidth,
     )
