@@ -3,6 +3,7 @@ package ai.rever.boss.startup
 import ai.rever.boss.config.ChromiumAutoDownloader
 import ai.rever.boss.plugin.browser.ChromiumToolkitPreload
 import ai.rever.boss.plugin.browser.FluckEngine
+import ai.rever.boss.utils.ApplicationRestarter
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 
@@ -32,9 +33,9 @@ object ChromiumBootstrap {
      * Inspects the browser engine, cleans stale locks, promotes pending downloads, logs the engine
      * startup verdict and, when the engine will boot from disk, preloads the native toolkit.
      *
-     * On the Download path nothing is preloaded: the engine is not on disk yet, so JxBrowser loads
-     * the toolkit itself once the download finishes, with the app fully running. That is the one
-     * startup path still exposed to the zone-swap race below.
+     * On the Download path nothing is preloaded: the engine is not on disk yet. On a packaged macOS
+     * build [onFirstRunDownloadComplete] relaunches once it lands, so the toolkit is loaded by this
+     * preflight in the next process rather than by JxBrowser with the app fully running.
      *
      * **Call before anything creates the AWT toolkit** (`DefaultWindowIcon.install()`), and only
      * while the single-instance lock is held: pending-install promotion renames the engine directory
@@ -92,9 +93,8 @@ object ChromiumBootstrap {
         // before the pre-warm thread exists: loading it swaps the process's malloc zones, and a
         // free() on another thread during that swap is an uncatchable SIGTRAP. Same directory the engine
         // will boot from, so JxBrowser's own System.load later is a no-op. See ChromiumToolkitPreload.
-        // Boot only: on Download the engine is not on disk yet, and the boot that follows a
-        // first-run download happens once the app is running, where loading here would be no
-        // quieter than JxBrowser's own load - that path keeps the original window, knowingly.
+        // Boot only: on Download the engine is not on disk yet; onFirstRunDownloadComplete
+        // relaunches (packaged macOS) so the next process preloads here instead.
         // The preload also records what it loaded for the native agent, which repeats it before
         // the JVM starts its threads on the next launch; any other verdict clears that record.
         if (engineAction == FluckEngine.EngineStartupAction.Boot) {
@@ -104,6 +104,57 @@ object ChromiumBootstrap {
         }
 
         return ChromiumPreflight(engineAction = engineAction)
+    }
+
+    /** What [onFirstRunDownloadComplete] does once the engine is on disk. */
+    internal enum class AfterDownload {
+        /** Restart, so the new process preloads the toolkit in [preflight] before AppKit starts. */
+        Relaunch,
+
+        /** Boot the engine in this process, with AppKit running: exposed to the zone-swap race. */
+        BootInProcess,
+    }
+
+    /**
+     * Relaunch only where the race exists (macOS) and the relaunch is reliable (a packaged
+     * `BOSS.app`). Gradle runs cannot be trusted to come back, and other platforms do not swap
+     * malloc zones, so both keep booting in process.
+     */
+    internal fun afterDownloadAction(
+        isMac: Boolean,
+        canRelaunch: Boolean,
+    ): AfterDownload = if (isMac && canRelaunch) AfterDownload.Relaunch else AfterDownload.BootInProcess
+
+    /**
+     * Called when the first-run engine download has finished, while only the setup window is up.
+     *
+     * Booting here crashed the very first launch of a fresh install (9.5.39, 2026-10-05, +15.6s):
+     * JxBrowser's `Chromium Process Thread` loaded `libtoolkit` for the first time, its static
+     * initializer swapped the malloc zones, and the AppKit thread freed mid-swap from an
+     * `NSAutoFillHeuristicController` timer - `brk #0` at `libtoolkit+0x4c9f4`. No preload covers a
+     * load this late, because AppKit is already running. The relaunched process reaches [preflight]
+     * with the engine installed, takes the Boot path and preloads before AppKit, and records the
+     * manifest so the launch after that gets the native agent too. Nothing is lost by restarting:
+     * no main window, workspace or browser exists yet.
+     *
+     * [bootInProcess] is the previous behaviour, kept for the platforms that cannot relaunch.
+     */
+    fun onFirstRunDownloadComplete(bootInProcess: () -> Unit) {
+        val action =
+            afterDownloadAction(
+                isMac =
+                    System
+                        .getProperty("os.name")
+                        .orEmpty()
+                        .lowercase()
+                        .contains("mac"),
+                canRelaunch = ApplicationRestarter.canRelaunchMacBundle(),
+            )
+        logger.info(LogCategory.SYSTEM, "Browser engine downloaded", mapOf("next" to action.name))
+        when (action) {
+            AfterDownload.Relaunch -> ApplicationRestarter.restartApplication()
+            AfterDownload.BootInProcess -> bootInProcess()
+        }
     }
 
     /**

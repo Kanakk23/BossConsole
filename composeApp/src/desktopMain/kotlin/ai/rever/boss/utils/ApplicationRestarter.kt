@@ -59,6 +59,29 @@ object ApplicationRestarter {
     }
 
     /**
+     * Whether this process is a packaged macOS `BOSS.app` that [restartApplication] can bring back
+     * through LaunchServices. False for Gradle/JAR development runs, whose relaunch commands are
+     * best-effort and must not be relied on to come back.
+     */
+    fun canRelaunchMacBundle(): Boolean =
+        runCatching {
+            val isMac =
+                System
+                    .getProperty("os.name")
+                    .orEmpty()
+                    .lowercase()
+                    .contains("mac")
+            if (!isMac) return@runCatching false
+            val launcher =
+                ProcessHandle
+                    .current()
+                    .info()
+                    .command()
+                    .orElse(null)
+            detectMacAppBundle(launcher) != null
+        }.getOrDefault(false)
+
+    /**
      * Build the command that brings BOSS back up after this process exits.
      *
      * For a packaged install we must relaunch the native bundle/launcher — the old

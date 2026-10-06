@@ -580,22 +580,26 @@ fun main(args: Array<String>) {
                         ChromiumAutoDownloader.downloadChromium { progress ->
                             downloadProgress = progress
                             if (progress.isComplete) {
-                                // Download complete - create window and proceed
-                                WindowManager.createNewWindow()
-                                // The pre-warm was skipped at startup because the engine
-                                // was missing; now that it is installed, warm it so the
-                                // first tab does not pay the full boot.
-                                //
-                                // force, because it was skipped for a SECOND reason this
-                                // comment did not know about: the unforced gate wants an
-                                // existing browser profile, and a machine that has just
-                                // downloaded its engine has never had one. So this call
-                                // silently did nothing, on the one launch it was written for.
-                                runCatching {
-                                    ai.rever.boss.plugin.browser.FluckEngine
-                                        .prewarmInBackground(force = true)
+                                // Packaged macOS relaunches here instead: booting the engine
+                                // with AppKit running crashed fresh installs (see the KDoc).
+                                ChromiumBootstrap.onFirstRunDownloadComplete {
+                                    // Download complete - create window and proceed
+                                    WindowManager.createNewWindow()
+                                    // The pre-warm was skipped at startup because the engine
+                                    // was missing; now that it is installed, warm it so the
+                                    // first tab does not pay the full boot.
+                                    //
+                                    // force, because it was skipped for a SECOND reason this
+                                    // comment did not know about: the unforced gate wants an
+                                    // existing browser profile, and a machine that has just
+                                    // downloaded its engine has never had one. So this call
+                                    // silently did nothing, on the one launch it was written for.
+                                    runCatching {
+                                        ai.rever.boss.plugin.browser.FluckEngine
+                                            .prewarmInBackground(force = true)
+                                    }
+                                    isDownloadingChromium = false
                                 }
-                                isDownloadingChromium = false
                             }
                         }
                     }
@@ -631,16 +635,18 @@ fun main(args: Array<String>) {
                                         ChromiumAutoDownloader.downloadChromium { progress ->
                                             downloadProgress = progress
                                             if (progress.isComplete) {
-                                                WindowManager.createNewWindow()
-                                                // Forced for the same reason as the first-attempt
-                                                // path above: a freshly downloaded engine has no
-                                                // browser profile yet, which the unforced gate reads
-                                                // as "this machine does not use the browser".
-                                                runCatching {
-                                                    ai.rever.boss.plugin.browser.FluckEngine
-                                                        .prewarmInBackground(force = true)
+                                                ChromiumBootstrap.onFirstRunDownloadComplete {
+                                                    WindowManager.createNewWindow()
+                                                    // Forced for the same reason as the first-attempt
+                                                    // path above: a freshly downloaded engine has no
+                                                    // browser profile yet, which the unforced gate reads
+                                                    // as "this machine does not use the browser".
+                                                    runCatching {
+                                                        ai.rever.boss.plugin.browser.FluckEngine
+                                                            .prewarmInBackground(force = true)
+                                                    }
+                                                    isDownloadingChromium = false
                                                 }
-                                                isDownloadingChromium = false
                                             }
                                         }
                                     }
