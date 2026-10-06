@@ -1,5 +1,6 @@
 package ai.rever.boss.startup
 
+import ai.rever.boss.cli.CLICommandHandler
 import ai.rever.boss.config.ChromiumAutoDownloader
 import ai.rever.boss.plugin.browser.ChromiumToolkitPreload
 import ai.rever.boss.plugin.browser.FluckEngine
@@ -34,7 +35,7 @@ object ChromiumBootstrap {
      * startup verdict and, when the engine will boot from disk, preloads the native toolkit.
      *
      * On the Download path nothing is preloaded: the engine is not on disk yet. On a packaged macOS
-     * build [onFirstRunDownloadComplete] relaunches once it lands, so the toolkit is loaded by this
+     * build [onEngineDownloadComplete] relaunches once it lands, so the toolkit is loaded by this
      * preflight in the next process rather than by JxBrowser with the app fully running.
      *
      * **Call before anything creates the AWT toolkit** (`DefaultWindowIcon.install()`), and only
@@ -93,7 +94,7 @@ object ChromiumBootstrap {
         // before the pre-warm thread exists: loading it swaps the process's malloc zones, and a
         // free() on another thread during that swap is an uncatchable SIGTRAP. Same directory the engine
         // will boot from, so JxBrowser's own System.load later is a no-op. See ChromiumToolkitPreload.
-        // Boot only: on Download the engine is not on disk yet; onFirstRunDownloadComplete
+        // Boot only: on Download the engine is not on disk yet; onEngineDownloadComplete
         // relaunches (packaged macOS) so the next process preloads here instead.
         // The preload also records what it loaded for the native agent, which repeats it before
         // the JVM starts its threads on the next launch; any other verdict clears that record.
@@ -106,7 +107,7 @@ object ChromiumBootstrap {
         return ChromiumPreflight(engineAction = engineAction)
     }
 
-    /** What [onFirstRunDownloadComplete] does once the engine is on disk. */
+    /** What [onEngineDownloadComplete] does once the engine is on disk. */
     internal enum class AfterDownload {
         /** Restart, so the new process preloads the toolkit in [preflight] before AppKit starts. */
         Relaunch,
@@ -116,17 +117,18 @@ object ChromiumBootstrap {
     }
 
     /**
-     * Relaunch only where the race exists (macOS) and the relaunch is reliable (a packaged
-     * `BOSS.app`). Gradle runs cannot be trusted to come back, and other platforms do not swap
-     * malloc zones, so both keep booting in process.
+     * Relaunch only where the race exists and the relaunch is reliable: a packaged macOS
+     * `BOSS.app` ([ApplicationRestarter.canRelaunchMacBundle] is false everywhere else). Gradle
+     * runs cannot be trusted to come back, and other platforms do not swap malloc zones, so both
+     * keep booting in process.
      */
-    internal fun afterDownloadAction(
-        isMac: Boolean,
-        canRelaunch: Boolean,
-    ): AfterDownload = if (isMac && canRelaunch) AfterDownload.Relaunch else AfterDownload.BootInProcess
+    internal fun afterDownloadAction(canRelaunch: Boolean): AfterDownload =
+        if (canRelaunch) AfterDownload.Relaunch else AfterDownload.BootInProcess
 
     /**
-     * Called when the first-run engine download has finished, while only the setup window is up.
+     * Called when the engine download the setup window ran has finished, while only that window is
+     * up: on a fresh install, and equally after an app update or engine change that needed a new
+     * engine, or a damaged cache.
      *
      * Booting here crashed the very first launch of a fresh install (9.5.39, 2026-10-05, +15.6s):
      * JxBrowser's `Chromium Process Thread` loaded `libtoolkit` for the first time, its static
@@ -134,27 +136,44 @@ object ChromiumBootstrap {
      * `NSAutoFillHeuristicController` timer - `brk #0` at `libtoolkit+0x4c9f4`. No preload covers a
      * load this late, because AppKit is already running. The relaunched process reaches [preflight]
      * with the engine installed, takes the Boot path and preloads before AppKit, and records the
-     * manifest so the launch after that gets the native agent too. Nothing is lost by restarting:
-     * no main window, workspace or browser exists yet.
+     * manifest so the launch after that gets the native agent too.
      *
-     * [bootInProcess] is the previous behaviour, kept for the platforms that cannot relaunch.
+     * No window, workspace or browser exists yet, but the requests BOSS was opened with (a
+     * `boss://` link, a file) are queued in memory until the main window starts the CLI handler;
+     * [RelaunchHandoff] carries them, and the forced pre-warm, to the next process. If the relauncher
+     * cannot even be started, the handoff is withdrawn, the requests go back on the queue and the
+     * engine boots here after all: the race is lost only sometimes, and quitting with nothing coming
+     * back is worse.
+     *
+     * [onRelaunching] runs just before the restart so the setup window can say so; [bootInProcess]
+     * is the previous behaviour.
      */
-    fun onFirstRunDownloadComplete(bootInProcess: () -> Unit) {
-        val action =
-            afterDownloadAction(
-                isMac =
-                    System
-                        .getProperty("os.name")
-                        .orEmpty()
-                        .lowercase()
-                        .contains("mac"),
-                canRelaunch = ApplicationRestarter.canRelaunchMacBundle(),
-            )
+    fun onEngineDownloadComplete(
+        onRelaunching: () -> Unit,
+        bootInProcess: () -> Unit,
+    ) {
+        val action = afterDownloadAction(canRelaunch = ApplicationRestarter.canRelaunchMacBundle())
         logger.info(LogCategory.SYSTEM, "Browser engine downloaded", mapOf("next" to action.name))
-        when (action) {
-            AfterDownload.Relaunch -> ApplicationRestarter.restartApplication()
-            AfterDownload.BootInProcess -> bootInProcess()
+        if (action == AfterDownload.BootInProcess) {
+            bootInProcess()
+            return
         }
+        val cli = CLICommandHandler.getInstance()
+        val pending = cli.takeQueuedForRelaunch()
+        if (!RelaunchHandoff.write(pending, forcePrewarm = true)) {
+            // Restarting now would drop those requests; keep them and boot here instead.
+            pending.forEach(cli::queueCommand)
+            bootInProcess()
+            return
+        }
+        onRelaunching()
+        ApplicationRestarter.restartApplication(
+            onRelaunchNotStarted = {
+                RelaunchHandoff.discard()
+                pending.forEach(cli::queueCommand)
+                bootInProcess()
+            },
+        )
     }
 
     /**
@@ -162,13 +181,19 @@ object ChromiumBootstrap {
      * The engine's existing pre-warm path performs its own usability checks.
      */
     @Suppress("TooGenericExceptionCaught")
-    internal fun prepare(preflight: ChromiumPreflight): ChromiumPreparation {
+    internal fun prepare(
+        preflight: ChromiumPreflight,
+        forcePrewarm: Boolean = false,
+    ): ChromiumPreparation {
         val engineLabel = "BOSS Browser Engine ${ChromiumAutoDownloader.effectiveVersion}"
         val needsDownload = preflight.engineAction == FluckEngine.EngineStartupAction.Download
 
         // Pre-warm the browser engine off the UI thread so the first browser tab opens quickly
         try {
-            FluckEngine.prewarmInBackground()
+            // Forced after an engine-download relaunch: the in-process path it replaces forced the
+            // pre-warm, because a freshly downloaded engine has no browser profile and the
+            // unforced gate reads that as "this machine does not use the browser".
+            FluckEngine.prewarmInBackground(force = forcePrewarm)
         } catch (e: Exception) {
             logger.warn(LogCategory.SYSTEM, "Browser engine pre-warm failed to start", error = e)
         }

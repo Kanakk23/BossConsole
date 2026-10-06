@@ -7,18 +7,12 @@ import kotlin.test.assertEquals
 
 class ChromiumBootstrapAfterDownloadTest {
     @Test
-    fun packagedMacRelaunchesSoTheToolkitLoadsBeforeAppKit() {
-        assertEquals(AfterDownload.Relaunch, afterDownloadAction(isMac = true, canRelaunch = true))
+    fun relaunchesWhenThePackagedBundleCanBeReopened() {
+        assertEquals(AfterDownload.Relaunch, afterDownloadAction(canRelaunch = true))
     }
 
     @Test
-    fun macWithoutAReliableRelaunchBootsInProcess() {
-        assertEquals(AfterDownload.BootInProcess, afterDownloadAction(isMac = true, canRelaunch = false))
-    }
-
-    @Test
-    fun otherPlatformsBootInProcess() {
-        assertEquals(AfterDownload.BootInProcess, afterDownloadAction(isMac = false, canRelaunch = true))
-        assertEquals(AfterDownload.BootInProcess, afterDownloadAction(isMac = false, canRelaunch = false))
+    fun bootsInProcessWhenItCannot() {
+        assertEquals(AfterDownload.BootInProcess, afterDownloadAction(canRelaunch = false))
     }
 }
