@@ -532,40 +532,61 @@ jobs:
         run: supabase stop --no-backup || true
 
   build-summary:
-    if: ${{ !cancelled() }}
+    if: always()
     needs: [version-check, script-tests, windows-script-tests, build-test, code-quality, compatibility-test, database-tests, boss-ai-tests]
     runs-on: ubuntu-latest
 
     steps:
       - name: 📊 Build Summary
+        if: always()
+        env:
+          VERSION_RESULT: ${{ needs.version-check.result }}
+          SCRIPT_RESULT: ${{ needs.script-tests.result }}
+          WINDOWS_RESULT: ${{ needs.windows-script-tests.result }}
+          BUILD_RESULT: ${{ needs.build-test.result }}
+          QUALITY_RESULT: ${{ needs.code-quality.result }}
+          COMPATIBILITY_RESULT: ${{ needs.compatibility-test.result }}
+          DATABASE_RESULT: ${{ needs.database-tests.result }}
+          AI_RESULT: ${{ needs.boss-ai-tests.result }}
         run: |
-          echo "## 🔨 Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version**: ${{ needs.version-check.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Build Number**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Job status
-          echo "### 📋 Job Results" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version Check**: ${{ needs.version-check.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Shell Script Tests**: ${{ needs.script-tests.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Windows Launcher Tests**: ${{ needs.windows-script-tests.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Build & Test**: ${{ needs.build-test.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Code Quality**: ${{ needs.code-quality.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Compatibility Test**: ${{ needs.compatibility-test.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Database (pgTAP)**: ${{ needs.database-tests.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **BOSS AI contracts**: ${{ needs.boss-ai-tests.result }}" >> $GITHUB_STEP_SUMMARY
+          set -u
 
-          # Overall status
-          if [[ "${{ needs.version-check.result }}" == "success" && "${{ needs.script-tests.result }}" == "success" && "${{ needs.windows-script-tests.result }}" == "success" && "${{ needs.build-test.result }}" == "success" && "${{ needs.code-quality.result }}" == "success" && "${{ needs.compatibility-test.result }}" == "success" && "${{ needs.database-tests.result }}" == "success" && "${{ needs.boss-ai-tests.result }}" == "success" ]]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "🎉 **Overall Status**: ✅ SUCCESS" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "❌ **Overall Status**: FAILED" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## 🔨 Build Summary"
+            echo ""
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "| Version Check | ${VERSION_RESULT} |"
+            echo "| Shell Script Tests | ${SCRIPT_RESULT} |"
+            echo "| Windows Launcher Tests | ${WINDOWS_RESULT} |"
+            echo "| Build & Test | ${BUILD_RESULT} |"
+            echo "| Code Quality | ${QUALITY_RESULT} |"
+            echo "| Compatibility Test | ${COMPATIBILITY_RESULT} |"
+            echo "| Database | ${DATABASE_RESULT} |"
+            echo "| BOSS AI Contracts | ${AI_RESULT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          failed=0
+          for result in \
+            "$VERSION_RESULT" \
+            "$SCRIPT_RESULT" \
+            "$WINDOWS_RESULT" \
+            "$BUILD_RESULT" \
+            "$QUALITY_RESULT" \
+            "$COMPATIBILITY_RESULT" \
+            "$DATABASE_RESULT" \
+            "$AI_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              failed=1
+            fi
+          done
+
+          if [[ "$failed" -ne 0 ]]; then
+            echo "One or more required jobs failed or were skipped."
             exit 1
           fi
+
+          echo "🎉 Overall Status: SUCCESS" >> "$GITHUB_STEP_SUMMARY" 
 
 # Temporarily disabled for debugging
   # notify-build:
