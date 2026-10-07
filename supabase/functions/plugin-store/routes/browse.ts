@@ -110,8 +110,10 @@ browse.openapi(listRoute, async (ctx) => {
     // PRIVATE when the answer depends on who asked. The same URL now returns different rows per
     // reader, so a shared cache holding one reader's copy would serve somebody else's
     // organisation plugins to the next caller. The other follow-up 20260803000000 asked for.
+    // Note: The handler decides Cache-Control from the resolved viewer, while catalogueCachePolicy
+    // middleware guards header presence (Authorization or X-API-Key) in its finally block.
+    // For expired/malformed credentials, the middleware safely falls back to private, no-store.
     ctx.header("Cache-Control", viewer ? PRIVATE_NO_STORE : PUBLIC_CATALOGUE_CACHE)
-    ctx.header("Vary", "Authorization, X-API-Key")
 
     return ctx.json({
       plugins: result.plugins,
@@ -293,7 +295,6 @@ browse.openapi(getPluginRoute, async (ctx) => {
     // same header as /list: a shared cache holding one reader's copy would
     // serve somebody else's organisation plugins to the next caller.
     ctx.header("Cache-Control", viewer ? PRIVATE_NO_STORE : PUBLIC_CATALOGUE_CACHE)
-    ctx.header("Vary", "Authorization, X-API-Key")
 
     return ctx.json({
       id: plugin.id,

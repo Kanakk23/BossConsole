@@ -14,6 +14,11 @@
  *   An authenticated catalogue response (JWT or API key present), or any
  *   error response (4xx, 5xx), uses the private policy:
  *     `Cache-Control: private, no-store`
+ *
+ * - Deliberately cacheable caller-independent routes: `/tags/popular` and
+ *   `/:pluginId/ratings` return caller-independent data for anonymous requests
+ *   and do not set `private, no-store` on anonymous 200s; they are marked
+ *   `private, no-store` only when caller credentials are provided or on error.
  */
 
 import type { MiddlewareHandler } from "hono"
@@ -71,6 +76,9 @@ export function privateNoStore(): MiddlewareHandler<{ Variables: PluginStoreCont
  *
  * Authenticated requests, validation failures, rate limits, 404s, and server
  * errors are marked `Cache-Control: private, no-store`.
+ *
+ * Appends `Vary: Authorization, X-API-Key` without clobbering any pre-existing
+ * `Vary: Origin` set by CORS middleware.
  */
 export function catalogueCachePolicy(): MiddlewareHandler<{ Variables: PluginStoreContext }> {
   return async (ctx, next) => {
@@ -82,6 +90,13 @@ export function catalogueCachePolicy(): MiddlewareHandler<{ Variables: PluginSto
 
       if (hasAuth || isError) {
         ctx.res.headers.set("Cache-Control", PRIVATE_NO_STORE)
+      }
+
+      const existingVary = ctx.res.headers.get("Vary")
+      if (!existingVary) {
+        ctx.res.headers.set("Vary", "Authorization, X-API-Key")
+      } else if (!existingVary.includes("Authorization")) {
+        ctx.res.headers.append("Vary", "Authorization, X-API-Key")
       }
     }
   }

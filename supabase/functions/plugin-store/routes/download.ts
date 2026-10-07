@@ -12,7 +12,7 @@ import { clientKey, rateLimit } from "../utils/rate-limit.ts"
 import { isAllowedExternalJarUrl } from "../services/github.ts"
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { newRouter } from "../utils/router.ts"
-import { privateNoStore } from "../utils/cache.ts"
+import { privateNoStore, PRIVATE_NO_STORE } from "../utils/cache.ts"
 
 const download = newRouter()
 download.use("/:pluginId/download", privateNoStore())
@@ -247,7 +247,7 @@ download.openapi(downloadLatestRoute, async (ctx) => {
 
     // Private: the body can describe an org plugin and holds a signed URL, but the path names no
     // caller, so a shared cache would hand it to the next anonymous request.
-    ctx.header('Cache-Control', 'private, no-store')
+    ctx.header('Cache-Control', PRIVATE_NO_STORE)
     return ctx.json({
       downloadUrl,
       sha256: version.sha256,
@@ -414,7 +414,7 @@ download.openapi(downloadVersionRoute, async (ctx) => {
 
     // Private: the body can describe an org plugin and holds a signed URL, but the path names no
     // caller, so a shared cache would hand it to the next anonymous request.
-    ctx.header('Cache-Control', 'private, no-store')
+    ctx.header('Cache-Control', PRIVATE_NO_STORE)
     return ctx.json({
       downloadUrl,
       sha256: version.sha256,

@@ -22,11 +22,23 @@ import admin from "../routes/admin.ts"
 import rating from "../routes/rating.ts"
 import publish from "../routes/publish.ts"
 import { resetRateLimits } from "../utils/rate-limit.ts"
+import { createApp } from "../index.ts"
 
 const TEST_USER_ID = "11111111-1111-1111-1111-111111111111"
 const PLUGIN_ID = "com.example.test-plugin"
 const PLUGIN_UUID = "22222222-2222-2222-2222-222222222222"
 const VERSION_UUID = "33333333-3333-3333-3333-333333333333"
+
+function assertVaryTokens(varyHeader: string | null, ...expectedTokens: string[]) {
+  assert(varyHeader !== null, "Expected Vary header to be present")
+  const tokens = varyHeader.split(",").map((t) => t.trim().toLowerCase())
+  for (const expected of expectedTokens) {
+    assert(
+      tokens.includes(expected.toLowerCase()),
+      `Expected Vary header "${varyHeader}" to include token "${expected}"`,
+    )
+  }
+}
 
 function jwt(payload: Record<string, unknown>): string {
   const b64 = (o: unknown) =>
@@ -394,7 +406,7 @@ Deno.test("browse /list: genuinely anonymous public catalogue retains Cache-Cont
   const res = await app.request("/list")
   assertEquals(res.status, 200)
   assertEquals(res.headers.get("Cache-Control"), "public, max-age=60")
-  assertEquals(res.headers.get("Vary"), "Authorization, X-API-Key")
+  assertVaryTokens(res.headers.get("Vary"), "Authorization", "X-API-Key")
 })
 
 Deno.test("browse /:pluginId: genuinely anonymous public catalogue retains Cache-Control: public, max-age=60", async () => {
@@ -404,7 +416,7 @@ Deno.test("browse /:pluginId: genuinely anonymous public catalogue retains Cache
   const res = await app.request(`/${PLUGIN_ID}`)
   assertEquals(res.status, 200)
   assertEquals(res.headers.get("Cache-Control"), "public, max-age=60")
-  assertEquals(res.headers.get("Vary"), "Authorization, X-API-Key")
+  assertVaryTokens(res.headers.get("Vary"), "Authorization", "X-API-Key")
 })
 
 Deno.test("browse /list: authenticated catalogue response uses Cache-Control: private, no-store", async () => {
@@ -417,7 +429,7 @@ Deno.test("browse /list: authenticated catalogue response uses Cache-Control: pr
   })
   assertEquals(res.status, 200)
   assertEquals(res.headers.get("Cache-Control"), "private, no-store")
-  assertEquals(res.headers.get("Vary"), "Authorization, X-API-Key")
+  assertVaryTokens(res.headers.get("Vary"), "Authorization", "X-API-Key")
 })
 
 Deno.test("browse /:pluginId: authenticated catalogue response uses Cache-Control: private, no-store", async () => {
@@ -430,7 +442,7 @@ Deno.test("browse /:pluginId: authenticated catalogue response uses Cache-Contro
   })
   assertEquals(res.status, 200)
   assertEquals(res.headers.get("Cache-Control"), "private, no-store")
-  assertEquals(res.headers.get("Vary"), "Authorization, X-API-Key")
+  assertVaryTokens(res.headers.get("Vary"), "Authorization", "X-API-Key")
 })
 
 Deno.test("browse /:pluginId: authenticated not found (404) uses Cache-Control: private, no-store", async () => {
@@ -899,7 +911,7 @@ Deno.test("browse /list: x-api-key authenticated caller receives Cache-Control: 
   })
   assertEquals(res.status, 200)
   assertEquals(res.headers.get("Cache-Control"), "private, no-store")
-  assertEquals(res.headers.get("Vary"), "Authorization, X-API-Key")
+  assertVaryTokens(res.headers.get("Vary"), "Authorization", "X-API-Key")
 })
 
 Deno.test("browse /:pluginId: x-api-key authenticated caller receives Cache-Control: private, no-store", async () => {
@@ -911,63 +923,114 @@ Deno.test("browse /:pluginId: x-api-key authenticated caller receives Cache-Cont
   })
   assertEquals(res.status, 200)
   assertEquals(res.headers.get("Cache-Control"), "private, no-store")
-  assertEquals(res.headers.get("Vary"), "Authorization, X-API-Key")
+  assertVaryTokens(res.headers.get("Vary"), "Authorization", "X-API-Key")
 })
 
 Deno.test("composed app: anonymous catalogue serves public cache with Vary", async () => {
-  const app = new OpenAPIHono<{ Variables: PluginStoreContext }>()
-  app.use("*", async (ctx, next) => {
-    ctx.set("supabase", createBrowseStub())
-    await next()
-  })
-  app.route("/", admin)
-  app.route("/", apiKeys)
-  app.route("/version", publish)
-  app.route("/", publish)
-  app.route("/", download)
-  app.route("/", rating)
-  app.route("/", browse)
+  const app = createApp(createBrowseStub())
 
-  const res = await app.request("/list")
+  const res = await app.request("/plugin-store/list")
   assertEquals(res.status, 200)
   assertEquals(res.headers.get("Cache-Control"), "public, max-age=60")
-  assertEquals(res.headers.get("Vary"), "Authorization, X-API-Key")
+  assertVaryTokens(res.headers.get("Vary"), "Authorization", "X-API-Key")
 
-  const pluginRes = await app.request(`/${PLUGIN_ID}`)
+  const pluginRes = await app.request(`/plugin-store/${PLUGIN_ID}`)
   assertEquals(pluginRes.status, 200)
   assertEquals(pluginRes.headers.get("Cache-Control"), "public, max-age=60")
-  assertEquals(pluginRes.headers.get("Vary"), "Authorization, X-API-Key")
+  assertVaryTokens(pluginRes.headers.get("Vary"), "Authorization", "X-API-Key")
 
-  const tagsRes = await app.request("/tags/popular")
+  const tagsRes = await app.request("/plugin-store/tags/popular")
   assertEquals(tagsRes.status, 200)
   assertEquals(tagsRes.headers.get("Cache-Control"), null)
 })
 
-Deno.test("composed app: authenticated caller on catalogue receives private, no-store", async () => {
-  const app = new OpenAPIHono<{ Variables: PluginStoreContext }>()
-  app.use("*", async (ctx, next) => {
-    ctx.set("supabase", createBrowseStub())
-    await next()
-  })
-  app.route("/", admin)
-  app.route("/", apiKeys)
-  app.route("/version", publish)
-  app.route("/", publish)
-  app.route("/", download)
-  app.route("/", rating)
-  app.route("/", browse)
+Deno.test("composed app: anonymous catalogue with CORS request preserves Origin and Authorization in Vary", async () => {
+  const app = createApp(createBrowseStub())
 
-  const res = await app.request("/list", {
+  const res = await app.request("/plugin-store/list", {
+    headers: { Origin: "https://risaboss.com" },
+  })
+  assertEquals(res.status, 200)
+  assertEquals(res.headers.get("Access-Control-Allow-Origin"), "https://risaboss.com")
+  assertEquals(res.headers.get("Cache-Control"), "public, max-age=60")
+  assertVaryTokens(res.headers.get("Vary"), "Origin", "Authorization", "X-API-Key")
+})
+
+Deno.test("composed app: authenticated caller on catalogue receives private, no-store", async () => {
+  const app = createApp(createBrowseStub())
+
+  const res = await app.request("/plugin-store/list", {
     headers: { Authorization: `Bearer ${userToken()}` },
   })
   assertEquals(res.status, 200)
   assertEquals(res.headers.get("Cache-Control"), "private, no-store")
-  assertEquals(res.headers.get("Vary"), "Authorization, X-API-Key")
+  assertVaryTokens(res.headers.get("Vary"), "Authorization", "X-API-Key")
 
-  const pluginRes = await app.request(`/${PLUGIN_ID}`, {
+  const pluginRes = await app.request(`/plugin-store/${PLUGIN_ID}`, {
     headers: { "X-API-Key": "boss_live_testapikey123" },
   })
   assertEquals(pluginRes.status, 200)
   assertEquals(pluginRes.headers.get("Cache-Control"), "private, no-store")
-  assertEquals(pluginRes.headers.get("Vary"), "Authorization, X-API-Key")
+  assertVaryTokens(pluginRes.headers.get("Vary"), "Authorization", "X-API-Key")
+})
+
+Deno.test("composed app: POST /github unauthorized returns 401 with private, no-store", async () => {
+  const app = createApp(createBrowseStub())
+
+  const res = await app.request("/plugin-store/github", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      githubUrl: "https://github.com/example/test-plugin",
+    }),
+  })
+  assertEquals(res.status, 401)
+  assertEquals(res.headers.get("Cache-Control"), "private, no-store")
+})
+
+Deno.test("composed app: POST /github/metadata unauthorized returns 401 with private, no-store", async () => {
+  const app = createApp(createBrowseStub())
+
+  const res = await app.request("/plugin-store/github/metadata", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      githubUrl: "https://github.com/example/test-plugin",
+      sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    }),
+  })
+  assertEquals(res.status, 401)
+  assertEquals(res.headers.get("Cache-Control"), "private, no-store")
+})
+
+Deno.test("composed app: POST /version/finalize unauthorized returns 401 with private, no-store", async () => {
+  const app = createApp(createBrowseStub())
+
+  const res = await app.request("/plugin-store/version/finalize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      versionId: VERSION_UUID,
+      sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      jarSize: 1024,
+    }),
+  })
+  assertEquals(res.status, 401)
+  assertEquals(res.headers.get("Cache-Control"), "private, no-store")
+})
+
+Deno.test("composed app: health check returns 200 with private, no-store", async () => {
+  const app = createApp(createBrowseStub())
+
+  const res = await app.request("/plugin-store/health")
+  assertEquals(res.status, 200)
+  assertEquals(res.headers.get("Cache-Control"), "private, no-store")
+})
+
+Deno.test("composed app: unmatched route returns 404 with private, no-store", async () => {
+  const app = createApp(createBrowseStub({ hasPlugin: false }))
+
+  const res = await app.request("/plugin-store/nonexistent/nested/path")
+  assertEquals(res.status, 404)
+  assertEquals(res.headers.get("Cache-Control"), "private, no-store")
 })
