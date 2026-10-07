@@ -89,5 +89,4 @@ private fun logWriteFailure(
         "chars" to content.length,
         "error" to (error::class.simpleName ?: "unknown"),
     ),
-    error,
 )

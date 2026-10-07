@@ -12,6 +12,7 @@ import java.nio.file.attribute.AclEntry
 import java.nio.file.attribute.AclEntryPermission
 import java.nio.file.attribute.AclEntryType
 import java.nio.file.attribute.AclFileAttributeView
+import java.nio.file.attribute.DosFileAttributeView
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.EnumSet
 import java.util.concurrent.CountDownLatch
@@ -166,7 +167,14 @@ class EditorFileWriterTest {
         val permissions = PosixFilePermissions.fromString("rwx------")
         Files.setPosixFilePermissions(target, permissions)
 
-        EditorFileWriter().write(target.toString(), "new")
+        EditorFileWriter { temporary, text ->
+            assertEquals(
+                permissions,
+                Files.getPosixFilePermissions(temporary.toPath()),
+                "Access permissions must be applied before any content is staged",
+            )
+            temporary.writeText(text)
+        }.write(target.toString(), "new")
 
         assertEquals(permissions, Files.getPosixFilePermissions(target))
     }
@@ -200,10 +208,97 @@ class EditorFileWriterTest {
         acl.acl = listOf(ownerOnly)
         val expected = acl.acl
 
-        EditorFileWriter().write(target.toString(), "new")
+        EditorFileWriter { temporary, text ->
+            val stagedAcl = Files.getFileAttributeView(temporary.toPath(), AclFileAttributeView::class.java)
+            assertEquals(expected, stagedAcl.acl, "ACL must precede content writing")
+            assertEquals(Files.getOwner(target), stagedAcl.owner)
+            temporary.writeText(text)
+        }.write(target.toString(), "new")
 
         assertEquals(expected, Files.getFileAttributeView(target, AclFileAttributeView::class.java).acl)
         assertEquals("new", Files.readString(target))
+    }
+
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    fun `DOS visibility survives and edited files are marked for incremental backup`() {
+        val target = Files.writeString(directory.resolve("dos-flags.txt"), "original")
+        val attributes = Files.getFileAttributeView(target, DosFileAttributeView::class.java)
+        attributes.setHidden(true)
+        attributes.setSystem(true)
+        attributes.setArchive(false)
+
+        EditorFileWriter().write(target.toString(), "edited")
+
+        val result = attributes.readAttributes()
+        assertTrue(result.isHidden)
+        assertTrue(result.isSystem)
+        assertFalse(result.isReadOnly)
+        assertTrue(result.isArchive)
+        assertEquals("edited", Files.readString(target))
+    }
+
+    @Test
+    fun `fatal write errors cannot be downgraded by cleanup stack exhaustion`() {
+        val target = Files.writeString(directory.resolve("fatal.txt"), "original")
+        val failures =
+            listOf(
+                OutOfMemoryError("heap"),
+                NoClassDefFoundError("linkage"),
+                ThreadDeath(),
+                AssertionError("assertion"),
+            )
+        for (primary in failures) {
+            val secondary = StackOverflowError("cleanup stack exhaustion")
+            val writer = EditorFileWriter(cleanup = { throw secondary }) { _, _ -> throw primary }
+
+            val actual =
+                kotlin.test.assertFails {
+                    guardedWrite(target.toString(), "replacement", reportFailure = { _, _, _ -> }) { file, content ->
+                        writer.write(file.path, content)
+                    }
+                }
+
+            kotlin.test.assertSame(primary, actual)
+            kotlin.test.assertSame(secondary, actual.suppressed.single())
+            assertEquals("original", Files.readString(target))
+        }
+    }
+
+    @Test
+    fun `fatal cleanup is not swallowed after IO failure or contained stack exhaustion`() {
+        val target = Files.writeString(directory.resolve("fatal-cleanup.txt"), "original")
+        for (primary in listOf(IOException("disk full"), StackOverflowError("write stack"))) {
+            val fatal = OutOfMemoryError("cleanup heap exhaustion")
+            val writer = EditorFileWriter(cleanup = { throw fatal }) { _, _ -> throw primary }
+
+            val actual =
+                assertFailsWith<OutOfMemoryError> {
+                    guardedWrite(target.toString(), "replacement", reportFailure = { _, _, _ -> }) { file, content ->
+                        writer.write(file.path, content)
+                    }
+                }
+
+            kotlin.test.assertSame(fatal, actual)
+            assertEquals("original", Files.readString(target))
+        }
+    }
+
+    @Test
+    fun `a reused fatal error in cleanup cannot cause a containable self suppression error`() {
+        val target = directory.resolve("fatal-shared.txt")
+        val fatal = OutOfMemoryError("same failure")
+        val writer = EditorFileWriter(cleanup = { throw fatal }) { _, _ -> throw fatal }
+
+        val actual =
+            assertFailsWith<OutOfMemoryError> {
+                guardedWrite(target.toString(), "replacement", reportFailure = { _, _, _ -> }) { file, content ->
+                    writer.write(file.path, content)
+                }
+            }
+
+        kotlin.test.assertSame(fatal, actual)
+        assertFalse(Files.exists(target))
     }
 
     @Test

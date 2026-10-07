@@ -9,6 +9,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.AclFileAttributeView
 import java.nio.file.attribute.DosFileAttributeView
+import java.nio.file.attribute.DosFileAttributes
 import java.nio.file.attribute.FileAttributeView
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFileAttributes
@@ -22,7 +23,10 @@ private typealias OwnershipCopier = (Path, PosixFileAttributeView, PosixFileAttr
  * atomic replacement; unsupported filesystems report failure without an in-place retry.
  * Power loss may lose the rename; parent-directory durability is not guaranteed.
  * Process termination may leave a sibling staging file. No automatic sweep deletes these.
- * Preserves nine POSIX rwx bits, ACLs and DOS flags; owner/group are best-effort.
+ * Preserves nine POSIX rwx bits, ACLs and DOS visibility flags; owner/group are best-effort.
+ * Edited DOS files are marked for incremental backup with the archive flag set.
+ * Denied ownership transfers warn without blocking shared-file saves, so a replacement
+ * may retain the staging file's owner/group. Mode and ACL failures abort promotion.
  * Special mode bits and arbitrary extended attributes are not preserved.
  * The disk-write operation is injectable to test partial-output failures.
  */
@@ -74,28 +78,43 @@ internal class EditorFileWriter(
                 Files.createTempFile(target.parent, ".boss-editor-", ".tmp")
             }
         try {
-            if (existing) copyPermissions(target, temporary)
+            val dosAttributes = if (existing) copyPermissions(target, temporary) else null
             writeContent(temporary.toFile(), content)
+            applyDosAttributes(temporary, dosAttributes)
             // Windows may deny two simultaneous replacements of the same directory entry.
             // Only promotion is serialized; staging and syncing remain concurrent.
             synchronized(promotionLocks[(target.normalize().hashCode() and Int.MAX_VALUE) % promotionLocks.size]) {
                 Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE)
             }
         } catch (failure: Throwable) {
-            // Ordinary cleanup exceptions cannot replace the primary cause. Fatal cleanup errors propagate.
-            try {
-                cleanup(temporary)
-            } catch (cleanupFailure: Exception) {
-                failure.addSuppressed(cleanupFailure)
-            }
+            cleanupFailedWrite(temporary, failure)
             throw failure
         }
     }
 
+    @Suppress("TooGenericExceptionCaught")
+    private fun cleanupFailedWrite(
+        temporary: Path,
+        primary: Throwable,
+    ) {
+        try {
+            cleanup(temporary)
+        } catch (cleanupFailure: Exception) {
+            if (primary !== cleanupFailure) primary.addSuppressed(cleanupFailure)
+        } catch (cleanupFailure: Throwable) {
+            // Match guardedWrite's exact containment boundary. Cleanup must never turn
+            // a noncontainable primary into a failure that guardedWrite returns as false.
+            if (isContainedByWriteGuard(primary)) throw cleanupFailure
+            if (primary !== cleanupFailure) primary.addSuppressed(cleanupFailure)
+        }
+    }
+
+    private fun isContainedByWriteGuard(error: Throwable): Boolean = error is Exception || error is StackOverflowError
+
     private fun copyPermissions(
         target: Path,
         temporary: Path,
-    ) {
+    ): DosFileAttributes? {
         Files.getFileAttributeView(target, PosixFileAttributeView::class.java)?.let { source ->
             val attributes = source.readAttributes()
             val destination =
@@ -107,16 +126,33 @@ internal class EditorFileWriter(
         Files.getFileAttributeView(target, AclFileAttributeView::class.java)?.let { source ->
             val destination =
                 requireView(temporary, AclFileAttributeView::class.java)
+            val sourceOwner = source.owner
+            preserveOwnership(target, owner = {
+                if (destination.owner != sourceOwner) destination.owner = sourceOwner
+            }, group = {})
             destination.acl = source.acl
         }
-        Files.getFileAttributeView(target, DosFileAttributeView::class.java)?.let { source ->
-            val attributes = source.readAttributes()
-            val destination =
-                requireView(temporary, DosFileAttributeView::class.java)
-            destination.setHidden(attributes.isHidden)
-            destination.setSystem(attributes.isSystem)
-            destination.setArchive(attributes.isArchive)
-            destination.setReadOnly(attributes.isReadOnly)
+        return Files.getFileAttributeView(target, DosFileAttributeView::class.java)?.readAttributes()
+    }
+
+    private fun applyDosAttributes(
+        temporary: Path,
+        original: DosFileAttributes?,
+    ) {
+        val destination = Files.getFileAttributeView(temporary, DosFileAttributeView::class.java)
+        if (original != null && destination == null) {
+            throw IOException("Cannot preserve DOS attributes for $temporary")
+        }
+        destination?.let {
+            // Apply visibility flags after writing: FileOutputStream cannot truncate an
+            // existing hidden file on Windows. Access policy is already set before bytes.
+            if (original != null) {
+                it.setHidden(original.isHidden)
+                it.setSystem(original.isSystem)
+                it.setReadOnly(original.isReadOnly)
+            }
+            // Apply before commit so attribute failure cannot report a committed save failed.
+            it.setArchive(true)
         }
     }
 
