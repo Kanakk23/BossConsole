@@ -20,6 +20,7 @@ import ai.rever.boss.utils.extractFileName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Helper function to open a runner terminal in the main panel.
@@ -66,10 +67,18 @@ internal fun openRunnerInMainPanel(
             ?: splitViewState.getAllPanels().firstOrNull()?.tabsComponent
 
     if (activeComponent != null) {
-        val tabIndex = activeComponent.addTab(terminalTab)
-        if (tabIndex >= 0) {
-            activeComponent.selectTab(tabIndex)
-        }
+        // Always activate, regardless of focusOnRun (BossConsole#486 review). addTab now honors
+        // activate=false correctly at this layer - TabsNavigation.addTab leaves the previously
+        // active tab in place instead of always jumping to the new one - but the terminal-tab
+        // plugin creates its PTY session lazily, from Content() composition, and
+        // BossMainPanelContent composes only the active tab. Passing focusOnRun through here
+        // would not "start the run without stealing focus"; it would mean the run never starts
+        // at all until the user clicks the tab - the opposite of the setting's promise, and for
+        // a re-run (which first removes the old, running tab) it means silently killing a
+        // running process and replacing it with one that never starts. Revisit once terminal-tab
+        // can start a session independent of being composed; the activate parameter itself is
+        // sound and tested (TabsNavigationTest, SplitViewActiveTabsTest) for whenever that lands.
+        activeComponent.addTab(terminalTab, activate = true)
     }
 }
 
@@ -121,27 +130,32 @@ internal fun openTerminalLink(
         val rawPath = stripFilePrefix(url)
         val parsed = parseFileReference(rawPath)
 
-        when (val result = validateFilePath(parsed.path)) {
-            is FileValidationResult.Invalid -> {
-                return
-            }
+        scope.launch(Dispatchers.Main) {
+            val validation = withContext(Dispatchers.IO) { validateFilePath(parsed.path) }
+            when (val result = validation) {
+                is FileValidationResult.Invalid -> {
+                    return@launch
+                }
 
-            is FileValidationResult.Valid -> {
-                // Continue with validated path - use canonical path for consistency
-                // TOCTOU note: There's a small window between validation and opening where
-                // the file could be deleted. This is acceptable as the editor handles missing
-                // files gracefully, and fully preventing this race is impractical.
-                openTerminalLinkInternal(
-                    url = "file:${result.canonicalPath}",
-                    mode = mode,
-                    splitViewState = splitViewState,
-                    validSourcePanelId = validSourcePanelId,
-                    isFile = true,
-                    fileLine = parsed.line,
-                    fileColumn = parsed.column,
-                    scope = scope,
-                    windowId = windowId,
-                )
+                is FileValidationResult.Valid -> {
+                    // Continue with validated path - use canonical path for consistency
+                    // TOCTOU note: There's a small window between validation and opening where
+                    // the file could be deleted. This is acceptable as the editor handles missing
+                    // files gracefully, and fully preventing this race is impractical.
+                    openTerminalLinkInternal(
+                        url = "file:${result.canonicalPath}",
+                        mode = mode,
+                        splitViewState = splitViewState,
+                        validSourcePanelId =
+                            validSourcePanelId.takeIf { splitViewState.findPanel(it) != null }
+                                ?: splitViewState.activePanelId,
+                        isFile = true,
+                        fileLine = parsed.line,
+                        fileColumn = parsed.column,
+                        scope = scope,
+                        windowId = windowId,
+                    )
+                }
             }
         }
     } else {

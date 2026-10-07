@@ -2,6 +2,7 @@ package ai.rever.boss.components.auth.forms
 
 import ai.rever.boss.plugin.browser.FluckEngine
 import ai.rever.boss.plugin.browser.LocalAwtWindow
+import ai.rever.boss.plugin.browser.installBrowserChromeOrClose
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,8 +20,11 @@ import com.teamdev.jxbrowser.navigation.event.LoadFinished
 import com.teamdev.jxbrowser.view.compose.BrowserView
 import com.teamdev.jxbrowser.view.compose.BrowserViewState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -117,7 +121,10 @@ internal actual fun AuthBrandSite(
             // long as the boot took. The startup prewarm does not save it: that is skipped entirely on a
             // first-ever launch, when no browser profile exists yet, and mid-prewarm this would block on
             // the same lock.
-            created = withContext(Dispatchers.IO) { FluckEngine.engine.newBrowser() }
+            created =
+                withContext(Dispatchers.IO) {
+                    FluckEngine.engine.newBrowser().also { installBrowserChromeOrClose(it) }
+                }
             created.navigation().on(LoadFinished::class.java) {
                 scope.launch(Dispatchers.Main) { loaded = true }
             }
@@ -168,8 +175,8 @@ internal actual fun AuthBrandSite(
     // exception here escapes composition and takes the whole sign-in screen with it, which is the one
     // outcome this panel must never cause. Falling through leaves the art, like every other failure.
     val state =
-        remember(current, window) {
-            runCatching { BrowserViewState(current, MainScope(), window) }
+        remember(current, window, scope) {
+            runCatching { BrowserViewState(current, authBrandViewScope(scope), window) }
                 .onFailure { e ->
                     logger.warn(
                         LogCategory.BROWSER,
@@ -185,3 +192,17 @@ internal actual fun AuthBrandSite(
     }
     BrowserView(state = state, modifier = Modifier.fillMaxSize())
 }
+
+/** Own view work under the composition while isolating native view failures from its other jobs. */
+internal fun authBrandViewScope(parent: CoroutineScope): CoroutineScope =
+    CoroutineScope(
+        SupervisorJob(parent.coroutineContext[Job]) +
+            Dispatchers.Main +
+            CoroutineExceptionHandler { _, throwable ->
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "Unhandled exception in BrowserViewState scope",
+                    error = throwable,
+                )
+            },
+    )

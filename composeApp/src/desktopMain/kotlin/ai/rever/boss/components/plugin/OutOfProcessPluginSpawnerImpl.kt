@@ -1,6 +1,7 @@
 package ai.rever.boss.components.plugin
 
-import ai.rever.boss.ipc.BossIpcClient
+import ai.rever.boss.components.plugin.remote.PluginProcessMonitor
+import ai.rever.boss.ipc.IpcTransport
 import ai.rever.boss.ipc.IpcVersion
 import ai.rever.boss.kernel.KernelBootstrap
 import ai.rever.boss.kernel.ReapAdmissionException
@@ -16,13 +17,21 @@ import ai.rever.boss.process.ProcessSpawner
 import ai.rever.boss.process.ProcessType
 import ai.rever.boss.process.RestartPolicy
 import io.grpc.ManagedChannel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Implementation of [OutOfProcessPluginSpawner] that uses [ProcessSpawner]
@@ -38,6 +47,7 @@ import java.util.concurrent.ConcurrentHashMap
  * The spawner tracks all managed processes and provides connection info
  * (gRPC channel) for [PluginStateBridge] and remote UI components.
  */
+@Suppress("TooManyFunctions")
 class OutOfProcessPluginSpawnerImpl(
     private val processSpawner: ProcessSpawner,
     private val windowId: String = "",
@@ -54,6 +64,19 @@ class OutOfProcessPluginSpawnerImpl(
     /** State bridges keyed by plugin ID. */
     private val stateBridges = ConcurrentHashMap<String, PluginStateBridge>()
 
+    private val pluginLifecycleMutexes = ConcurrentHashMap<String, Mutex>()
+
+    private val restartEpochs = ConcurrentHashMap<String, AtomicLong>()
+
+    private fun restartEpoch(pluginId: String): AtomicLong = restartEpochs.computeIfAbsent(pluginId) { AtomicLong() }
+
+    // Exposed for the epoch-fencing tests, which must stale a REAL epoch and observe
+    // the real restart/cleanup paths refuse it.
+    internal fun restartEpochForTest(pluginId: String): AtomicLong = restartEpoch(pluginId)
+
+    private val processMonitor =
+        PluginProcessMonitor(this).also { it.start() }
+
     /**
      * Classpath for the plugin runtime fat JAR.
      * Resolved from BOSS_PLUGIN_RUNTIME_JAR env var or default location.
@@ -66,22 +89,16 @@ class OutOfProcessPluginSpawnerImpl(
             )
     }
 
-    /**
-     * IPC-version compatibility status of the runtime JAR. Computed once on
-     * first spawn so we don't re-parse the manifest per plugin. `null` means
-     * the manifest couldn't be read at all — treated as a fatal startup
-     * error; the first spawn call will surface it.
-     */
-    private val runtimeCompat: IpcVersion.CompatResult? by lazy {
-        runCatching {
-            val manifest = PluginManifestReader.readFromJar(runtimeClasspath)
-            IpcVersion.isCompatible(manifest.minIpcVersion)
-        }.onFailure { e ->
-            logger.error("Failed to read runtime JAR manifest for IPC compat check: {}", runtimeClasspath, e)
-        }.getOrNull()
-    }
-
     override suspend fun spawn(
+        manifest: PluginManifest,
+        jarPath: String,
+    ): Result<Unit> =
+        withPluginLifecycleLock(manifest.pluginId) {
+            spawnUnderLifecycleLock(manifest, jarPath)
+        }
+
+    @Suppress("LongMethod")
+    private suspend fun spawnUnderLifecycleLock(
         manifest: PluginManifest,
         jarPath: String,
     ): Result<Unit> {
@@ -89,6 +106,21 @@ class OutOfProcessPluginSpawnerImpl(
             try {
                 val spawnGeneration = reapSpawnGate.generation()
                 val pluginId = manifest.pluginId
+
+                // Refuse to replace a live child: a second spawn for a running plugin
+                // would overwrite managedProcesses/pluginChannels/stateBridges and
+                // orphan the predecessor (ProcessRegistry.register only warns that a
+                // replaced LIVE handle will not be reaped). The four spawn call sites
+                // (background initial spawn, Enable, access-restore, crash restart)
+                // must each stay safe against the other three, and this guard keeps
+                // that invariant local to the spawn path instead of spread over the
+                // manager's locks and ticket logic.
+                val existing = managedProcesses[pluginId]
+                if (existing != null && existing.isAlive) {
+                    val msg = "Refusing to spawn plugin $pluginId: a child process is already running"
+                    logger.warn(msg)
+                    return@withContext Result.failure<Unit>(IllegalStateException(msg))
+                }
 
                 // Stand down if a reap is in progress. A reap means the host is exiting (or
                 // switching to in-process): the reaper has already snapshotted the children it will
@@ -101,33 +133,7 @@ class OutOfProcessPluginSpawnerImpl(
                     return@withContext Result.failure<Unit>(IllegalStateException(msg))
                 }
 
-                // IPC-compat gate — if the runtime JAR on disk doesn't match
-                // the host's current IPC version we refuse here rather than
-                // hit a cryptic gRPC deserialization failure in the child.
-                when (val compat = runtimeCompat) {
-                    is IpcVersion.CompatResult.Incompatible -> {
-                        val msg =
-                            "Microkernel runtime is incompatible with this host. ${compat.reason} " +
-                                "(host IPC=${IpcVersion.CURRENT}, runtime=$runtimeClasspath)"
-                        logger.error(msg)
-                        return@withContext Result.failure<Unit>(IllegalStateException(msg))
-                    }
-
-                    is IpcVersion.CompatResult.UnknownRuntime -> {
-                        logger.warn(
-                            "Microkernel runtime does not declare minIpcVersion (legacy pre-Phase-0 JAR). " +
-                                "Proceeding but the next incompatible update will not be auto-detected. " +
-                                "runtime={}, hostIpcVersion={}",
-                            runtimeClasspath,
-                            IpcVersion.CURRENT,
-                        )
-                    }
-
-                    is IpcVersion.CompatResult.Compatible, null -> {
-                        // null = manifest read failure; already logged. Continue —
-                        // the child will fail on its own if the JAR is actually broken.
-                    }
-                }
+                validateRuntime(runtimeClasspath)
 
                 // Build classpath: runtime JAR + plugin JAR + (when resolved)
                 // the runtime API layer jar. The api jar goes LAST so runtime
@@ -143,7 +149,7 @@ class OutOfProcessPluginSpawnerImpl(
 
                 val config =
                     ProcessConfig(
-                        processId = processIdOf(pluginId),
+                        processId = pluginProcessId(windowId, pluginId),
                         processType = ProcessType.PLUGIN,
                         displayName = manifest.displayName,
                         mainClass = "ai.rever.boss.plugin.runtime.PluginProcessMainKt",
@@ -153,14 +159,16 @@ class OutOfProcessPluginSpawnerImpl(
                         workDir = File(projectPath.ifEmpty { System.getProperty("user.dir") }),
                         restartPolicy = RestartPolicy.ON_FAILURE,
                         maxRestarts = manifest.sandbox.maxRestartAttempts,
-                        environment = buildEnvironment(jarPath),
+                        environment = buildEnvironment(jarPath) + ("BOSS_PLUGIN_ID" to pluginId),
                         startupTimeoutMs = manifest.healthContract?.startupTimeoutMs ?: 30_000,
                         heartbeatIntervalMs = manifest.healthContract?.heartbeatIntervalMs ?: 5_000,
                     )
 
                 logger.info(
-                    "Spawning out-of-process plugin: id={}, jar={}, runtime={}",
+                    "Spawning out-of-process plugin: id={}, processId={}, windowId={}, jar={}, runtime={}",
                     pluginId,
+                    config.processId,
+                    windowId,
                     jarPath,
                     runtimeClasspath,
                 )
@@ -179,18 +187,33 @@ class OutOfProcessPluginSpawnerImpl(
                 waitForReady(pluginId, managedProcess, config.startupTimeoutMs)
 
                 // Create gRPC channel to the plugin process
-                val channel = BossIpcClient(managedProcess.ipcAddress).channel
+                val channel =
+                    checkNotNull(managedProcess.ipcClient) { "Managed plugin lacks authenticated IPC" }.channel
                 pluginChannels[pluginId] = channel
 
                 // Create and start state bridge
                 val bridge =
                     PluginStateBridge(
                         pluginId = pluginId,
-                        instanceId = "plugin-$pluginId",
+                        instanceId = config.processId,
                         channel = channel,
                     )
                 bridge.start()
                 stateBridges[pluginId] = bridge
+
+                val monitoredEpoch = restartEpoch(pluginId).get()
+
+                processMonitor.monitor(
+                    pluginId = pluginId,
+                    displayName = manifest.displayName,
+                    maxRestarts = manifest.sandbox.maxRestartAttempts,
+                    restartAction = {
+                        restartAfterCrash(manifest, jarPath, monitoredEpoch)
+                    },
+                    terminalFailureAction = {
+                        cleanupAfterTerminalFailure(pluginId, monitoredEpoch)
+                    },
+                )
 
                 logger.info(
                     "Out-of-process plugin ready: id={}, pid={}, ipc={}",
@@ -227,18 +250,92 @@ class OutOfProcessPluginSpawnerImpl(
         // Kill first, drop the registry entry second: while the child is alive the registry entry
         // is the only thing that would let a host exit reap it.
         val process = managedProcesses.remove(pluginId)
+        ai.rever.boss.kernel
+            .killProcessDescendants(
+                ai.rever.boss.kernel
+                    .processDescendants(process?.process),
+            )
         runCatching { process?.destroyForcibly() }
-        process?.let { kernelRegistry()?.unregisterIfSame(processIdOf(pluginId), it) }
+        awaitForcedExit(process)
+        process?.takeUnless { it.isAlive }?.let { kernelRegistry()?.unregisterIfSame(it.config.processId, it) }
     }
 
-    override suspend fun terminate(pluginId: String): Result<Unit> =
+    override suspend fun terminate(pluginId: String): Result<Unit> {
+        restartEpoch(pluginId).incrementAndGet()
+        // Unmonitor before the lock: that is what makes an already-admitted restart
+        // see a dead generation and back off, regardless of who wins the lock race.
+        // The second unmonitor inside the lock is the idempotent duplicate that
+        // covers the entry path, and both are safe because unmonitor is a no-op
+        // for an id that is not monitored.
+        processMonitor.unmonitor(pluginId)
+
+        val result =
+            withPluginLifecycleLock(pluginId) {
+                // The teardown itself must survive caller cancellation - a cancelled
+                // destroy would orphan the child subtree - but waiting for the lock
+                // must stay cancellable: disablePlugin awaits terminate while holding
+                // the manager's global mutex, so an uncancelled wait behind a parked
+                // restart would freeze every plugin operation for the whole window.
+                withContext(NonCancellable) {
+                    processMonitor.unmonitor(pluginId)
+                    terminateManagedProcess(pluginId)
+                }
+            }
+        currentCoroutineContext().ensureActive()
+        return result
+    }
+
+    // internal so the epoch-fencing tests can drive the real restart path directly
+    internal suspend fun restartAfterCrash(
+        manifest: PluginManifest,
+        jarPath: String,
+        expectedEpoch: Long,
+    ): Result<Unit> {
+        val pluginId = manifest.pluginId
+
+        return withPluginLifecycleLock(pluginId) {
+            if (restartEpoch(pluginId).get() != expectedEpoch || !processMonitor.isMonitored(pluginId)) {
+                return@withPluginLifecycleLock Result.failure(
+                    IllegalStateException("Plugin is no longer monitored: $pluginId"),
+                )
+            }
+
+            val terminated = terminateManagedProcess(pluginId)
+            if (terminated.isFailure) {
+                return@withPluginLifecycleLock terminated
+            }
+
+            if (restartEpoch(pluginId).get() != expectedEpoch || !processMonitor.isMonitored(pluginId)) {
+                return@withPluginLifecycleLock Result.failure(
+                    IllegalStateException("Plugin restart was cancelled: $pluginId"),
+                )
+            }
+
+            spawnUnderLifecycleLock(manifest, jarPath)
+        }
+    }
+
+    // internal so the epoch-fencing tests can drive the real cleanup path directly
+    internal suspend fun cleanupAfterTerminalFailure(
+        pluginId: String,
+        expectedEpoch: Long,
+    ) {
+        withPluginLifecycleLock(pluginId) {
+            if (restartEpoch(pluginId).get() == expectedEpoch && processMonitor.isMonitored(pluginId)) {
+                terminateManagedProcess(pluginId).getOrThrow()
+            }
+        }
+    }
+
+    private suspend fun terminateManagedProcess(pluginId: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             val process = managedProcesses.remove(pluginId)
+            val descendants =
+                ai.rever.boss.kernel
+                    .processDescendants(process?.process)
             try {
-                // Dispose state bridge
                 stateBridges.remove(pluginId)?.dispose()
 
-                // Shutdown gRPC channel with timeout
                 pluginChannels.remove(pluginId)?.let { channel ->
                     channel.shutdown()
                     if (!channel.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS)) {
@@ -247,35 +344,65 @@ class OutOfProcessPluginSpawnerImpl(
                     }
                 }
 
-                // Destroy process
                 if (process != null) {
                     logger.info("Terminating plugin process: id={}, pid={}", pluginId, process.pid)
                     process.destroy()
 
-                    // Wait for graceful shutdown, then force kill
-                    withTimeout(5_000) {
-                        while (process.isAlive) {
-                            delay(100)
+                    // A child that outlives the grace window is the normal exit of this
+                    // wait, not an error: force-kill it and succeed, matching dev's
+                    // pre-cancellation behaviour. withTimeout would surface the same
+                    // outcome as TimeoutCancellationException, a CancellationException
+                    // that callers and the health loop treat as caller cancellation.
+                    val exited =
+                        withTimeoutOrNull(5_000) {
+                            while (process.isAlive) {
+                                delay(100)
+                            }
                         }
+                    if (exited == null) {
+                        logger.warn("Plugin process outlived the 5s destroy grace, forcing: id={}", pluginId)
+                        process.destroyForcibly()
                     }
                 } else {
                     logger.warn("No managed process found for plugin: {}", pluginId)
                 }
 
                 Result.success(Unit)
+            } catch (e: CancellationException) {
+                // Termination already owns cleanup: cancellation must not orphan this subtree.
+                runCatching { process?.destroyForcibly() }
+                throw e
             } catch (e: Exception) {
-                // Force kill if graceful shutdown failed
                 process?.destroyForcibly()
                 logger.warn("Force-killed plugin process: id={}", pluginId, e)
                 Result.success(Unit)
             } finally {
+                ai.rever.boss.kernel
+                    .killProcessDescendants(descendants)
                 // Registry entry goes last, and only if it is still this process. "Registered
                 // implies reapable" has to hold for as long as the child is alive, so a host exit
                 // part-way through an unload still reaps it; and removing by id alone could evict
                 // a replacement that a concurrent respawn had already registered.
-                process?.let { kernelRegistry()?.unregisterIfSame(processIdOf(pluginId), it) }
+                awaitForcedExit(process)
+                process?.takeUnless { it.isAlive }?.let {
+                    kernelRegistry()?.unregisterIfSame(it.config.processId, it)
+                }
             }
         }
+
+    private suspend fun <T> withPluginLifecycleLock(
+        pluginId: String,
+        action: suspend () -> T,
+    ): T {
+        val mutex = pluginLifecycleMutexes.computeIfAbsent(pluginId) { Mutex() }
+        mutex.lock()
+
+        return try {
+            action()
+        } finally {
+            mutex.unlock()
+        }
+    }
 
     /**
      * Get the state bridge for a plugin.
@@ -291,6 +418,10 @@ class OutOfProcessPluginSpawnerImpl(
      * Check if a plugin process is alive.
      */
     fun isAlive(pluginId: String): Boolean = managedProcesses[pluginId]?.isAlive == true
+
+    override fun dispose() {
+        processMonitor.dispose()
+    }
 
     private fun buildJvmArgs(): List<String> =
         buildList {
@@ -316,7 +447,7 @@ class OutOfProcessPluginSpawnerImpl(
     private fun buildEnvironment(jarPath: String): Map<String, String> =
         buildMap {
             put("BOSS_PLUGIN_CLASSPATH", jarPath)
-            if (windowId.isNotEmpty()) put("BOSS_WINDOW_ID", windowId)
+            if (windowId.isNotBlank()) put("BOSS_WINDOW_ID", windowId)
             if (projectPath.isNotEmpty()) put("BOSS_PROJECT_PATH", projectPath)
         }
 
@@ -329,7 +460,7 @@ class OutOfProcessPluginSpawnerImpl(
         timeoutMs: Long,
     ) {
         withTimeout(timeoutMs) {
-            val processId = processIdOf(pluginId)
+            val processId = process.config.processId
             val registry = kernelRegistry()
 
             while (true) {
@@ -376,17 +507,25 @@ class OutOfProcessPluginSpawnerImpl(
 }
 
 /**
- * Kernel-side process id for a plugin. The kernel registry is keyed by it.
+ * Kernel-side process ID for a plugin.
  *
- * **Not window-scoped.** This spawner is per-window but the registry is process-wide, so two windows
- * running the same out-of-process plugin produce the same id and the second registration evicts the
- * first while its child is still alive - leaving that child unreapable on host exit. `terminate()` is
- * unaffected (each spawner keeps its own [managedProcesses]), so this only bites at exit.
- * [ProcessRegistry.register] logs a warning when it evicts a live handle, which is how this shows up.
- * Putting the window id in here is the real fix and needs the child side to agree, since the runtime
- * reports state under the process id it was given.
+ * The registry is process-wide, so window-owned spawners include [windowId]. This prevents the
+ * same plugin in two windows from evicting the other live process. A blank window ID preserves
+ * the legacy identity for non-window and test contexts.
  */
-private fun processIdOf(pluginId: String): String = "plugin-$pluginId"
+internal fun pluginProcessId(
+    windowId: String,
+    pluginId: String,
+): String =
+    if (windowId.isBlank()) {
+        "plugin-$pluginId"
+    } else {
+        // IPC uses this as a socket filename. Full window UUIDs plus manifest IDs exceed
+        // Unix socket path limits, so keep the identity bounded without ambiguous separators.
+        val identity = "${windowId.length}:$windowId$pluginId"
+        val digest = MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(Charsets.UTF_8))
+        "plugin-" + digest.take(16).joinToString("") { "%02x".format(it) }
+    }
 
 /**
  * The kernel's process registry, or null when the kernel is not up.
@@ -396,3 +535,19 @@ private fun processIdOf(pluginId: String): String = "plugin-$pluginId"
  * `KernelBootstrap.instance`, so the instance and its registry both exist before this class does.
  */
 private fun kernelRegistry(): ProcessRegistry? = KernelBootstrap.instance?.processRegistry
+
+private fun awaitForcedExit(process: ai.rever.boss.process.ManagedProcess?) {
+    // SIGKILL is asynchronous. Preserve a still-live handle after this bounded wait.
+    runCatching { process?.process?.waitFor(100, java.util.concurrent.TimeUnit.MILLISECONDS) }
+}
+
+/** Read the current runtime on every spawn; replacing a JAR must invalidate the previous decision. */
+private fun validateRuntime(runtimeClasspath: String) {
+    IpcTransport.requireCompatibleRuntime(File(runtimeClasspath).toPath())
+    val manifest = PluginManifestReader.readFromJar(runtimeClasspath)
+    when (val compatibility = IpcVersion.isCompatible(manifest.minIpcVersion)) {
+        is IpcVersion.CompatResult.Compatible -> Unit
+        is IpcVersion.CompatResult.UnknownRuntime -> error("The microkernel runtime must declare minIpcVersion")
+        is IpcVersion.CompatResult.Incompatible -> error(compatibility.reason)
+    }
+}

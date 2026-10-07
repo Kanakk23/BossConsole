@@ -43,6 +43,23 @@ class RemoteUiSurfaceRegistryTest {
     private val registry = RemoteUiSurfaceRegistry()
 
     @Test
+    fun `capabilities replay before streaming and reset for absent displaced and closed surfaces`() {
+        val originalHost = RecordingHost()
+        registry.attach(SURFACE, originalHost)
+        assertEquals(listOf(false), originalHost.capabilities)
+
+        val surface = registry.register(SURFACE, PROCESS, RemoteUiSurfaceDescriptor(wantsKeys = true)).accepted()
+        val replacementHost = RecordingHost()
+        registry.attach(SURFACE, replacementHost)
+        assertEquals(listOf(false, false), originalHost.capabilities, "displacement resets the old host")
+        assertEquals(listOf(true), replacementHost.capabilities, "replay grants before a stream exists")
+
+        assertIs<SurfaceStream.Bound>(registry.openStream(SURFACE, PROCESS))
+        registry.closeStream(surface)
+        assertEquals(listOf(true, true, false), replacementHost.capabilities, "closing revokes the tap")
+    }
+
+    @Test
     fun `unregister and kernel reset retain ownership while old host compositions can remain`() {
         registry.register(SURFACE, PROCESS).accepted()
         registry.unregister(SURFACE)
@@ -242,6 +259,7 @@ class RemoteUiSurfaceRegistryTest {
                 displayName = "Inbox",
                 iconName = "mail",
                 defaultSlot = "left.top.top",
+                wantsKeys = true,
             )
 
         val surface = registry.register(SURFACE, PROCESS, descriptor).accepted()
@@ -427,6 +445,61 @@ class RemoteUiSurfaceRegistryTest {
     }
 
     @Test
+    fun `a wire diff removes a stale property from the live host tree`() {
+        val host = RecordingHost()
+        registry.attach(SURFACE, host)
+        val surface = registry.register(SURFACE, PROCESS).accepted()
+        surface.pushTree(
+            WidgetTree(
+                rootId = NODE,
+                nodes =
+                    mapOf(
+                        NODE to
+                            WidgetNode(
+                                NODE,
+                                WidgetType.TEXT_FIELD,
+                                mapOf("value" to "query", "placeholder" to "Search"),
+                            ),
+                    ),
+                version = 2,
+            ),
+        )
+
+        surface.applyUpdate(
+            WidgetUpdate
+                .newBuilder()
+                .setSurfaceId(SURFACE)
+                .setDiff(
+                    listOf<DiffOperation>(
+                        DiffOperation.NodeUpdated(
+                            nodeId = NODE,
+                            changedProperties = mapOf("value" to ""),
+                            newModifier = null,
+                            removedProperties = setOf("placeholder"),
+                        ),
+                    ).toProtoDiff(baseVersion = 2, newVersion = 3),
+                ).build(),
+        )
+
+        val properties =
+            surface.tree
+                ?.nodes
+                ?.get(NODE)
+                ?.properties
+                .orEmpty()
+        val publishedProperties =
+            host.trees
+                .last()
+                .nodes
+                .getValue(NODE)
+                .properties
+        assertEquals("", properties["value"], "the empty value is still an explicit update")
+        assertFalse("placeholder" in properties, "the removed property must not survive blank")
+        assertEquals(3L, surface.tree?.version)
+        assertEquals(properties, publishedProperties)
+    }
+
+    @Test
     fun `a diff whose base version does not match keeps the local numbering so the next one trips too`() {
         // Adopting the sender's newVersion after a divergence would make every SUBSEQUENT base_version
         // check pass, and the surface would be permanently, invisibly wrong. "The next full tree repairs
@@ -555,6 +628,11 @@ class RemoteUiSurfaceRegistryTest {
     private class RecordingHost : RemoteUiSurfaceHost {
         val trees = CopyOnWriteArrayList<WidgetTree>()
         val connections = CopyOnWriteArrayList<Boolean>()
+        val capabilities = CopyOnWriteArrayList<Boolean>()
+
+        override fun onKeyCapabilityChanged(wantsKeys: Boolean) {
+            capabilities += wantsKeys
+        }
 
         override fun onTreeUpdated(tree: WidgetTree) {
             trees += tree

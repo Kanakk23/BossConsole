@@ -1,3 +1,5 @@
+import io.gitlab.arturbosch.detekt.Detekt
+import io.gitlab.arturbosch.detekt.DetektCreateBaselineTask
 import io.gitlab.arturbosch.detekt.extensions.DetektExtension
 import org.jlleitschuh.gradle.ktlint.KtlintExtension
 
@@ -52,6 +54,13 @@ allprojects {
         parallel = true
     }
 
+    tasks.withType<Detekt>().configureEach {
+        jvmTarget = "17"
+    }
+    tasks.withType<DetektCreateBaselineTask>().configureEach {
+        jvmTarget = "17"
+    }
+
     extensions.configure<KtlintExtension> {
         // Pin the ktlint engine to the exact version the format-the-world
         // reformat was produced with (ktlint-gradle 14.2.0 bundles 1.5.0 by
@@ -68,6 +77,24 @@ allprojects {
                 it.name.contains("ktlint", ignoreCase = true) ||
                     it.name.contains("detekt", ignoreCase = true)
             }.configureEach { enabled = false }
+    }
+
+    // Fail a test run on a test JUnit will not execute, rather than let it pass by not running. A
+    // @Test method that returns a value is the common case: `fun x() = runBlocking { ... }` returns
+    // whatever its last expression does, JUnit reports that as a WARNING-level discovery issue,
+    // skips the method, and the build stays green. Nine composeApp tests sat unexecuted that way,
+    // and one of them no longer described the code (#1667). Declare such a test `(): Unit =`.
+    //
+    // What a failure looks like: a DiscoveryIssueException aborts discovery for the whole engine,
+    // so every test in the module vanishes and one initializationError is reported in their place.
+    // Its message names the method. If a toolchain bump (JUnit, Compose, the vintage engine)
+    // introduces an unrelated WARNING, relax it to "ERROR" for that module while it is fixed, rather
+    // than deleting this line: set the same property in that module's own build.gradle.kts, whose
+    // Test configuration runs after this one and wins. composeApp also carries the setting in
+    // src/desktopTest/resources/junit-platform.properties, so an IDE run meets it too, and buildSrc,
+    // a separate build this block never reaches, carries its own copy.
+    tasks.withType<Test>().configureEach {
+        systemProperty("junit.platform.discovery.issue.severity.critical", "WARNING")
     }
 }
 

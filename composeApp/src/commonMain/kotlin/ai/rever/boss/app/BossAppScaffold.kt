@@ -3,6 +3,9 @@ package ai.rever.boss.app
 import ai.rever.boss.components.bars.horizontal.BossBottomBar
 import ai.rever.boss.components.bars.horizontal.BossTitleBar
 import ai.rever.boss.components.bars.horizontal.BossTopBar
+import ai.rever.boss.components.bars.horizontal.BottomBarHolds
+import ai.rever.boss.components.bars.horizontal.LocalBottomBarHolds
+import ai.rever.boss.components.bars.horizontal.setupKeepsBottomBarVisible
 import ai.rever.boss.components.bars.isBarVisible
 import ai.rever.boss.components.bars.vertical.BossLeftSideBar
 import ai.rever.boss.components.bars.vertical.BossRightSideBar
@@ -19,6 +22,7 @@ import ai.rever.boss.components.overlays.TabDraggingOverlay
 import ai.rever.boss.components.plugin.LocalPanelPluginIdResolver
 import ai.rever.boss.components.plugin.LocalPluginUninstallable
 import ai.rever.boss.components.plugin.PanelIds
+import ai.rever.boss.components.plugin.openTopOfMindQuickSwitcher
 import ai.rever.boss.components.plugin.panels.left_bottom.TopOfMind.LocalSplitViewState
 import ai.rever.boss.components.plugin.panels.left_bottom.TopOfMind.LocalWorkspaceManager
 import ai.rever.boss.components.plugin.providers.TopOfMindDataProvider
@@ -57,18 +61,28 @@ import ai.rever.boss.plugin.sandbox.notification.PluginToastHost
 import ai.rever.boss.plugin.sandbox.notification.PluginToastState
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
+import ai.rever.boss.sharing.AppSharingActive
+import ai.rever.boss.sharing.AppSharingNotifications
 import ai.rever.boss.updater.UpdateAvailableDialog
 import ai.rever.boss.updater.UpdateBanner
+import ai.rever.boss.updater.UpdateDialogGate
+import ai.rever.boss.updater.UpdateSettings
 import ai.rever.boss.updater.UpdateState
+import ai.rever.boss.updater.bannerState
 import ai.rever.boss.updater.drawsBanner
 import ai.rever.boss.updater.rememberUpdateDialogOwnership
+import ai.rever.boss.updater.shouldShowUpdatePrompt
 import ai.rever.boss.utils.SystemUtils
 import ai.rever.boss.window.LocalWindowGitState
 import ai.rever.boss.window.LocalWindowId
 import ai.rever.boss.window.LocalWindowProjectState
 import ai.rever.boss.window.LocalWindowRunnerState
+import ai.rever.boss.window.MenuActionsHandler
+import ai.rever.boss.window.NativeSidebarTitleBar
+import ai.rever.boss.window.NativeTitleBarAction
 import ai.rever.boss.window.TabBarPosition
 import ai.rever.boss.window.WindowAppearanceSettings
+import ai.rever.boss.window.usesNativeSidebarTitleBar
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
@@ -88,6 +102,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -97,10 +113,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -260,6 +278,9 @@ internal fun BossAppScaffold(
     appearance: WindowAppearanceSettings,
     onToggleMaximize: (() -> Unit)?,
 ) {
+    val setupNeedsBottomBar = setupKeepsBottomBarVisible()
+    // Per window: a dialog open from one window's bar must not hold another window's.
+    val bottomBarHolds = remember { BottomBarHolds() }
     val coroutineScope = state.coroutineScope
     val splitViewState = state.splitViewState
     val selectedProject by state.windowProjectState.selectedProject.collectAsState()
@@ -280,9 +301,13 @@ internal fun BossAppScaffold(
     // What is actually drawn, which is what these two rules are about - a bar focus mode is
     // clearing is not on screen however the preference reads. See asDrawn.
     val drawn = appearance.asDrawn(focusModeSettings)
+    val sidebarInHeader = usesNativeSidebarTitleBar(SystemUtils.isMacOS, appearance.tabBarPosition)
+    val sidebarToggleRequests = remember { MutableSharedFlow<Unit>(extraBufferCapacity = 1) }
+    var nativeHeaderReady by remember { mutableStateOf(false) }
+    var sidebarLeading by remember { mutableStateOf(0f) }
 
-    // Whether the hover-revealed bar is up, reported by SplitViewPanel. It decides where the
-    // host's actions render while the bar is collapsed - see the placement below.
+    // The drawer takes the host actions when the header replaces the rail. Its visibility is
+    // reported by SplitViewPanel, which owns the measured layout and drawer state.
     var drawerVisible by remember { mutableStateOf(false) }
 
     // Whether the bar in the layout is the RAIL, reported by SplitViewPanel once it has measured.
@@ -313,11 +338,14 @@ internal fun BossAppScaffold(
             tabBarOnLeft = appearance.tabBarPosition == TabBarPosition.LEFT,
             barCollapsed = barRailed,
             drawerVisible = drawerVisible,
+            hideCollapsedRail = sidebarInHeader,
         )
 
     // Whether the collapsed tab-bar rail has enough height for its quick actions.
-    // Keep the measured answer while a hover drawer temporarily owns the actions. The rail
-    // stays composed behind that drawer and will not report again unless its fit changes.
+    // Keep the measured answer while the drawer is open: the rail stays composed behind that
+    // drawer and will not report again unless its fit changes. Consequence of the rail no
+    // longer handing its actions to the drawer: with the fit false and the bar collapsed, the
+    // actions now fall through to PANEL_FOOTER/FLOATING instead of the drawer's roomy foot.
     var railActionsFit by remember { mutableStateOf(true) }
 
     // Gated, so the measurement costs nothing in the configuration that will never use it. With
@@ -334,6 +362,7 @@ internal fun BossAppScaffold(
                     showTopBar = reveal.showTopBar,
                     verticalBar = verticalBar,
                     railActionsFit = railActionsFit,
+                    titleBarAvailable = nativeHeaderReady,
                 ),
         )
 
@@ -370,6 +399,7 @@ internal fun BossAppScaffold(
             railActionsFit = railActionsFit,
             // Only consulted once the bar has offered nothing, i.e. in TOP position.
             panelFootAvailable = panelFootAvailable(panelFooterEdge, panelFootFits),
+            titleBarAvailable = nativeHeaderReady,
         )
 
     // Where the way into the plugins goes, when a strip that would normally hold their icons is
@@ -395,13 +425,16 @@ internal fun BossAppScaffold(
     // whose answer does not change. UpdateBanner still collects the full state for itself, inside
     // the Column, where a progress tick recomposes the banner and nothing else.
     val updateHandle = state.updateHandle
-    val bannerVisible by remember(updateHandle) {
-        updateHandle.updateState.map { it.drawsBanner() }.distinctUntilChanged()
+    val automaticUpdates by UpdateSettings.automaticUpdates.collectAsState()
+    val updateToastState = rememberUpdateToastState()
+    val bannerVisible by remember(updateHandle, automaticUpdates) {
+        updateHandle.updateState.map { it.drawsBanner(automaticUpdates) }.distinctUntilChanged()
     }.collectAsState(initial = false)
+    val sidebarBelowTopChrome = bannerVisible || (appearance.showTopBar && reveal.showTopBar)
 
     val trafficLights =
         macTrafficLightInset(
-            appearance = drawn,
+            appearance = drawn.copy(showTitleBar = drawn.showTitleBar || sidebarInHeader),
             isMacOs = SystemUtils.isMacOS,
             bannerVisible = bannerVisible,
             // The MEASURED rail, not the preference: a bar rails itself on a narrow window too.
@@ -513,17 +546,34 @@ internal fun BossAppScaffold(
         ) {
             // Use Box to allow overlaying the drag ghost
             Column(modifier = Modifier.fillMaxSize()) {
+                val workspaceSwitch = rememberWorkspaceSwitch(state, splitViewState)
+                val applyWorkspaceAndPreserve = workspaceSwitch.request
+                HandleMenuSpaceSwitch(state, workspaceSwitch)
+                WorkspaceSwitchPrompt(state, workspaceSwitch)
                 // Title bar - conditionally shown based on settings
                 // Default: hidden on Linux/Windows, shown on macOS
                 // Also drawn when the traffic lights have nowhere else to go: with no left strip
                 // and the tab bar across the top, the only thing under them is the content, and a
                 // full-width reserve costs no more than padding the content would. See
                 // TrafficLightInset.CONTENT.
-                if (trafficLights.needsTitleRow(appearance.showTitleBar)) {
-                    BossTitleBar(
-                        onToggleMaximize = onToggleMaximize,
-                    )
-                }
+                SidebarTitleBar(
+                    appearance = appearance,
+                    trafficLights = trafficLights,
+                    barRailed = barRailed,
+                    drawerVisible = drawerVisible,
+                    sidebarLeading = sidebarLeading,
+                    sidebarBelowTopChrome = sidebarBelowTopChrome,
+                    toggleRequests = sidebarToggleRequests,
+                    state = state,
+                    spaceAction =
+                        nativeSpaceTitleAction(
+                            splitViewState,
+                            selectedProject.name,
+                            workspaceSwitch.requestFromTitleBar,
+                        ),
+                    onNativeReadyChange = { nativeHeaderReady = it },
+                    onToggleMaximize = onToggleMaximize,
+                )
 
                 // Update banner - always visible (even in focus mode)
                 val updateState by updateHandle.updateState.collectAsState()
@@ -532,7 +582,7 @@ internal fun BossAppScaffold(
                 // closing the window mid-install used to cancel the install (leaving
                 // UpdateState on Installing) and could drop a persisted dismissal.
                 UpdateBanner(
-                    updateState = updateState,
+                    updateState = updateState.bannerState(automaticUpdates),
                     // Non-zero only when this banner is the chrome holding the lights, in which
                     // case the bars below it have already given up their own clearance.
                     startInset = trafficLights.bannerStartInset(),
@@ -564,7 +614,13 @@ internal fun BossAppScaffold(
                 val showUpdateDialog by updateHandle.showUpdateDialog.collectAsState()
                 val isUpdateDialogOwner = rememberUpdateDialogOwnership(state.windowId)
                 val updateStateForDialog = updateState
-                if (showUpdateDialog && isUpdateDialogOwner && updateStateForDialog is UpdateState.UpdateAvailable) {
+                UpdateDialogGate(
+                    wantDialog = shouldShowUpdatePrompt(showUpdateDialog, automaticUpdates),
+                    isOwner = isUpdateDialogOwner,
+                    updateAvailable = updateStateForDialog is UpdateState.UpdateAvailable,
+                ) {
+                    // Re-test for the smart cast inside the gated content.
+                    if (updateStateForDialog !is UpdateState.UpdateAvailable) return@UpdateDialogGate
                     UpdateAvailableDialog(
                         updateInfo = updateStateForDialog.updateInfo,
                         onUpdateNow = {
@@ -595,9 +651,6 @@ internal fun BossAppScaffold(
                 // apply" is two places for that order to drift, and the order is the whole of why
                 // switching away and back does not lose a layout. See WorkspaceSwitch.kt for why
                 // a switch is two decisions rather than one.
-                val workspaceSwitch = rememberWorkspaceSwitch(state, splitViewState)
-                val applyWorkspaceAndPreserve = workspaceSwitch.request
-                WorkspaceSwitchPrompt(state, workspaceSwitch)
 
                 // Top bar - hidden in focus mode with smooth expand/shrink animation, and switched
                 // off outright by the appearance preference. Both have to agree for a bar to show:
@@ -625,7 +678,7 @@ internal fun BossAppScaffold(
                                 extractCurrentWorkspace(splitViewState, selectedProject.path)
                             },
                             onShowTopOfMind = {
-                                state.showTopOfMindDialog = true
+                                openTopOfMindQuickSwitcher(state.windowId, state.coroutineScope)
                             },
                             onShowSettings = {
                                 state.settingsWindow.open()
@@ -638,6 +691,7 @@ internal fun BossAppScaffold(
                             // Clearance for the macOS traffic lights, which are drawn over this
                             // bar's start when there is no title row above it.
                             startInset = trafficLights.barStartInset(),
+                            showHostActions = !nativeHeaderReady,
                             onShowSearch = {
                                 state.showGlobalSearchDialog = true
                             },
@@ -695,7 +749,7 @@ internal fun BossAppScaffold(
                         modifier =
                             Modifier
                                 .weight(1f)
-                                .reportContentInset(density) { contentInset = it },
+                                .reportContentInset(density, LocalLayoutDirection.current) { contentInset = it },
                     ) {
                         BossWindow(
                             modifier = Modifier.fillMaxSize(),
@@ -752,6 +806,9 @@ internal fun BossAppScaffold(
                             },
                             onDrawerVisibleChange = { visible -> drawerVisible = visible },
                             onBarRailedChange = { railed -> barRailed = railed },
+                            sidebarToggleRequests = sidebarToggleRequests.takeIf { sidebarInHeader },
+                            onSidebarLeadingChange = { sidebarLeading = it },
+                            sidebarExtendsIntoTitleBar = !sidebarBelowTopChrome,
                             verticalBarBelowMap = {
                                 VerticalBarHostActions(
                                     actions =
@@ -789,6 +846,9 @@ internal fun BossAppScaffold(
                                     // cleared is not on screen, and the project and workspace
                                     // pickers live nowhere else.
                                     topBarHidden = !drawn.showTopBar,
+                                    // Only so the workspace button can open Top of Mind HERE: a
+                                    // panel open event is broadcast and filtered by window.
+                                    windowId = state.windowId,
                                     project = selectedProject,
                                     onOpenProject = { state.showProjectDialog = true },
                                     workspaceManager = workspaceManager,
@@ -796,7 +856,12 @@ internal fun BossAppScaffold(
                                     getCurrentWorkspace = {
                                         extractCurrentWorkspace(splitViewState, selectedProject.path)
                                     },
-                                    onShowTopOfMind = { state.showTopOfMindDialog = true },
+                                    onShowTopOfMind = {
+                                        openTopOfMindQuickSwitcher(state.windowId, state.coroutineScope)
+                                    },
+                                    // The File menu's own Save Space, not a second copy of it:
+                                    // one path extracts the live layout, writes it and reports.
+                                    onSaveWorkspace = { MenuActionsHandler.triggerSaveWorkspace(state.windowId) },
                                 )
                             },
                         )
@@ -882,9 +947,14 @@ internal fun BossAppScaffold(
                     }
                 }
 
-                // Bottom bar - hidden in focus mode with smooth expand/shrink animation
+                // Setup retains a visible home and its reopened dialog, including in focus mode.
                 AnimatedVisibility(
-                    visible = appearance.showBottomBar && reveal.showBottomBar,
+                    visible =
+                        shouldShowBottomBar(
+                            heldVisible = setupNeedsBottomBar || bottomBarHolds.active,
+                            configuredVisible = appearance.showBottomBar,
+                            focusModeRevealed = reveal.showBottomBar,
+                        ),
                     enter =
                         expandVertically(
                             expandFrom = Alignment.Bottom,
@@ -899,7 +969,9 @@ internal fun BossAppScaffold(
                     Box(
                         modifier = Modifier.hoverable(interactionSource = reveal.bottomBarInteractionSource),
                     ) {
-                        BossBottomBar(splitViewState.getActiveTabsComponent())
+                        CompositionLocalProvider(LocalBottomBarHolds provides bottomBarHolds) {
+                            BossBottomBar(splitViewState.getActiveTabsComponent())
+                        }
                     }
                 }
             }
@@ -923,8 +995,13 @@ internal fun BossAppScaffold(
             // Plugin notification toasts — the render surface for every plugin's
             // PluginContext.notificationProvider.showToast().
             state.currentDefaultPlugin?.pluginToastState?.let { toastState ->
+                AppSharingNotifications(state.windowId, toastState)
                 ToastOverlay(toastState = toastState)
             }
+
+            ToastOverlay(toastState = updateToastState)
+
+            TerminalCallOverlay(state.windowId)
 
             // MRU tab-switcher overlay (Ctrl+Tab in most-recently-used mode)
             TabCycleOverlayHost(
@@ -934,6 +1011,17 @@ internal fun BossAppScaffold(
         }
     }
 }
+
+/**
+ * [heldVisible] is something the bar is hosting right now - Terminal setup's reopened dialog, or a
+ * dialog opened from a bar item ([BottomBarHolds]) - and outranks focus mode's auto-hide, which
+ * would otherwise remove the bar and the dialog with it as soon as the pointer left the bar.
+ */
+internal fun shouldShowBottomBar(
+    heldVisible: Boolean,
+    configuredVisible: Boolean,
+    focusModeRevealed: Boolean,
+): Boolean = heldVisible || (configuredVisible && focusModeRevealed)
 
 /**
  * Which plugin panel column takes the host's actions, or null when the right one is shut.
@@ -967,14 +1055,16 @@ private fun BossDraggableComponent.hostActionsPanelColumn(needsAHome: Boolean): 
  * Reads the rail measurement, never the panel measurement it gates. The rail owns a separate
  * column, so putting actions in the panel cannot change the rail fit and create a cycle.
  */
+@Suppress("LongParameterList")
 internal fun hostActionsNeedAPanel(
     settings: FocusModeSettings,
     topBarHidden: Boolean,
     showTopBar: Boolean,
     verticalBar: VerticalBarHost,
     railActionsFit: Boolean,
+    titleBarAvailable: Boolean = false,
 ): Boolean =
-    focusQuickActionsVisible(settings, topBarHidden, showTopBar) &&
+    !titleBarAvailable && focusQuickActionsVisible(settings, topBarHidden, showTopBar) &&
         (verticalBar == VerticalBarHost.NONE || (verticalBar == VerticalBarHost.RAIL && !railActionsFit))
 
 /**
@@ -1013,3 +1103,85 @@ private fun hostActionsRowSize(
     hasToolbox: Boolean,
     hasLauncher: Boolean,
 ): Int = FOCUS_QUICK_ACTION_COUNT - (if (hasToolbox) 0 else 1) + (if (hasLauncher) 1 else 0)
+
+/** Keep the sidebar's header available even when the optional title text is off. */
+@Composable
+private fun SidebarTitleBar(
+    appearance: WindowAppearanceSettings,
+    trafficLights: TrafficLightInset,
+    barRailed: Boolean,
+    drawerVisible: Boolean,
+    toggleRequests: MutableSharedFlow<Unit>,
+    state: BossAppState,
+    spaceAction: NativeTitleBarAction,
+    sidebarLeading: Float,
+    sidebarBelowTopChrome: Boolean,
+    onNativeReadyChange: (Boolean) -> Unit,
+    onToggleMaximize: (() -> Unit)?,
+) {
+    if (!SystemUtils.isMacOS) {
+        if (trafficLights.needsTitleRow(appearance.showTitleBar)) BossTitleBar(onToggleMaximize = onToggleMaximize)
+    } else {
+        val sidebarInHeader = appearance.tabBarPosition == TabBarPosition.LEFT
+        if (!sidebarInHeader && !trafficLights.needsTitleRow(appearance.showTitleBar)) return
+        val toggleSidebar: () -> Unit = { toggleRequests.tryEmit(Unit) }
+        val title = if (appearance.showTitleBar) spaceAction.label else ""
+        val expanded = !barRailed || drawerVisible
+        val sidebarWidth = if (expanded) appearance.tabBarVerticalWidth + 8f else 0f
+        val actions =
+            mergeNativeSharingActions(
+                sidebarTitleActions(state, toggleSidebar, sidebarWidth, sidebarLeading, sidebarBelowTopChrome) +
+                    spaceAction + nativeTerminalTitleLabel(state.splitViewState) + nativeBrowserTitleActions(state),
+            )
+        val sharing = AppSharingActive(state.windowId)
+        val nativeReady = sidebarInHeader && NativeSidebarTitleBar(title, actions, sharing)
+        NativeBrowserHostAvailability(state.windowId, nativeReady)
+        NativeTerminalHostAvailability(state.windowId, nativeReady)
+        SideEffect { onNativeReadyChange(nativeReady) }
+        DisposableEffect(Unit) { onDispose { onNativeReadyChange(false) } }
+        if (nativeReady) return
+        BossTitleBar(
+            title = title,
+            onToggleMaximize = onToggleMaximize,
+            onToggleSidebar = toggleSidebar.takeIf { sidebarInHeader },
+            sidebarExpanded = expanded && sidebarBelowTopChrome,
+        )
+    }
+}
+
+/** Native buttons call the same window-scoped entry points as their Compose counterparts. */
+@Composable
+private fun sidebarTitleActions(
+    state: BossAppState,
+    toggleSidebar: () -> Unit,
+    sidebarWidth: Float,
+    sidebarLeading: Float,
+    sidebarBelowTopChrome: Boolean,
+): List<NativeTitleBarAction> {
+    val terminalActions = nativeTerminalTitleActions(state.windowId)
+    return buildList {
+        add(
+            NativeTitleBarAction(
+                "sidebar",
+                "Toggle sidebar",
+                "sidebar.left",
+                active = sidebarBelowTopChrome && sidebarWidth > 0f,
+                sidebarWidth = sidebarWidth,
+                sidebarLeading = sidebarLeading,
+                onClick = toggleSidebar,
+            ),
+        )
+        addAll(nativeSessionTitleActions(state))
+        addAll(terminalActions.filterNot { it.id == "terminal_call_setup" })
+        add(NativeTitleBarAction("search", "Search", "magnifyingglass") { state.showGlobalSearchDialog = true })
+        add(NativeTitleBarAction("tools", "Tools menu", "square.grid.2x2") { state.showToolLauncherDialog = true })
+        state.draggablePanelComponent.toolboxSidebarItem()?.let { item ->
+            add(
+                NativeTitleBarAction("toolbox", item.label, icon = item.icon) {
+                    state.draggablePanelComponent.handleSidebarItemClick(item)
+                },
+            )
+        }
+        add(nativeMoreTitleAction(state, terminalActions.filter { it.id == "terminal_call_setup" }))
+    }
+}

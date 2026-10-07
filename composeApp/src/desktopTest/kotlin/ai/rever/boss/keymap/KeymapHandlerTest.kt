@@ -5,6 +5,8 @@ import ai.rever.boss.keymap.handler.MapBasedActionExecutor
 import ai.rever.boss.keymap.model.KeyBinding
 import ai.rever.boss.keymap.model.KeymapSettings
 import ai.rever.boss.keymap.model.ShortcutContext
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -324,5 +326,272 @@ class KeymapHandlerTest {
 
         assertNotNull(handler)
         assertTrue(handler.isBound("test.action"))
+    }
+
+    // ==================== KEY PRESS, RELEASE & REPEAT SEMANTICS TESTS ====================
+
+    @OptIn(androidx.compose.ui.InternalComposeUiApi::class)
+    private fun createKeyEvent(
+        key: Key,
+        type: KeyEventType,
+        meta: Boolean = false,
+        ctrl: Boolean = false,
+        shift: Boolean = false,
+        alt: Boolean = false,
+    ): androidx.compose.ui.input.key.KeyEvent =
+        androidx.compose.ui.input.key.KeyEvent(
+            key = key,
+            type = type,
+            isMetaPressed = if (ai.rever.boss.utils.SystemUtils.isMacOS) meta else false,
+            isCtrlPressed = if (ai.rever.boss.utils.SystemUtils.isMacOS) ctrl else (meta || ctrl),
+            isShiftPressed = shift,
+            isAltPressed = alt,
+        )
+
+    @Test
+    fun `handleKeyEvent on KeyDown consumes event and executes the action`() {
+        val binding =
+            KeyBinding(
+                actionId = "test.action",
+                key = "N",
+                modifiers = listOf("Cmd"),
+                context = ShortcutContext.GLOBAL,
+                enabled = true,
+            )
+
+        val handler = KeymapHandler.from(KeymapSettings.fromBindings(listOf(binding)))
+        var executed = false
+
+        val keyDown = createKeyEvent(Key.N, KeyEventType.KeyDown, meta = true)
+        val handled =
+            handler.handleKeyEvent(keyDown, ShortcutContext.GLOBAL) {
+                executed = true
+                true
+            }
+
+        assertTrue(handled, "KeyDown matching shortcut should be consumed")
+        assertTrue(executed, "KeyDown must execute the action (BossConsole#1568)")
+        assertTrue(handler.hasPendingShortcut, "Handler should hold the chord until release")
+    }
+
+    @Test
+    fun `handleKeyEvent on KeyUp after matching KeyDown is consumed without executing again`() {
+        val binding =
+            KeyBinding(
+                actionId = "test.action",
+                key = "N",
+                modifiers = listOf("Cmd"),
+                context = ShortcutContext.GLOBAL,
+                enabled = true,
+            )
+
+        val handler = KeymapHandler.from(KeymapSettings.fromBindings(listOf(binding)))
+        var executionCount = 0
+
+        val keyDown = createKeyEvent(Key.N, KeyEventType.KeyDown, meta = true)
+        handler.handleKeyEvent(keyDown, ShortcutContext.GLOBAL) {
+            executionCount++
+            true
+        }
+
+        val keyUp = createKeyEvent(Key.N, KeyEventType.KeyUp, meta = true)
+        val handled =
+            handler.handleKeyEvent(keyUp, ShortcutContext.GLOBAL) {
+                executionCount++
+                true
+            }
+
+        assertTrue(handled, "KeyUp should be handled")
+        assertEquals(1, executionCount, "Action must be executed exactly once, by the KeyDown")
+        assertFalse(handler.hasPendingShortcut, "The held chord should be cleared on release")
+    }
+
+    @Test
+    fun `repeated KeyDown events do not trigger multiple executions`() {
+        val binding =
+            KeyBinding(
+                actionId = "test.action",
+                key = "N",
+                modifiers = listOf("Cmd"),
+                context = ShortcutContext.GLOBAL,
+                enabled = true,
+            )
+
+        val handler = KeymapHandler.from(KeymapSettings.fromBindings(listOf(binding)))
+        var executionCount = 0
+
+        // Simulate auto-repeat key-down events
+        repeat(5) {
+            val keyDown = createKeyEvent(Key.N, KeyEventType.KeyDown, meta = true)
+            val handled =
+                handler.handleKeyEvent(keyDown, ShortcutContext.GLOBAL) {
+                    executionCount++
+                    true
+                }
+            assertTrue(handled, "Auto-repeat KeyDown should be consumed")
+        }
+
+        assertEquals(1, executionCount, "Only the first KeyDown may execute; repeats must not")
+
+        // Release primary key
+        val keyUp = createKeyEvent(Key.N, KeyEventType.KeyUp, meta = true)
+        val handled =
+            handler.handleKeyEvent(keyUp, ShortcutContext.GLOBAL) {
+                executionCount++
+                true
+            }
+
+        assertTrue(handled, "KeyUp should be handled")
+        assertEquals(1, executionCount, "The release must not execute again")
+    }
+
+    @Test
+    fun `releasing the modifier before the key neither cancels nor re-executes the chord`() {
+        val binding = KeyBinding(actionId = "test.action", key = "N", modifiers = listOf("Cmd"))
+        val handler = KeymapHandler.from(KeymapSettings.fromBindings(listOf(binding)))
+        var executionCount = 0
+        val execute: (String) -> Boolean = {
+            executionCount++
+            true
+        }
+
+        val keyDown = createKeyEvent(Key.N, KeyEventType.KeyDown, meta = true)
+        assertTrue(handler.handleKeyEvent(keyDown, ShortcutContext.GLOBAL, execute))
+        assertEquals(1, executionCount)
+
+        // Fast typing: Cmd comes up a few ms before N (BossConsole#1568).
+        val modifierKeyUp = createKeyEvent(Key.MetaLeft, KeyEventType.KeyUp, meta = false)
+        assertFalse(handler.handleKeyEvent(modifierKeyUp, ShortcutContext.GLOBAL, execute))
+        assertFalse(handler.hasPendingShortcut, "The held record is dropped on modifier release")
+
+        // A bare auto-repeat of the still-held key stays swallowed and runs nothing.
+        assertTrue(
+            handler.handleKeyEvent(createKeyEvent(Key.N, KeyEventType.KeyDown), ShortcutContext.GLOBAL, execute),
+        )
+        val keyUp = createKeyEvent(Key.N, KeyEventType.KeyUp, meta = false)
+        assertTrue(handler.handleKeyEvent(keyUp, ShortcutContext.GLOBAL, execute), "The release stays consumed")
+        assertEquals(1, executionCount, "The chord ran exactly once")
+    }
+
+    @Test
+    fun `clearPendingShortcut cancels pending shortcut on focus loss or reset`() {
+        val binding =
+            KeyBinding(
+                actionId = "test.action",
+                key = "N",
+                modifiers = listOf("Cmd"),
+                context = ShortcutContext.GLOBAL,
+                enabled = true,
+            )
+
+        val handler = KeymapHandler.from(KeymapSettings.fromBindings(listOf(binding)))
+        var executed = false
+
+        val keyDown = createKeyEvent(Key.N, KeyEventType.KeyDown, meta = true)
+        handler.handleKeyEvent(keyDown, ShortcutContext.GLOBAL) {
+            executed = true
+            true
+        }
+        assertTrue(handler.hasPendingShortcut)
+
+        // Focus loss or cancellation clears pending state
+        handler.clearPendingShortcut()
+        assertFalse(handler.hasPendingShortcut)
+
+        // The key-down already ran the action; a key up after clearing is not claimed.
+        assertTrue(executed)
+        executed = false
+        val keyUp = createKeyEvent(Key.N, KeyEventType.KeyUp, meta = true)
+        val handled =
+            handler.handleKeyEvent(keyUp, ShortcutContext.GLOBAL) {
+                executed = true
+                true
+            }
+
+        assertFalse(handled)
+        assertFalse(executed)
+    }
+
+    @Test
+    fun `updated bindings replace matcher and a context change does not re-run a held chord`() {
+        val binding = KeyBinding(actionId = "test.action", key = "N", modifiers = listOf("Cmd"))
+        val handler = KeymapHandler(KeymapSettings.fromBindings(listOf(binding)))
+        handler.updateSettings(KeymapSettings.fromBindings(listOf(binding.copy(key = "T"))))
+        var calls = 0
+        val execute: (String) -> Boolean = {
+            calls++
+            true
+        }
+        assertFalse(
+            handler.handleKeyEvent(
+                createKeyEvent(Key.N, KeyEventType.KeyDown, meta = true),
+                ShortcutContext.GLOBAL,
+                execute,
+            ),
+        )
+        assertTrue(
+            handler.handleKeyEvent(
+                createKeyEvent(Key.T, KeyEventType.KeyDown, meta = true),
+                ShortcutContext.GLOBAL,
+                execute,
+            ),
+        )
+        assertTrue(
+            handler.handleKeyEvent(
+                createKeyEvent(Key.T, KeyEventType.KeyUp, meta = true),
+                ShortcutContext.TERMINAL,
+                execute,
+            ),
+        )
+        assertEquals(1, calls, "only the new binding's KeyDown ran it")
+    }
+
+    @Test
+    fun `a chord the executor does not handle is neither consumed nor held`() {
+        val binding = KeyBinding(actionId = "test.action", key = "N", modifiers = listOf("Cmd"))
+        val handler = KeymapHandler(KeymapSettings.fromBindings(listOf(binding)))
+        var calls = 0
+        val decline: (String) -> Boolean = {
+            calls++
+            false
+        }
+        val keyDown = createKeyEvent(Key.N, KeyEventType.KeyDown, meta = true)
+        assertFalse(handler.handleKeyEvent(keyDown, ShortcutContext.GLOBAL, decline), "matches the AWT path")
+        assertFalse(handler.hasPendingShortcut)
+        assertFalse(handler.handleKeyEvent(keyDown, ShortcutContext.GLOBAL, decline), "not a swallowed repeat")
+        assertEquals(2, calls)
+        val keyUp = createKeyEvent(Key.N, KeyEventType.KeyUp, meta = true)
+        assertFalse(handler.handleKeyEvent(keyUp, ShortcutContext.GLOBAL, decline))
+    }
+
+    @Test
+    fun `overlapping Compose chords retain each action and suppress repeats`() {
+        val bindings = listOf("N", "T").map { KeyBinding(actionId = it, key = it, modifiers = listOf("Cmd")) }
+        val handler = KeymapHandler(KeymapSettings.fromBindings(bindings))
+        val calls = mutableListOf<String>()
+        val execute: (String) -> Boolean = {
+            calls.add(it)
+            true
+        }
+        for (key in listOf(Key.N, Key.T, Key.N)) {
+            assertTrue(
+                handler.handleKeyEvent(
+                    createKeyEvent(key, KeyEventType.KeyDown, meta = true),
+                    ShortcutContext.GLOBAL,
+                    execute,
+                ),
+            )
+        }
+        assertEquals(listOf("N", "T"), calls, "each chord runs on its own KeyDown; the repeat N does not")
+        for (key in listOf(Key.N, Key.T)) {
+            assertTrue(
+                handler.handleKeyEvent(
+                    createKeyEvent(key, KeyEventType.KeyUp, meta = true),
+                    ShortcutContext.GLOBAL,
+                    execute,
+                ),
+            )
+        }
+        assertEquals(listOf("N", "T"), calls)
     }
 }

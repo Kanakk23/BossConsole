@@ -1,8 +1,10 @@
 package ai.rever.boss.plugin
 
+import ai.rever.boss.components.plugin.DependencyInstallPlan
 import ai.rever.boss.components.plugin.MissingDependencyInstaller
 import ai.rever.boss.components.plugin.PluginDependencyResolution
 import ai.rever.boss.downloads.DownloadCenter
+import ai.rever.boss.mcp.ApprovedArtifact
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.api.TransferKind
 import ai.rever.boss.plugin.api.TransferPhase
@@ -13,6 +15,7 @@ import ai.rever.boss.plugin.repository.PluginRepository
 import ai.rever.boss.plugin.repository.shortFailureReason
 import ai.rever.boss.utils.atomicMoveFrom
 import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.ComponentLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -45,6 +48,7 @@ import java.io.File
  *   later directory scan exactly like any other install
  * @param hooks everything this needs from outside itself; see [InstallerHooks]
  */
+@Suppress("TooManyFunctions")
 class StoreMissingDependencyInstaller(
     private val repository: () -> PluginRepository?,
     private val pluginDir: () -> File,
@@ -61,10 +65,18 @@ class StoreMissingDependencyInstaller(
      * prompt, which falls back to the id, so a store that cannot answer must not stop the user being
      * offered the install. It is logged so the swallow is not invisible - the same silence one method
      * below is what made a decode failure look like a missing plugin.
+     *
+     * Cancellation is not a failure and is not swallowed: it propagates, thrown or returned, before
+     * the log line, so dismissing the dialog mid-lookup does not record a store problem that did not
+     * happen. Both arrival shapes are handled: the bundled `RemotePluginRepository` rethrows a
+     * caller's cancellation, but the [PluginRepository] interface permits either shape - a
+     * third-party implementation may still fold it into `Result.failure` - so the returned shape
+     * is checked as well.
      */
     override suspend fun displayNameFor(pluginId: String): String? {
         val lookup = runCatching { repository()?.getPlugin(pluginId) }.getOrElse { Result.failure(it) }
         lookup?.exceptionOrNull()?.let { error ->
+            if (error is CancellationException) throw error
             logger.warn(
                 LogCategory.SYSTEM,
                 "Could not read a dependency's display name from the store; falling back to its id",
@@ -75,6 +87,144 @@ class StoreMissingDependencyInstaller(
         // No early return needed for the failure: getOrNull() is null in that case anyway.
         return lookup?.getOrNull()?.displayName?.takeIf { it.isNotBlank() }
     }
+
+    /**
+     * The closure over the store's dependency column, so the dialog can say what Install will do.
+     *
+     * The store's `dependencies` are ids only. The `optional` flag lives in the jar's own
+     * manifest, which is not available before the download the user has not yet agreed to, so
+     * every edge is followed as if required. A store that cannot describe a plugin - no row, a
+     * decode failure, a transport error - contributes null and the walk carries on without
+     * expanding that plugin. Its install is still attempted and can fail, stopping the plan.
+     *
+     * Anything the walk found odd is logged here, once: a cycle or a cap hit is a store data
+     * problem someone should be able to find, and an unresolved plugin is exactly the silence
+     * this method exists to remove.
+     */
+    override suspend fun planFor(pluginId: String): DependencyInstallPlan =
+        withContext(Dispatchers.IO) {
+            val store = repository() ?: return@withContext super.planFor(pluginId)
+            val present = mutableMapOf<String, Boolean>()
+            val plan =
+                PluginDependencyResolution.installPlan(
+                    rootId = pluginId,
+                    isPresent = { id -> present.getOrPut(id) { isInstalled(id) } },
+                    dependenciesOf = { id ->
+                        val lookup = runCatching { store.getPlugin(id) }.getOrElse { Result.failure(it) }
+                        lookup.exceptionOrNull()?.let { error ->
+                            if (error is CancellationException) throw error
+                            logger.warn(
+                                LogCategory.SYSTEM,
+                                "Could not read plugin dependencies; installation will retry the store lookup",
+                                mapOf("pluginId" to id),
+                                error = error,
+                            )
+                        }
+                        lookup.getOrNull()?.dependencies
+                    },
+                )
+            if (plan.cyclic || plan.truncated || plan.unresolved.isNotEmpty()) {
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Dependency install plan has gaps",
+                    mapOf(
+                        "root" to pluginId,
+                        "cyclic" to plan.cyclic.toString(),
+                        "truncated" to plan.truncated.toString(),
+                        "unresolved" to plan.unresolved.joinToString(","),
+                    ),
+                )
+            }
+            plan
+        }
+
+    override suspend fun installAll(order: List<String>): Result<Unit> {
+        val acceptedOrder = order.toList()
+        return DETACHED_PLANS.run(
+            key = acceptedOrder,
+            onDetachedFailure = { error ->
+                logger.error(
+                    LogCategory.SYSTEM,
+                    "Detached dependency plan failed",
+                    mapOf("plan" to acceptedOrder.joinToString(",")),
+                    error = error,
+                )
+            },
+        ) {
+            super.installAll(acceptedOrder).onFailure { error ->
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Dependency install plan failed",
+                    mapOf("plan" to acceptedOrder.joinToString(",")),
+                    error = error,
+                )
+            }
+        }
+    }
+
+    @Suppress("NestedBlockDepth")
+    override suspend fun installAllArtifacts(artifacts: List<ApprovedArtifact>): Result<Unit> {
+        val acceptedArtifacts = artifacts.toList()
+        return DETACHED_PLANS.run(
+            key = acceptedArtifacts.map { it.pluginId },
+            onDetachedFailure = { error ->
+                logger.error(
+                    LogCategory.SYSTEM,
+                    "Detached dependency plan failed",
+                    mapOf("plan" to acceptedArtifacts.map { it.pluginId }.joinToString(",")),
+                    error = error,
+                )
+            },
+        ) {
+            val root = acceptedArtifacts.lastOrNull()
+            for (artifact in acceptedArtifacts) {
+                val error = installArtifact(artifact).exceptionOrNull() ?: continue
+                val reported =
+                    if (artifact == root) {
+                        error
+                    } else {
+                        val message =
+                            error.message?.let { "Could not install ${root?.pluginId}: $it" }
+                                ?: "Could not install ${root?.pluginId}."
+                        IllegalStateException(message, error)
+                    }
+                return@run Result.failure(reported)
+            }
+            Result.success(Unit)
+        }
+    }
+
+    override suspend fun installArtifact(artifact: ApprovedArtifact): Result<Unit> =
+        DETACHED_INSTALLS.run(
+            key = artifact.pluginId,
+            onDetachedFailure = { error ->
+                logger.error(LogCategory.SYSTEM, "Detached dependency install failed", error = error)
+            },
+        ) {
+            val store = repository()
+            when {
+                artifact.sha256.isBlank() -> {
+                    failure("Approved artifact for '${artifact.pluginId}' has a blank SHA-256 hash.")
+                }
+
+                isInstalled(artifact.pluginId) -> {
+                    Result.success(Unit)
+                }
+
+                store == null -> {
+                    failure("The plugin store is not available. Check your connection and try again.")
+                }
+
+                else -> {
+                    installFromStore(
+                        store,
+                        artifact.pluginId,
+                        expectedVersion = artifact.version,
+                        expectedSha256 = artifact.sha256,
+                    )
+                }
+            }
+        }
 
     override suspend fun install(pluginId: String): Result<Unit> =
         DETACHED_INSTALLS.run(
@@ -101,9 +251,12 @@ class StoreMissingDependencyInstaller(
             }
         }
 
+    @Suppress("ReturnCount")
     private suspend fun installFromStore(
         store: PluginRepository,
         pluginId: String,
+        expectedVersion: String? = null,
+        expectedSha256: String? = null,
     ): Result<Unit> {
         // "Could not ask the store" is not "the store does not have it", and telling the user the
         // second when the first happened is what sent the Flow diagnosis after a missing row that was
@@ -127,6 +280,9 @@ class StoreMissingDependencyInstaller(
                     ?.let { "Could not look up $pluginId in the plugin store: ${shortFailureReason(it)}" }
                     ?: "$pluginId was not found in the plugin store.",
             )
+
+        val metadataError = validateStoreArtifact(pluginId, info, expectedVersion, expectedSha256, logger)
+        if (metadataError != null) return failure(metadataError)
 
         // `<id_with_underscores>_<version>.jar` in the plugins directory, so a later directory
         // scan picks it up like any other install. Both parts are sanitised because both come
@@ -166,6 +322,7 @@ class StoreMissingDependencyInstaller(
                     DownloadCenter.progress(pluginId, it)
                 }.fold(
                     onSuccess = { downloaded ->
+                        rejectUnapprovedDownload(downloaded, part.absolutePath, expectedSha256)?.let { return@fold it }
                         DownloadCenter.phase(pluginId, TransferPhase.INSTALLING)
                         // NonCancellable, like the two swap paths: a Cancel pressed
                         // between the last progress tick and here surfaces at the next
@@ -199,6 +356,17 @@ class StoreMissingDependencyInstaller(
         }
     }
 
+    private fun rejectUnapprovedDownload(
+        downloaded: String,
+        partPath: String,
+        expectedSha256: String?,
+    ): Result<Unit>? {
+        val error = verifyApprovedDownload(downloaded, expectedSha256) ?: return null
+        discard(downloaded)
+        discard(partPath)
+        return Result.failure(error)
+    }
+
     /**
      * Move the completed download onto its final name, sidecar included, then load it.
      *
@@ -230,8 +398,9 @@ class StoreMissingDependencyInstaller(
      *
      * Deliberately not back through [PluginLoaderDelegateImpl.loadPlugin], so a dependency
      * that has dependencies of its own does not chain prompts: the user answered one question
-     * and should not be handed a second dialog as its consequence. Anything still missing
-     * shows up the next time that plugin is installed or updated.
+     * and should not be handed a second dialog as its consequence. The accepted [planFor]
+     * result covers the store metadata available when the user answered; dependencies absent
+     * from that metadata are not silently added to the accepted plan.
      */
     private suspend fun vetAndLoad(
         pluginId: String,
@@ -320,19 +489,6 @@ class StoreMissingDependencyInstaller(
     }
 
     /**
-     * Removes a jar and its signature sidecar together.
-     *
-     * The pair matters: reinstalling the same version reuses the filename, so a surviving
-     * `.sig` would meet fresh bytes and hard-fail at load - worse than being unsigned.
-     */
-    private fun discard(jarPath: String) {
-        runCatching { File(jarPath).delete() }
-        runCatching { PluginSignatureSidecar.delete(jarPath) }
-    }
-
-    private fun failure(message: String): Result<Unit> = Result.failure(IllegalStateException(message))
-
-    /**
      * Move the downloaded jar and its signature onto the final name.
      *
      * `persist` rather than `write`, because `target` can already exist - reinstalling the same
@@ -354,6 +510,12 @@ class StoreMissingDependencyInstaller(
          * mid-download would otherwise abort the install and leave the partial jar behind.
          */
         private val INSTALL_SCOPE = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+        // Separate jobs keyed by the full consent list avoid self-joining a per-plugin job
+        // and never coalesce two different consent plans for the same root.
+        // Different consent plans may overlap: a single-plugin fallback in another window can
+        // load the root before this plan reaches it. Ordering is guaranteed within each plan.
+        private val DETACHED_PLANS = KeyedDetachedJobs<List<String>, Result<Unit>>(INSTALL_SCOPE)
 
         /**
          * Detaches installs from the window that asked and coalesces them per plugin id.
@@ -415,3 +577,57 @@ class InstallerHooks(
  * survive because versions are full of them and, with separators gone, cannot traverse.
  */
 private fun safe(part: String) = part.replace(Regex("[^A-Za-z0-9.-]"), "_")
+
+/** A user-facing failure: the message is what the dialog shows, so it names a plugin, not a transport. */
+private fun failure(message: String): Result<Unit> = Result.failure(IllegalStateException(message))
+
+/**
+ * Removes a jar and its signature sidecar together.
+ *
+ * The pair matters: reinstalling the same version reuses the filename, so a surviving
+ * `.sig` would meet fresh bytes and hard-fail at load - worse than being unsigned.
+ */
+private fun discard(jarPath: String) {
+    runCatching { File(jarPath).delete() }
+    runCatching { PluginSignatureSidecar.delete(jarPath) }
+}
+
+@Suppress("ReturnCount")
+private fun validateStoreArtifact(
+    pluginId: String,
+    info: PluginInfo,
+    expectedVersion: String?,
+    expectedSha256: String?,
+    logger: ComponentLogger,
+): String? {
+    if (!expectedVersion.isNullOrBlank() && info.version != expectedVersion) {
+        logger.warn(
+            LogCategory.SYSTEM,
+            "Store version mismatch for plugin",
+            mapOf("pluginId" to pluginId, "storeVersion" to info.version, "expectedVersion" to expectedVersion),
+        )
+        return "Store version for $pluginId (${info.version}) does not match approved version " +
+            "$expectedVersion."
+    }
+
+    if (!expectedSha256.isNullOrBlank()) {
+        if (info.sha256.isBlank()) {
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Store missing SHA-256 for plugin",
+                mapOf("pluginId" to pluginId, "expectedSha256" to expectedSha256),
+            )
+            return "Store provides no SHA-256 hash for $pluginId; expected $expectedSha256."
+        }
+        if (!info.sha256.equals(expectedSha256, ignoreCase = true)) {
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Store SHA-256 mismatch for plugin",
+                mapOf("pluginId" to pluginId, "storeSha256" to info.sha256, "expectedSha256" to expectedSha256),
+            )
+            return "Store SHA-256 for $pluginId (${info.sha256}) does not match approved hash " +
+                "$expectedSha256."
+        }
+    }
+    return null
+}

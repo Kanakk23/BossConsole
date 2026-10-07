@@ -14,12 +14,14 @@ import ai.rever.boss.plugin.api.PluginSandboxRef
 import ai.rever.boss.plugin.api.PluginState
 import ai.rever.boss.plugin.api.PluginUnloadAware
 import ai.rever.boss.plugin.api.TabRegistry
+import ai.rever.boss.plugin.launchpad.DevPluginArtifacts
 import ai.rever.boss.plugin.loader.DynamicPluginLoaderImpl
 import ai.rever.boss.plugin.loader.PluginApiLevelException
 import ai.rever.boss.plugin.loader.PluginBinaryIncompatibilityException
 import ai.rever.boss.plugin.loader.PluginBossVersionException
 import ai.rever.boss.plugin.loader.PluginManifestReader
 import ai.rever.boss.plugin.loader.PluginUnloadException
+import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.plugin.sandbox.InProcessPluginSandbox
 import ai.rever.boss.plugin.sandbox.PluginErrorClassifier
 import ai.rever.boss.plugin.sandbox.PluginExecutionBoundary
@@ -30,11 +32,13 @@ import ai.rever.boss.plugin.sandbox.SandboxConfig
 import ai.rever.boss.plugin.sandbox.ui.PluginCrashRegistry
 import ai.rever.boss.plugin.sandbox.ui.PluginRecoveryQuarantine
 import ai.rever.boss.services.auth.AuthStateManager
+import ai.rever.boss.services.supabase.models.UserInfo
 import ai.rever.boss.utils.AppVersion
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
@@ -96,6 +100,11 @@ interface OutOfProcessPluginSpawner {
      * Terminate the child process for the given plugin.
      */
     suspend fun terminate(pluginId: String): Result<Unit>
+
+    /**
+     * Stop background supervision owned by this spawner.
+     */
+    fun dispose() = Unit
 }
 
 /**
@@ -120,6 +129,7 @@ class DynamicPluginManager(
     internal val sandboxManager: PluginSandboxManager,
     private val createSandboxedContext: (pluginId: String, config: SandboxConfig) -> PluginContext,
     private val outOfProcessSpawner: OutOfProcessPluginSpawner? = null,
+    private val accessUsers: StateFlow<UserInfo?> = AuthStateManager.currentUser,
 ) {
     private val logger = BossLogger.forComponent("DynamicPluginManager")
 
@@ -132,6 +142,12 @@ class DynamicPluginManager(
      * Mutex for plugin operations to prevent race conditions.
      */
     private val mutex = Mutex()
+
+    private val oopLifecycleLocks = ConcurrentHashMap<String, Mutex>()
+
+    private val initialOopSpawnTickets = ConcurrentHashMap<String, Any>()
+
+    private fun oopLifecycleLock(pluginId: String): Mutex = oopLifecycleLocks.computeIfAbsent(pluginId) { Mutex() }
 
     /**
      * The underlying plugin loader.
@@ -254,6 +270,10 @@ class DynamicPluginManager(
     @Volatile
     internal var persistedReloadJarPath: ((String) -> String?)? = null
 
+    /** Restarts a dependent through this window's plugin delegate. */
+    @Volatile
+    internal var restartDependentPlugin: (suspend (String) -> Unit)? = null
+
     companion object {
         private val companionLogger = BossLogger.forComponent("DynamicPluginManager")
 
@@ -362,7 +382,7 @@ class DynamicPluginManager(
          */
         private val swapScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-        private fun activeManagers(): List<DynamicPluginManager> {
+        internal fun activeManagers(): List<DynamicPluginManager> {
             liveManagers.removeIf { it.get() == null }
             return liveManagers.mapNotNull { it.get() }
         }
@@ -383,6 +403,10 @@ class DynamicPluginManager(
          * Null in a headless or fully torn-down process, where there is nothing to install into.
          */
         fun anyActiveManager(): DynamicPluginManager? = activeManagers().firstOrNull()
+
+        /** Keep a window-bound operation in its manager while that manager remains live. */
+        internal fun activeManagerOrFallback(preferred: DynamicPluginManager): DynamicPluginManager? =
+            activeManagers().let { managers -> managers.firstOrNull { it === preferred } ?: managers.firstOrNull() }
 
         /** Where [pluginId] was loaded from, per the first live manager that knows it. */
         fun jarPathOf(pluginId: String): String? =
@@ -762,7 +786,7 @@ class DynamicPluginManager(
         // reconcile plugin visibility whenever either changes.
         managerScope.launch(Dispatchers.Main) {
             val transitions = PluginAccessTransitions()
-            AuthStateManager.currentUser
+            accessUsers
                 .map { user ->
                     PluginAccessSnapshot(user?.id, user?.isAdmin == true, user?.permissions?.toSet() ?: emptySet())
                 }.distinctUntilChanged()
@@ -798,7 +822,7 @@ class DynamicPluginManager(
      *   plugin's [PluginManifest.requiredPermissions]. An empty list (legacy
      *   plugins) means "available to any authenticated user".
      */
-    private fun canAccess(manifest: PluginManifest): Boolean =
+    internal fun canAccess(manifest: PluginManifest): Boolean =
         pluginAccessAllowed(
             isAdmin = _isAdmin.value,
             userPermissions = _userPermissions.value,
@@ -837,6 +861,10 @@ class DynamicPluginManager(
 
     /**
      * Register a component that needs to be notified before plugin unload.
+     *
+     * Held by [WeakReference], like [listeners]: the caller owns the component's lifetime and
+     * must keep it reachable for as long as it should be consulted. A component registered
+     * inline and dropped is collected silently and never asked again.
      */
     fun registerUnloadAware(component: PluginUnloadAware) {
         cleanupDeadReferences(unloadAwareComponents)
@@ -888,6 +916,41 @@ class DynamicPluginManager(
                     ai.rever.boss.plugin.api.Version
                         .parse(incoming.version)
                 if (installed != null && candidate != null && candidate > installed) {
+                    // Pre-check the trust gate BEFORE paying for the swap: it
+                    // unloads every plugin in every manager and re-runs
+                    // fromPluginDir, which now refuses unverifiable jars. A
+                    // swap triggered by this jar's manifest version that the
+                    // gate cannot verify would tear everything down and land
+                    // on an older jar or an empty layer - strictly worse
+                    // than the layer we just unloaded (BossConsole#851).
+                    val swapDir = java.io.File(jarPath).parentFile ?: java.io.File(".")
+                    // selectApiJar owns the enforce/rollback lever, so this
+                    // pre-check agrees with what the swap's fromPluginDir will
+                    // actually install; with the lever off, the pre-gate swap
+                    // behaviour is restored end-to-end (round-3 review).
+                    val verified =
+                        ai.rever.boss.plugin.loader.ApiClassLoader
+                            .selectApiJar(swapDir)
+                    val gateEnforced =
+                        ai.rever.boss.plugin.loader.ApiClassLoader
+                            .isGateEnforced()
+                    if (verified == null || (gateEnforced && verified.version < candidate)) {
+                        logger.warn(
+                            LogCategory.SYSTEM,
+                            "Newer api jar has no trust proof that verifies over its " +
+                                "claimed identity - refusing the hot swap rather than " +
+                                "degrading the live API layer",
+                            mapOf(
+                                "incomingVersion" to candidate.toString(),
+                                "newestVerifiedVersion" to (verified?.version?.toString() ?: "none"),
+                            ),
+                        )
+                        return Result.failure(
+                            IllegalStateException(
+                                "api jar $candidate cannot be verified; the API layer was not swapped",
+                            ),
+                        )
+                    }
                     logger.info(
                         LogCategory.SYSTEM,
                         "Newer api plugin installed - hot-swapping the API layer",
@@ -896,15 +959,17 @@ class DynamicPluginManager(
                             "to" to candidate.toString(),
                         ),
                     )
-                    hotSwapApiLayer(java.io.File(jarPath).parentFile ?: java.io.File(".")).onFailure {
+                    hotSwapApiLayer(swapDir).onFailure {
                         return Result.failure(it)
                     }
                     // If the swap's snapshot contained the api plugin, it was
-                    // already reloaded — return that entry. The update bridge
-                    // however UNINSTALLS the api plugin before handing us the
-                    // new jar, so the snapshot may have lacked it: fall through
-                    // to a normal install (versions are now equal, so the
-                    // trigger won't re-fire) to (re)create the plugin entry.
+                    // already reloaded - return that entry. Store updates can no
+                    // longer reach this route (the update bridge never offers a
+                    // protected id, and UpdateJarIdentityVet refuses such a jar),
+                    // but a deferred-restart snapshot may still lack the api
+                    // plugin: fall through to a normal install (versions are now
+                    // equal, so the trigger won't re-fire) to (re)create the
+                    // plugin entry.
                     getPluginInfo(ai.rever.boss.plugin.loader.ApiClassLoader.API_PLUGIN_ID)
                         ?.let { return Result.success(it) }
                 }
@@ -1012,38 +1077,19 @@ class DynamicPluginManager(
                                 )
                             trackingContexts[manifest.pluginId] = trackingContext
 
-                            try {
-                                loadedPlugin.instance.register(trackingContext)
-                            } catch (e: Exception) {
-                                logger.error(
-                                    LogCategory.SYSTEM,
-                                    "Plugin registration failed in split-brain mode",
-                                    mapOf(
-                                        "pluginId" to manifest.pluginId,
-                                    ),
-                                    e,
-                                )
-                            }
+                            val shouldActivate = enabled && canAccess(manifest)
 
-                            // Spawn child process in background — don't block plugin loading
-                            managerScope.launch {
-                                val spawnResult = spawner.spawn(manifest, jarPath)
-                                if (spawnResult.isFailure) {
-                                    logger.warn(
+                            if (shouldActivate) {
+                                try {
+                                    loadedPlugin.instance.register(trackingContext)
+                                } catch (e: Exception) {
+                                    logger.error(
                                         LogCategory.SYSTEM,
-                                        "Background OOP spawn failed",
-                                        mapOf(
-                                            "pluginId" to manifest.pluginId,
-                                            "error" to (spawnResult.exceptionOrNull()?.message ?: "unknown"),
-                                        ),
-                                    )
-                                } else {
-                                    logger.info(
-                                        LogCategory.SYSTEM,
-                                        "Background OOP spawn succeeded",
+                                        "Plugin registration failed in split-brain mode",
                                         mapOf(
                                             "pluginId" to manifest.pluginId,
                                         ),
+                                        e,
                                     )
                                 }
                             }
@@ -1052,11 +1098,73 @@ class DynamicPluginManager(
                                 DynamicPluginInfo(
                                     manifest = manifest,
                                     jarPath = jarPath,
-                                    state = if (enabled) PluginState.LOADED else PluginState.DISABLED,
+                                    state = if (shouldActivate) PluginState.LOADED else PluginState.DISABLED,
                                     loadedAt = System.currentTimeMillis(),
                                     enabled = enabled,
                                 )
+
+                            if (enabled && !shouldActivate) {
+                                hiddenPlugins[manifest.pluginId] = info
+                                val missing = missingPermissions(manifest)
+                                logger.info(
+                                    LogCategory.SYSTEM,
+                                    "Plugin hidden (insufficient access)",
+                                    mapOf(
+                                        "pluginId" to manifest.pluginId,
+                                        "requiresAdmin" to manifest.requiresAdmin,
+                                        "requiredPermissions" to
+                                            manifest.requiredPermissions.joinToString(","),
+                                        "missingPermissions" to missing.joinToString(","),
+                                        "hint" to
+                                            if (missing.isNotEmpty()) {
+                                                "Ask an admin to grant: ${missing.joinToString(", ")}"
+                                            } else {
+                                                "Requires admin"
+                                            },
+                                    ),
+                                )
+                            }
+
                             updatePluginState(manifest.pluginId, info)
+                            if (shouldActivate) {
+                                val spawnTicket = Any()
+                                initialOopSpawnTickets[manifest.pluginId] = spawnTicket
+
+                                // Spawn child process in background — don't block plugin loading
+                                // Serialize this plugin's spawn with Disable without blocking other plugins.
+                                managerScope.launch {
+                                    oopLifecycleLock(manifest.pluginId).withLock {
+                                        if (!initialOopSpawnTickets.remove(manifest.pluginId, spawnTicket)) {
+                                            return@withLock
+                                        }
+                                        val current = _pluginStates.value[manifest.pluginId]
+                                        if (current?.state != PluginState.LOADED ||
+                                            !current.enabled ||
+                                            !canAccess(manifest)
+                                        ) {
+                                            return@withLock
+                                        }
+
+                                        val spawnResult = spawner.spawn(manifest, jarPath)
+                                        if (spawnResult.isFailure) {
+                                            logger.warn(
+                                                LogCategory.SYSTEM,
+                                                "Background OOP spawn failed",
+                                                mapOf(
+                                                    "pluginId" to manifest.pluginId,
+                                                    "error" to (spawnResult.exceptionOrNull()?.message ?: "unknown"),
+                                                ),
+                                            )
+                                        } else {
+                                            logger.info(
+                                                LogCategory.SYSTEM,
+                                                "Background OOP spawn succeeded",
+                                                mapOf("pluginId" to manifest.pluginId),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                             notifyListeners { it.pluginLoaded(manifest) }
                             emitPluginLifecycle(manifest.pluginId, PluginLifecycleState.LOADED)
 
@@ -1279,6 +1387,19 @@ class DynamicPluginManager(
                 isDisabled = { id -> _pluginStates.value[id]?.state == PluginState.DISABLED },
             ).sortedBy { dependent -> dependent.loadPriority }
 
+    /** Checks unload-aware components without treating approved dependents as a veto. */
+    internal suspend fun checkUnloadAware(pluginId: String): CanUnloadResult {
+        val reasons = mutableListOf<String>()
+        for (ref in unloadAwareComponents) {
+            val component = ref.get() ?: continue
+            val result = component.checkCanUnload(pluginId)
+            if (result is CanUnloadResult.NotAllowed) {
+                reasons.addAll(result.reasons)
+            }
+        }
+        return if (reasons.isEmpty()) CanUnloadResult.Ok else CanUnloadResult.NotAllowed(reasons)
+    }
+
     /**
      * Check if a plugin can be unloaded without issues.
      *
@@ -1288,13 +1409,9 @@ class DynamicPluginManager(
     suspend fun checkCanUnload(pluginId: String): CanUnloadResult {
         val reasons = mutableListOf<String>()
 
-        // Check with all unload-aware components
-        for (ref in unloadAwareComponents) {
-            val component = ref.get() ?: continue
-            val result = component.checkCanUnload(pluginId)
-            if (result is CanUnloadResult.NotAllowed) {
-                reasons.addAll(result.reasons)
-            }
+        val unloadAwareResult = checkUnloadAware(pluginId)
+        if (unloadAwareResult is CanUnloadResult.NotAllowed) {
+            reasons.addAll(unloadAwareResult.reasons)
         }
 
         // Check for dependent plugins. Only plugins that actually require this one veto the
@@ -1331,25 +1448,57 @@ class DynamicPluginManager(
         force: Boolean = false,
         waitForGC: Boolean = false,
     ): Result<Unit> =
-        uninstallPlugin(
-            pluginId = pluginId,
-            force = force,
-            waitForGC = waitForGC,
-            closeTabsAcrossWindows = true,
-        ).also { outcome ->
-            // The teardown inside detached this plugin's sidebar panels so they would dispose
-            // while the loader was still open. If the unload then did not happen, nothing else
-            // puts them back: the plugin is still loaded, its panels are still registered, and no
-            // (re)install is coming to call notifyPanelsRefresh. Resuming here is what stops a
-            // refused uninstall from blanking a slot for the rest of the session, and a no-op
-            // when nothing was detached.
-            //
-            // Here rather than in the private overload because this is the entry point every
-            // user-facing unload takes (update, reload, remove). The other caller that tears
-            // tabs down globally is dispose(), which is the app shutting down - a panel that
-            // never comes back is exactly right there.
-            if (outcome.isFailure) notifyPanelsRefresh(pluginId)
+        try {
+            uninstallPlugin(
+                pluginId = pluginId,
+                force = force,
+                waitForGC = waitForGC,
+                closeTabsAcrossWindows = true,
+            ).also { outcome ->
+                // The teardown inside detached this plugin's sidebar panels so they would dispose
+                // while the loader was still open. If the unload then did not happen, nothing else
+                // puts them back: the plugin is still loaded, its panels are still registered, and no
+                // (re)install is coming to call notifyPanelsRefresh. Resuming here is what stops a
+                // refused uninstall from blanking a slot for the rest of the session, and a no-op
+                // when nothing was detached.
+                //
+                // Here rather than in the private overload because this is the entry point every
+                // user-facing unload takes (update, reload, remove). The other caller that tears
+                // tabs down globally is dispose(), which is the app shutting down - a panel that
+                // never comes back is exactly right there.
+                if (outcome.isFailure) notifyPanelsRefresh(pluginId)
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            // Tab/panel disposal happens before the lock; cancellation while waiting for it
+            // must resume any still-registered panels just like a refused uninstall does.
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Plugin uninstall caller cancelled; cleanup may already have completed",
+                mapOf("pluginId" to pluginId, "stillInstalled" to hasEntry(pluginId)),
+            )
+            notifyPanelsRefresh(pluginId)
+            throw cancelled
         }
+
+    /** Cancellation must reach the public compensation before a free mutex admits destructive cleanup. */
+    internal suspend fun teardownPluginTabsForUnload(pluginId: String) {
+        pluginTabsTeardown?.let { teardown ->
+            try {
+                teardown(pluginId)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (t: Throwable) {
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Plugin tab teardown before unload failed (continuing)",
+                    mapOf(
+                        "pluginId" to pluginId,
+                        "error" to (t.message ?: t::class.simpleName),
+                    ),
+                )
+            }
+        }
+    }
 
     private suspend fun uninstallPlugin(
         pluginId: String,
@@ -1385,166 +1534,162 @@ class DynamicPluginManager(
             candidate != null &&
             (force || (candidate.manifest.canUnload && checkCanUnload(pluginId).isAllowed))
         ) {
-            pluginTabsTeardown?.let { teardown ->
-                try {
-                    teardown(pluginId)
-                } catch (t: Throwable) {
-                    logger.warn(
-                        LogCategory.SYSTEM,
-                        "Plugin tab teardown before unload failed (continuing)",
-                        mapOf(
-                            "pluginId" to pluginId,
-                            "error" to (t.message ?: t::class.simpleName),
-                        ),
-                    )
-                }
-            }
+            teardownPluginTabsForUnload(pluginId)
         }
         return mutex.withLock {
-            try {
-                logger.info(
-                    LogCategory.SYSTEM,
-                    "Uninstalling plugin",
-                    mapOf(
-                        "pluginId" to pluginId,
-                        "force" to force,
-                    ),
-                )
-
-                val loadedPlugin = pluginLoader.getPlugin(pluginId)
-                if (loadedPlugin == null) {
-                    // Plugin not in classloader — may have been unloaded during
-                    // incompatibility handling but still tracked in _pluginStates.
-                    // Clean up state so the update flow can proceed to reinstall.
-                    val pluginState = _pluginStates.value[pluginId]
-                    if (pluginState != null) {
-                        logger.info(
-                            LogCategory.SYSTEM,
-                            "Plugin already unloaded from classloader, cleaning up state",
-                            mapOf(
-                                "pluginId" to pluginId,
-                                "state" to pluginState.state.name,
-                            ),
-                        )
-                        val trackingContext = trackingContexts.remove(pluginId)
-                        trackingContext?.unregisterAll()
-                        managerScope.launch { sandboxManager.removeSandbox(pluginId) }
-                        removePluginState(pluginId)
-                        return@withLock Result.success(Unit)
-                    }
-                    return@withLock Result.failure(
-                        PluginUnloadException("Plugin not found: $pluginId", pluginId),
-                    )
-                }
-
-                val manifest = loadedPlugin.manifest
-
-                // Check if plugin can be unloaded (system plugins may be protected)
-                if (!manifest.canUnload && !force) {
-                    logger.warn(
+            // Once destructive cleanup starts, finish sandbox, loader and state cleanup even if
+            // the requesting dialog/window disappears. Lock acquisition remains cancellable.
+            withContext(NonCancellable) {
+                try {
+                    logger.info(
                         LogCategory.SYSTEM,
-                        "Cannot unload system plugin",
+                        "Uninstalling plugin",
                         mapOf(
                             "pluginId" to pluginId,
-                            "systemPlugin" to manifest.systemPlugin,
+                            "force" to force,
                         ),
                     )
-                    return@withLock Result.failure(
-                        PluginUnloadException(
-                            "Cannot unload system plugin: $pluginId (canUnload=false)",
-                            pluginId,
-                            listOf("System plugin is protected from unloading"),
-                        ),
-                    )
-                }
 
-                // Check if unload is allowed
-                if (!force) {
-                    val canUnload = checkCanUnload(pluginId)
-                    if (!canUnload.isAllowed) {
-                        val reasons = (canUnload as CanUnloadResult.NotAllowed).reasons
-                        return@withLock Result.failure(
-                            PluginUnloadException(
-                                "Cannot unload plugin: ${reasons.joinToString("; ")}",
-                                pluginId,
-                                reasons,
-                            ),
+                    val loadedPlugin = pluginLoader.getPlugin(pluginId)
+                    if (loadedPlugin == null) {
+                        // Plugin not in classloader — may have been unloaded during
+                        // incompatibility handling but still tracked in _pluginStates.
+                        // Clean up state so the update flow can proceed to reinstall.
+                        val pluginState = _pluginStates.value[pluginId]
+                        if (pluginState != null) {
+                            logger.info(
+                                LogCategory.SYSTEM,
+                                "Plugin already unloaded from classloader, cleaning up state",
+                                mapOf(
+                                    "pluginId" to pluginId,
+                                    "state" to pluginState.state.name,
+                                ),
+                            )
+                            val trackingContext = trackingContexts.remove(pluginId)
+                            trackingContext?.unregisterAll()
+                            sandboxManager.removeSandbox(pluginId)
+                            removePluginState(pluginId)
+                            return@withContext Result.success(Unit)
+                        }
+                        return@withContext Result.failure(
+                            PluginUnloadException("Plugin not found: $pluginId", pluginId),
                         )
                     }
-                }
 
-                // Notify listeners before unload
-                notifyListeners { it.beforePluginUnload(manifest) }
+                    val manifest = loadedPlugin.manifest
 
-                // Prepare unload-aware components
-                for (ref in unloadAwareComponents) {
-                    val component = ref.get() ?: continue
-                    try {
-                        component.prepareForUnload(pluginId)
-                    } catch (e: Exception) {
+                    // Check if plugin can be unloaded (system plugins may be protected)
+                    if (!manifest.canUnload && !force) {
                         logger.warn(
                             LogCategory.SYSTEM,
-                            "Error preparing component for unload",
+                            "Cannot unload system plugin",
                             mapOf(
                                 "pluginId" to pluginId,
+                                "systemPlugin" to manifest.systemPlugin,
                             ),
-                            error = e,
+                        )
+                        return@withContext Result.failure(
+                            PluginUnloadException(
+                                "Cannot unload system plugin: $pluginId (canUnload=false)",
+                                pluginId,
+                                listOf("System plugin is protected from unloading"),
+                            ),
                         )
                     }
-                }
 
-                // Unregister all panels and tabs
-                val trackingContext = trackingContexts.remove(pluginId)
-                trackingContext?.unregisterAll()
-
-                // Remove sandbox
-                managerScope.launch {
-                    sandboxManager.removeSandbox(pluginId)
-                }
-
-                // Terminate out-of-process child if applicable
-                if (manifest.isolationMode == "out-of-process") {
-                    managerScope.launch {
-                        outOfProcessSpawner?.terminate(pluginId)
+                    // Check if unload is allowed
+                    if (!force) {
+                        val canUnload = checkCanUnload(pluginId)
+                        if (!canUnload.isAllowed) {
+                            val reasons = (canUnload as CanUnloadResult.NotAllowed).reasons
+                            return@withContext Result.failure(
+                                PluginUnloadException(
+                                    "Cannot unload plugin: ${reasons.joinToString("; ")}",
+                                    pluginId,
+                                    reasons,
+                                ),
+                            )
+                        }
                     }
+
+                    // Notify listeners before unload
+                    notifyListeners { it.beforePluginUnload(manifest) }
+
+                    // Prepare unload-aware components
+                    for (ref in unloadAwareComponents) {
+                        val component = ref.get() ?: continue
+                        try {
+                            component.prepareForUnload(pluginId)
+                        } catch (e: Exception) {
+                            logger.warn(
+                                LogCategory.SYSTEM,
+                                "Error preparing component for unload",
+                                mapOf(
+                                    "pluginId" to pluginId,
+                                ),
+                                error = e,
+                            )
+                        }
+                    }
+
+                    // Unregister all panels and tabs
+                    val trackingContext = trackingContexts.remove(pluginId)
+                    trackingContext?.unregisterAll()
+
+                    // Complete teardown before reload can create a replacement sandbox for this ID.
+                    sandboxManager.removeSandbox(pluginId)
+
+                    // Terminate the out-of-process child before unloading its plugin.
+                    if (manifest.isolationMode == "out-of-process") {
+                        outOfProcessSpawner
+                            ?.terminate(pluginId)
+                            ?.onFailure { error ->
+                                logger.warn(
+                                    LogCategory.SYSTEM,
+                                    "Failed to terminate out-of-process plugin",
+                                    mapOf("pluginId" to pluginId),
+                                    error = error,
+                                )
+                            }
+                    }
+
+                    // Unload the plugin
+                    // force flows through: without it the loader re-blocks
+                    // canUnload=false system plugins, leaving their classloaders
+                    // parented to a superseded ApiClassLoader after a hot swap.
+                    val unloadResult = pluginLoader.unloadPlugin(pluginId, waitForGC, force)
+                    if (unloadResult.isFailure) {
+                        notifyListeners { it.pluginUnloadFailed(manifest, unloadResult.exceptionOrNull()!!) }
+                        return@withContext unloadResult
+                    }
+
+                    // Update state
+                    removePluginState(pluginId)
+
+                    // Notify listeners
+                    notifyListeners { it.pluginUnloaded(manifest) }
+                    emitPluginLifecycle(manifest.pluginId, PluginLifecycleState.UNLOADED)
+
+                    logger.info(
+                        LogCategory.SYSTEM,
+                        "Plugin uninstalled successfully",
+                        mapOf(
+                            "pluginId" to pluginId,
+                        ),
+                    )
+
+                    Result.success(Unit)
+                } catch (e: Exception) {
+                    logger.error(
+                        LogCategory.SYSTEM,
+                        "Failed to uninstall plugin",
+                        mapOf(
+                            "pluginId" to pluginId,
+                        ),
+                        e,
+                    )
+                    Result.failure(e)
                 }
-
-                // Unload the plugin
-                // force flows through: without it the loader re-blocks
-                // canUnload=false system plugins, leaving their classloaders
-                // parented to a superseded ApiClassLoader after a hot swap.
-                val unloadResult = pluginLoader.unloadPlugin(pluginId, waitForGC, force)
-                if (unloadResult.isFailure) {
-                    notifyListeners { it.pluginUnloadFailed(manifest, unloadResult.exceptionOrNull()!!) }
-                    return@withLock unloadResult
-                }
-
-                // Update state
-                removePluginState(pluginId)
-
-                // Notify listeners
-                notifyListeners { it.pluginUnloaded(manifest) }
-                emitPluginLifecycle(manifest.pluginId, PluginLifecycleState.UNLOADED)
-
-                logger.info(
-                    LogCategory.SYSTEM,
-                    "Plugin uninstalled successfully",
-                    mapOf(
-                        "pluginId" to pluginId,
-                    ),
-                )
-
-                Result.success(Unit)
-            } catch (e: Exception) {
-                logger.error(
-                    LogCategory.SYSTEM,
-                    "Failed to uninstall plugin",
-                    mapOf(
-                        "pluginId" to pluginId,
-                    ),
-                    e,
-                )
-                Result.failure(e)
             }
         }
     }
@@ -1575,6 +1720,12 @@ class DynamicPluginManager(
                         trackingContexts[pluginId]
                             ?: return@withLock Result.failure(Exception("No context for plugin: $pluginId"))
 
+                    if (!canAccess(loadedPlugin.manifest)) {
+                        return@withLock Result.failure(
+                            IllegalStateException("Insufficient access to enable plugin: $pluginId"),
+                        )
+                    }
+
                     // Keyed off the `enabled` flag, same as before this PR: the only case
                     // where the flag is set while the plugin is not actually running is the
                     // RBAC hide (state = DISABLED, `enabled` left true) - and that path must
@@ -1597,6 +1748,8 @@ class DynamicPluginManager(
                     // Enable sandbox
                     sandboxManager.enablePlugin(pluginId)
 
+                    spawnOopOnEnable(pluginId, wasAlreadyEnabled)
+
                     // Clear prior crash state on successful re-enable, on BOTH axes.
                     //
                     // clearIncompatible alone left hasCrashed(pluginId) true, so a
@@ -1618,17 +1771,7 @@ class DynamicPluginManager(
                     PluginCrashRegistry.clearCrash(pluginId)
                     PluginRecoveryQuarantine.clear(pluginId)
 
-                    // Update state
-                    val currentInfo = _pluginStates.value[pluginId]
-                    if (currentInfo != null) {
-                        updatePluginState(
-                            pluginId,
-                            currentInfo.copy(
-                                state = PluginState.LOADED,
-                                enabled = true,
-                            ),
-                        )
-                    }
+                    publishEnabledState(pluginId)
 
                     Result.success(Unit)
                 } catch (e: Throwable) {
@@ -1645,6 +1788,7 @@ class DynamicPluginManager(
                     // providers already registered) before throwing — tear those down so a
                     // "disabled" plugin can't leave agent-callable MCP tools live.
                     runCatching { trackingContexts[pluginId]?.unregisterAll() }
+                    rollbackFailedOopEnable(pluginId, wasAlreadyEnabled)
                     Result.failure(e)
                 }
             }
@@ -1666,6 +1810,52 @@ class DynamicPluginManager(
             notifyPluginActivated(activatedManifest)
         }
         return result
+    }
+
+    private suspend fun rollbackFailedOopEnable(
+        pluginId: String,
+        wasAlreadyEnabled: Boolean,
+    ) {
+        // Restores the sandbox to disabled. It does not terminate an OOP child that a
+        // step after spawnOopOnEnable orphaned - today nothing between the spawn and
+        // publishEnabledState suspends or throws, so that window is empty; if a
+        // suspending step is ever added there, the rollback must stop the child too.
+        if (!wasAlreadyEnabled &&
+            _pluginStates.value[pluginId]?.manifest?.isolationMode == "out-of-process"
+        ) {
+            withContext(NonCancellable) {
+                runCatching { sandboxManager.disablePlugin(pluginId).getOrThrow() }
+                    .onFailure { rollbackError ->
+                        logger.error(
+                            LogCategory.SYSTEM,
+                            "Failed to restore disabled OOP sandbox",
+                            mapOf("pluginId" to pluginId),
+                            rollbackError,
+                        )
+                    }
+            }
+        }
+    }
+
+    private fun publishEnabledState(pluginId: String) {
+        val currentInfo = _pluginStates.value[pluginId] ?: return
+        updatePluginState(
+            pluginId,
+            currentInfo.copy(
+                state = PluginState.LOADED,
+                enabled = true,
+            ),
+        )
+    }
+
+    private suspend fun spawnOopOnEnable(
+        pluginId: String,
+        wasAlreadyEnabled: Boolean,
+    ) {
+        val info = _pluginStates.value[pluginId]
+        if (!wasAlreadyEnabled && info?.manifest?.isolationMode == "out-of-process") {
+            outOfProcessSpawner?.spawn(info.manifest, info.jarPath)?.getOrThrow()
+        }
     }
 
     /**
@@ -1782,6 +1972,22 @@ class DynamicPluginManager(
         // `as? InProcessPluginSandbox` silently did nothing at all for an
         // out-of-process sandbox. disablePlugin does all three and stops the
         // watchdog.
+        if (info.manifest.isolationMode == "out-of-process") {
+            oopLifecycleLock(pluginId).withLock {
+                initialOopSpawnTickets.remove(pluginId)
+                val stopped = outOfProcessSpawner?.terminate(pluginId)
+                if (stopped?.isFailure == true) {
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "Failed to stop OOP child after re-registration failure",
+                        mapOf(
+                            "pluginId" to pluginId,
+                            "error" to (stopped.exceptionOrNull()?.message ?: "unknown"),
+                        ),
+                    )
+                }
+            }
+        }
         sandboxManager.disablePlugin(pluginId)
         updatePluginState(pluginId, info.copy(state = PluginState.DISABLED, enabled = false))
     }
@@ -1831,40 +2037,69 @@ class DynamicPluginManager(
      */
     suspend fun disablePlugin(pluginId: String): Result<Unit> {
         return mutex.withLock {
-            try {
-                val trackingContext =
-                    trackingContexts[pluginId]
-                        ?: return@withLock Result.failure(Exception("No context for plugin: $pluginId"))
+            oopLifecycleLock(pluginId).withLock lifecycle@{
+                // The real spawner's terminate() disarms the restart monitor and kills
+                // the child at entry, so once it has been INVOKED the child is stopped
+                // even when the call reports failure - and a plugin recorded LOADED
+                // would never be re-monitored (monitor() only runs from a spawn),
+                // leaving supervision silently off. The flag is set before the call
+                // for exactly that reason: every failure at or after it must land the
+                // plugin in the DISABLED state.
+                var oopChildStopped = false
+                try {
+                    val trackingContext =
+                        trackingContexts[pluginId]
+                            ?: return@lifecycle Result.failure(Exception("No context for plugin: $pluginId"))
 
-                // Unregister all panels and tabs
-                trackingContext.unregisterAll()
+                    val info = _pluginStates.value[pluginId]
+                    if (info?.manifest?.isolationMode == "out-of-process") {
+                        initialOopSpawnTickets.remove(pluginId)
+                        oopChildStopped = true
+                        outOfProcessSpawner?.terminate(pluginId)?.getOrThrow()
+                    }
 
-                // Disable sandbox
-                sandboxManager.disablePlugin(pluginId)
+                    // Unregister all panels and tabs
+                    trackingContext.unregisterAll()
 
-                // Update state
-                val currentInfo = _pluginStates.value[pluginId]
-                if (currentInfo != null) {
-                    updatePluginState(
-                        pluginId,
-                        currentInfo.copy(
-                            state = PluginState.DISABLED,
-                            enabled = false,
+                    // Disable sandbox
+                    sandboxManager.disablePlugin(pluginId)
+
+                    // Update state
+                    val currentInfo = _pluginStates.value[pluginId]
+                    if (currentInfo != null) {
+                        updatePluginState(
+                            pluginId,
+                            currentInfo.copy(
+                                state = PluginState.DISABLED,
+                                enabled = false,
+                            ),
+                        )
+                    }
+
+                    Result.success(Unit)
+                } catch (e: Exception) {
+                    logger.error(
+                        LogCategory.SYSTEM,
+                        "Failed to disable plugin",
+                        mapOf(
+                            "pluginId" to pluginId,
                         ),
+                        e,
                     )
+                    if (oopChildStopped) {
+                        val currentInfo = _pluginStates.value[pluginId]
+                        if (currentInfo != null) {
+                            updatePluginState(
+                                pluginId,
+                                currentInfo.copy(
+                                    state = PluginState.DISABLED,
+                                    enabled = false,
+                                ),
+                            )
+                        }
+                    }
+                    Result.failure(e)
                 }
-
-                Result.success(Unit)
-            } catch (e: Exception) {
-                logger.error(
-                    LogCategory.SYSTEM,
-                    "Failed to disable plugin",
-                    mapOf(
-                        "pluginId" to pluginId,
-                    ),
-                    e,
-                )
-                Result.failure(e)
             }
         }
     }
@@ -1912,34 +2147,10 @@ class DynamicPluginManager(
         // it meant one click could force-unload several plugins and fail to bring them back.
         // Resolving first also keeps a plugin running when no reload is possible.
         val jarPath =
-            withContext(Dispatchers.IO) {
-                resolveReloadJarPath(
-                    candidates =
-                        ReloadJarCandidates(
-                            loadedJarPath = info.jarPath,
-                            persistedJarPath = persistedReloadJarPath?.invoke(pluginId),
-                        ),
-                    exists = { java.io.File(it).isFile },
-                    relocated = {
-                        findRelocatedPluginJar(java.io.File(info.jarPath).parentFile, pluginId)?.absolutePath
-                    },
-                    manifestVersion = { path ->
-                        // No swallow here: a manifest that fails to read must reach the resolver's
-                        // runCatching so onManifestVersionReadFailed logs the candidate instead of it
-                        // being silently scored as version-less.
-                        PluginManifestReader.readFromJar(path).version
-                    },
-                    onManifestVersionReadFailed = { path ->
-                        logger.warn(
-                            LogCategory.SYSTEM,
-                            "Could not read manifest version of a reload candidate jar",
-                            mapOf("pluginId" to pluginId, "path" to path),
-                        )
-                    },
+            resolveReloadJar(info)
+                ?: return Result.failure(
+                    Exception("Cannot reload $pluginId - no existing JAR (loaded from ${info.jarPath})"),
                 )
-            } ?: return Result.failure(
-                Exception("Cannot reload $pluginId - no existing JAR (loaded from ${info.jarPath})"),
-            )
 
         logger.info(
             LogCategory.SYSTEM,
@@ -1966,6 +2177,53 @@ class DynamicPluginManager(
 
         return installPlugin(jarPath, enabled = wasEnabled)
     }
+
+    /**
+     * The JAR a reload of [info] should load, resolved against the disk - never
+     * straight from the loaded record. The persisted candidate is installed.json
+     * input, so it is confined to the managed roots first: attacker-shaped rows
+     * must not redirect a reload at an outside jar. The loaded jarPath keeps its
+     * own trust (external installs live outside the roots).
+     */
+    private suspend fun resolveReloadJar(info: DynamicPluginInfo): String? =
+        withContext(Dispatchers.IO) {
+            resolveReloadJarPath(
+                candidates =
+                    ReloadJarCandidates(
+                        loadedJarPath = info.jarPath,
+                        persistedJarPath =
+                            confinedPersistedJarPath(
+                                persistedReloadJarPath?.invoke(info.manifest.pluginId),
+                            ) { refused ->
+                                logger.warn(
+                                    LogCategory.SYSTEM,
+                                    "Ignoring persisted reload jar path outside the managed roots",
+                                    mapOf("pluginId" to info.manifest.pluginId, "jarPath" to refused),
+                                )
+                            },
+                    ),
+                exists = { java.io.File(it).isFile },
+                relocated = {
+                    findRelocatedPluginJar(
+                        java.io.File(info.jarPath).parentFile,
+                        info.manifest.pluginId,
+                    )?.absolutePath
+                },
+                manifestVersion = { path ->
+                    // No swallow here: a manifest that fails to read must reach the resolver's
+                    // runCatching so onManifestVersionReadFailed logs the candidate instead of it
+                    // being silently scored as version-less.
+                    PluginManifestReader.readFromJar(path).version
+                },
+                onManifestVersionReadFailed = { path ->
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "Could not read manifest version of a reload candidate jar",
+                        mapOf("pluginId" to info.manifest.pluginId, "path" to path),
+                    )
+                },
+            )
+        }
 
     /**
      * Reload all installed plugins.
@@ -2010,9 +2268,30 @@ class DynamicPluginManager(
     fun getInstalledPlugins(): List<DynamicPluginInfo> = _pluginStates.value.values.toList()
 
     /**
-     * Check if a plugin is installed.
+     * Whether this manager holds an entry for [pluginId] - registry membership, and nothing more.
+     *
+     * Was `isInstalled`, a name that invites the stronger reading. An entry survives things that
+     * make a plugin unusable: `installPlugin` records a DISABLED entry for a plugin it rejected as
+     * binary incompatible and whose jar was then deleted, and a jar whose recorded path went stale
+     * keeps its entry too. The first-run wizard used this as "already installed" and skipped a plugin
+     * that was not there to run (#563). For "installed and usable", ask
+     * [PluginDependencyResolution.installedAndOnDisk].
      */
-    fun isInstalled(pluginId: String): Boolean = _pluginStates.value.containsKey(pluginId)
+    fun hasEntry(pluginId: String): Boolean = _pluginStates.value.containsKey(pluginId)
+
+    /**
+     * Whether the loader still holds this plugin's classes, which is NOT what [hasEntry] asks.
+     *
+     * [hasEntry] reports whether a manager entry exists. This reports whether the id is resident
+     * in [pluginLoader], and the two diverge in the case that matters: `disablePlugin` unregisters
+     * panels and flips the state to DISABLED but never unloads, so a user-disabled plugin keeps its
+     * id in the loader. Any later `loadPlugin` for that id is refused with
+     * `PluginLoadException.ALREADY_LOADED_PREFIX`, however the manager state reads.
+     *
+     * The wizard asks this before it touches an installed artifact, because a refusal that arrives
+     * afterwards cannot undo what the install already overwrote.
+     */
+    fun isPluginResident(pluginId: String): Boolean = pluginLoader.isLoaded(pluginId)
 
     /**
      * Get installed plugins visible to the current user.
@@ -2060,10 +2339,20 @@ class DynamicPluginManager(
      * Load plugins from persisted state.
      * This should be called during application startup to restore previously installed plugins.
      *
+     * [allowedRoots] is the set of directories a persisted JAR path is allowed to
+     * live under (the managed plugins directory and the dev-staging root). The
+     * persisted row is plain JSON on disk: whoever can write installed.json could
+     * otherwise aim jarPath at ANY jar on the filesystem and have startup load it.
+     * Entries outside every allowed root are refused and their row left in place
+     * for inspection - fail closed, never silently load, never silently drop.
+     *
      * @param plugins List of plugin entries with JAR paths and enabled states
      * @return Map of plugin IDs to their load results
      */
-    suspend fun loadPersistedPlugins(plugins: List<PersistedPluginEntry>): Map<String, Result<DynamicPluginInfo>> {
+    suspend fun loadPersistedPlugins(
+        plugins: List<PersistedPluginEntry>,
+        allowedRoots: List<java.io.File> = managedPluginJarRoots(),
+    ): Map<String, Result<DynamicPluginInfo>> {
         val results = mutableMapOf<String, Result<DynamicPluginInfo>>()
 
         logger.info(
@@ -2076,59 +2365,81 @@ class DynamicPluginManager(
 
         for (entry in plugins) {
             try {
+                // The check canonicalizes; the loaded path keeps its persisted
+                // spelling, so in-root entries behave exactly as before.
                 var jarFile = java.io.File(entry.jarPath)
-                if (!jarFile.exists()) {
-                    // The background system-plugin updater can replace a JAR
-                    // (new versioned filename, old file deleted) between the
-                    // persisted snapshot being read and this entry's turn —
-                    // the path goes stale while the plugin sits right there
-                    // under a new name. Re-resolve by pluginId before giving up.
-                    val relocated = findRelocatedPluginJar(jarFile.parentFile, entry.pluginId)
-                    if (relocated == null) {
-                        logger.warn(
+                if (!isContainedPath(entry.jarPath, allowedRoots)) {
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "Refusing persisted plugin JAR outside the managed roots",
+                        mapOf(
+                            "pluginId" to entry.pluginId,
+                            "jarPath" to entry.jarPath,
+                        ),
+                    )
+                    results[entry.pluginId] =
+                        Result.failure(
+                            Exception("Persisted JAR path is outside the managed plugin roots: ${entry.jarPath}"),
+                        )
+                } else {
+                    if (!jarFile.exists()) {
+                        // The background system-plugin updater can replace a JAR
+                        // (new versioned filename, old file deleted) between the
+                        // persisted snapshot being read and this entry's turn —
+                        // the path goes stale while the plugin sits right there
+                        // under a new name. Re-resolve by pluginId before giving up.
+                        // jarFile passed containment, so its parent is inside an
+                        // allowed root; the relocation result is re-checked anyway -
+                        // a symlink inside the dir must not smuggle the search outside.
+                        val relocated =
+                            findRelocatedPluginJar(jarFile.parentFile, entry.pluginId)
+                                ?.takeIf { isContainedPath(it.absolutePath, allowedRoots) }
+                        if (relocated == null) {
+                            logger.warn(
+                                LogCategory.SYSTEM,
+                                "Persisted plugin JAR not found",
+                                mapOf(
+                                    "pluginId" to entry.pluginId,
+                                    "jarPath" to entry.jarPath,
+                                ),
+                            )
+                            results[entry.pluginId] = Result.failure(Exception("JAR file not found: ${entry.jarPath}"))
+                            continue
+                        }
+                        logger.info(
                             LogCategory.SYSTEM,
-                            "Persisted plugin JAR not found",
+                            "Persisted JAR path stale - loading relocated jar",
                             mapOf(
                                 "pluginId" to entry.pluginId,
-                                "jarPath" to entry.jarPath,
+                                "staleJarPath" to entry.jarPath,
+                                "jarPath" to relocated.absolutePath,
                             ),
                         )
-                        results[entry.pluginId] = Result.failure(Exception("JAR file not found: ${entry.jarPath}"))
-                        continue
+                        jarFile = relocated
                     }
-                    logger.info(
-                        LogCategory.SYSTEM,
-                        "Persisted JAR path stale - loading relocated jar",
-                        mapOf(
-                            "pluginId" to entry.pluginId,
-                            "staleJarPath" to entry.jarPath,
-                            "jarPath" to relocated.absolutePath,
-                        ),
-                    )
-                    jarFile = relocated
-                }
 
-                val result = installPlugin(jarFile.absolutePath, enabled = entry.enabled)
-                results[entry.pluginId] = result
+                    val result = installPlugin(jarFile.absolutePath, enabled = entry.enabled)
+                    results[entry.pluginId] = result
 
-                if (result.isSuccess) {
-                    logger.info(
-                        LogCategory.SYSTEM,
-                        "Loaded persisted plugin",
-                        mapOf(
-                            "pluginId" to entry.pluginId,
-                            "enabled" to entry.enabled,
-                        ),
-                    )
-                } else {
-                    logger.error(
-                        LogCategory.SYSTEM,
-                        "Failed to load persisted plugin",
-                        mapOf(
-                            "pluginId" to entry.pluginId,
-                            "error" to (result.exceptionOrNull()?.message ?: "unknown"),
-                        ),
-                    )
+                    if (result.isSuccess) {
+                        logger.info(
+                            LogCategory.SYSTEM,
+                            "Loaded persisted plugin",
+                            mapOf(
+                                "pluginId" to entry.pluginId,
+                                "enabled" to entry.enabled,
+                            ),
+                        )
+                    } else {
+                        logger.error(
+                            LogCategory.SYSTEM,
+                            "Failed to load persisted plugin",
+                            mapOf(
+                                "pluginId" to entry.pluginId,
+                                "error" to (result.exceptionOrNull()?.message ?: "unknown"),
+                            ),
+                        )
+                    }
                 }
             } catch (e: Throwable) {
                 logger.error(
@@ -2162,6 +2473,9 @@ class DynamicPluginManager(
      *
      * Bundled plugins are system plugins that ship with BossConsole.
      * They are loaded in priority order (lower loadPriority values load first).
+     *
+     * This helper does not establish provenance from the directory argument. Production startup
+     * binds trusted copies through PluginStoreSetup; unsigned, unbound files still fail enforcement.
      *
      * @param bundledDir Directory containing bundled plugin JARs
      * @return Map of plugin IDs to their load results
@@ -2341,26 +2655,34 @@ class DynamicPluginManager(
             ),
         )
 
-        // Uninstall all plugins
-        for (pluginId in _pluginStates.value.keys.toList()) {
-            uninstallPlugin(
-                pluginId = pluginId,
-                force = true,
-                waitForGC = false,
-                closeTabsAcrossWindows = closeTabsAcrossWindows,
-            )
+        // Stop OOP supervision before teardown starts so a crash cannot race shutdown.
+        outOfProcessSpawner?.dispose()
+
+        try {
+            // Uninstall all plugins
+            for (pluginId in _pluginStates.value.keys.toList()) {
+                uninstallPlugin(
+                    pluginId = pluginId,
+                    force = true,
+                    waitForGC = false,
+                    closeTabsAcrossWindows = closeTabsAcrossWindows,
+                )
+            }
+        } finally {
+            // Deregister before cancelling, so nothing can pick this manager as a live one after
+            // it has unloaded everything. Previously this relied on the WeakReference being
+            // collected, which leaves a disposed manager in `activeManagers()` for an unbounded
+            // time - and its callers all assume "live": `isPluginKnown` and `jarPathOf` would
+            // answer from it, the api hot swap would try to reload into it, and a process-wide
+            // holder that resolves a manager lazily (HomeCatalogAccess's installer) would hand
+            // it an install that lands nowhere. In `finally` because the window-teardown caller
+            // bounds this with a timeout, and a timed-out uninstall must not skip deregistration.
+            liveManagers.removeIf { it.get() === this || it.get() == null }
+            restartDependentPlugin = null
+
+            // Cancel scope
+            managerScope.cancel()
         }
-
-        // Deregister before cancelling, so nothing can pick this manager as a live one after it
-        // has unloaded everything. Previously this relied on the WeakReference being collected,
-        // which leaves a disposed manager in `activeManagers()` for an unbounded time - and its
-        // callers all assume "live": `isPluginKnown` and `jarPathOf` would answer from it, the api
-        // hot swap would try to reload into it, and a process-wide holder that resolves a manager
-        // lazily (HomeCatalogAccess's installer) would hand it an install that lands nowhere.
-        liveManagers.removeIf { it.get() === this || it.get() == null }
-
-        // Cancel scope
-        managerScope.cancel()
     }
 
     /**
@@ -2380,31 +2702,38 @@ class DynamicPluginManager(
                 val trackingContext = trackingContexts[pluginId]
                 val loadedPlugin = pluginLoader.getPlugin(pluginId)
                 if (trackingContext != null && loadedPlugin != null) {
-                    try {
-                        loadedPlugin.instance.register(trackingContext)
-                        updatePluginState(pluginId, info.copy(state = PluginState.LOADED))
-                        hiddenPlugins.remove(pluginId)
-                        reactivated += info.manifest
-                        logger.info(
-                            LogCategory.SYSTEM,
-                            "Re-registered plugin after access gained",
-                            mapOf(
-                                "pluginId" to pluginId,
-                            ),
-                        )
-                    } catch (e: Throwable) {
-                        logger.error(
-                            LogCategory.SYSTEM,
-                            "Failed to re-register plugin",
-                            mapOf(
-                                "pluginId" to pluginId,
-                                "errorType" to e.javaClass.simpleName,
-                            ),
-                            e,
-                        )
-                        // Partial register() must not leave stray registrations (incl.
-                        // agent-callable MCP tool providers) for a plugin still hidden.
-                        runCatching { trackingContext.unregisterAll() }
+                    oopLifecycleLock(pluginId).withLock {
+                        try {
+                            loadedPlugin.instance.register(trackingContext)
+                            if (info.manifest.isolationMode == "out-of-process") {
+                                outOfProcessSpawner
+                                    ?.spawn(info.manifest, info.jarPath)
+                                    ?.getOrThrow()
+                            }
+                            updatePluginState(pluginId, info.copy(state = PluginState.LOADED))
+                            hiddenPlugins.remove(pluginId)
+                            reactivated += info.manifest
+                            logger.info(
+                                LogCategory.SYSTEM,
+                                "Re-registered plugin after access gained",
+                                mapOf(
+                                    "pluginId" to pluginId,
+                                ),
+                            )
+                        } catch (e: Throwable) {
+                            logger.error(
+                                LogCategory.SYSTEM,
+                                "Failed to re-register plugin",
+                                mapOf(
+                                    "pluginId" to pluginId,
+                                    "errorType" to e.javaClass.simpleName,
+                                ),
+                                e,
+                            )
+                            // Partial register() must not leave stray registrations (incl.
+                            // agent-callable MCP tool providers) for a plugin still hidden.
+                            runCatching { trackingContext.unregisterAll() }
+                        }
                     }
                 }
             }
@@ -2415,26 +2744,29 @@ class DynamicPluginManager(
                     info.enabled && !hiddenPlugins.containsKey(pluginId) && !canAccess(info.manifest)
                 }
             for ((pluginId, info) in nowHidden) {
-                val trackingContext = trackingContexts[pluginId]
-                if (trackingContext != null) {
-                    trackingContext.unregisterAll()
-                    hiddenPlugins[pluginId] = info
-                    updatePluginState(pluginId, info.copy(state = PluginState.DISABLED))
-                    val missing = missingPermissions(info.manifest)
-                    logger.info(
-                        LogCategory.SYSTEM,
-                        "Hid plugin after access lost",
-                        mapOf(
-                            "pluginId" to pluginId,
-                            "missingPermissions" to missing.joinToString(","),
-                            "hint" to
-                                if (missing.isNotEmpty()) {
-                                    "Ask an admin to grant: ${missing.joinToString(", ")}"
-                                } else {
-                                    "Requires admin"
-                                },
-                        ),
-                    )
+                oopLifecycleLock(pluginId).withLock {
+                    val trackingContext = trackingContexts[pluginId]
+                    if (trackingContext != null) {
+                        terminateOopAfterAccessLoss(pluginId, info)
+                        trackingContext.unregisterAll()
+                        hiddenPlugins[pluginId] = info
+                        updatePluginState(pluginId, info.copy(state = PluginState.DISABLED))
+                        val missing = missingPermissions(info.manifest)
+                        logger.info(
+                            LogCategory.SYSTEM,
+                            "Hid plugin after access lost",
+                            mapOf(
+                                "pluginId" to pluginId,
+                                "missingPermissions" to missing.joinToString(","),
+                                "hint" to
+                                    if (missing.isNotEmpty()) {
+                                        "Ask an admin to grant: ${missing.joinToString(", ")}"
+                                    } else {
+                                        "Requires admin"
+                                    },
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -2442,6 +2774,26 @@ class DynamicPluginManager(
         // the successfully registered manifests, outside the lock and off the UI thread.
         if (reportMissingDependencies) {
             for (manifest in reactivated) notifyPluginActivated(manifest)
+        }
+    }
+
+    private suspend fun terminateOopAfterAccessLoss(
+        pluginId: String,
+        info: DynamicPluginInfo,
+    ) {
+        if (info.manifest.isolationMode != "out-of-process") return
+
+        initialOopSpawnTickets.remove(pluginId)
+        val stopped = outOfProcessSpawner?.terminate(pluginId)
+        if (stopped?.isFailure == true) {
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Failed to stop OOP child after access lost",
+                mapOf(
+                    "pluginId" to pluginId,
+                    "error" to (stopped.exceptionOrNull()?.message ?: "unknown"),
+                ),
+            )
         }
     }
 
@@ -2465,6 +2817,7 @@ class DynamicPluginManager(
         _pluginStates.value = _pluginStates.value - pluginId
         PluginRecoveryQuarantine.clear(pluginId)
         PluginCrashRegistry.clearCrash(pluginId)
+        PluginCrashRegistry.clearIncompatible(pluginId)
         // The build verdict describes a loaded plugin, so it goes with it. A reload re-probes on the
         // way back in, so dropping it here does not make a reloaded panel lose its tag.
         PluginBuildRegistry.clear(pluginId)
@@ -2589,11 +2942,65 @@ internal fun pluginAccessAllowed(
 }
 
 /**
+ * Whether [path] canonically lives under one of [allowedRoots] (the roots are
+ * canonicalized too - symlinks and `..` segments are resolved on both sides, so
+ * neither spelling nor a link inside the dir can escape the root). A path that
+ * cannot be canonicalized is refused rather than passed through: the callers
+ * treat persisted jar paths as untrusted input.
+ * Top-level so it can be unit-tested (see [pluginAccessAllowed] for the same pattern).
+ */
+internal fun isContainedPath(
+    path: String,
+    allowedRoots: List<java.io.File>,
+): Boolean {
+    val candidate = runCatching { java.io.File(path).canonicalFile }.getOrNull() ?: return false
+    return allowedRoots.any { root ->
+        runCatching { candidate.toPath().startsWith(root.canonicalFile.toPath()) }
+            .getOrDefault(false)
+    }
+}
+
+/**
+ * The locations a persisted plugin JAR path is allowed to live under: the managed
+ * plugins directory and the dev-staging root (dev-swap installs answer from
+ * there). Everything that legitimately lands in installed.json is written under
+ * one of these, so any persisted path resolving elsewhere is attacker-shaped
+ * and must be refused rather than loaded.
+ */
+internal fun managedPluginJarRoots(): List<java.io.File> =
+    listOf(
+        BossDirectories.resolve("plugins"),
+        DevPluginArtifacts.stagingRoot(),
+    )
+
+/**
+ * [candidate] when it canonically lives under the managed plugin roots, else
+ * null. Persisted jar paths are installed.json input — attacker-shaped rows
+ * must not redirect a reload at an outside jar — so a refusal is reported
+ * through [onRefused] rather than silently dropped.
+ */
+internal fun confinedPersistedJarPath(
+    candidate: String?,
+    onRefused: (String) -> Unit = {},
+): String? {
+    val confined = candidate?.takeIf { isContainedPath(it, managedPluginJarRoots()) }
+    if (candidate != null && confined == null) {
+        onRefused(candidate)
+    }
+    return confined
+}
+
+/**
  * The best jar in [dir] whose manifest pluginId matches [pluginId], or null.
  * Fallback for a persisted jar path gone stale because a background update
  * replaced the file under a new versioned name: highest parseable manifest
  * version wins, newest file breaks ties. Top-level so it can be unit-tested
  * (see [pluginAccessAllowed] for the same pattern).
+ *
+ * Containment is the CALLER's job: this scans whatever [dir] it is given, so a
+ * caller whose search dir or result derives from a persisted path must run both
+ * through [isContainedPath] - [DynamicPluginManager.loadPersistedPlugins]
+ * does exactly that.
  *
  * Highest-version assumption: this path only triggers when the persisted
  * file is GONE — i.e. after a delete-and-replace, where highest == intended.

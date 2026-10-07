@@ -55,10 +55,13 @@ object ActiveBrowserRegistry {
 
     private val _windowsWithActiveBrowser = MutableStateFlow<Set<String>>(emptySet())
 
+    private val _activeHandleIdByWindow = MutableStateFlow<Map<String, String>>(emptyMap())
+
     /**
      * Windows where a browser is the surface the user is actually in.
      *
-     * The browser menu items (Back, Forward, Developer Tools) must grey out where the chord
+     * The browser menu items (Back, Forward, Developer Tools, Actual Size, Zoom In, Zoom Out, Reload, Print)
+     * must grey out where the chord
      * should not act, and not merely no-op: a Compose MenuBar accelerator fires from anywhere in
      * the window regardless of the binding's ShortcutContext, so an always-enabled item silently
      * swallows its chord for every other tab type. Cmd+[ and Cmd+] are outdent/indent in an
@@ -87,6 +90,19 @@ object ActiveBrowserRegistry {
     val windowsWithActiveBrowser: StateFlow<Set<String>> = _windowsWithActiveBrowser.asStateFlow()
 
     /**
+     * The handle a window-scoped action acts on, per window: [windowId] -> handleId of the
+     * entry [selectActiveHandleId] ranks first, under the SAME filter [activeBrowserWindows]
+     * applies (`inMainPanel && panelActive` and live).
+     *
+     * The window set above only says a window HAS an active browser, and it cannot tell two
+     * browser tabs in one window apart: switching tabs changes the handle while the set
+     * stays equal, so a StateFlow on the set never emits. UI that renders PER-HANDLE state
+     * (the zoom badge in the top bar) keys on this map instead, and it is published from the
+     * same snapshot so the two cannot drift.
+     */
+    val activeHandleIdByWindow: StateFlow<Map<String, String>> = _activeHandleIdByWindow.asStateFlow()
+
+    /**
      * Recompute [windowsWithActiveBrowser] from [entries].
      *
      * Snapshot and assignment go under one lock, shared with every mutator. Without it two
@@ -98,7 +114,9 @@ object ActiveBrowserRegistry {
      */
     private fun publishWindows() =
         synchronized(publishLock) {
-            _windowsWithActiveBrowser.value = activeBrowserWindows(entries.values.toList(), ::isLive)
+            val live = entries.values.toList()
+            _windowsWithActiveBrowser.value = activeBrowserWindows(live, ::isLive)
+            _activeHandleIdByWindow.value = activeHandleIds(live, ::isLive)
         }
 
     /**
@@ -187,6 +205,22 @@ object ActiveBrowserRegistry {
         val handleId = selectActiveHandleId(liveEntries, windowId) ?: return null
         return handles[handleId]?.takeIf { it.isValid }
     }
+
+    /**
+     * The handle registered under [handleId], or null if unknown.
+     *
+     * Lets a UI that already knows the ranked active handle id from
+     * [activeHandleIdByWindow] read or act on THAT handle instead of re-asking
+     * [activeIn] and meeting a possibly newer ranking between the two reads.
+     * Callers that care about liveness still filter on [BrowserHandle.isValid].
+     */
+    fun handleById(handleId: String): BrowserHandle? = handles[handleId]
+
+    /** Visible registrations only; callers must independently verify the exact surface/window. */
+    internal fun composedHandles(): List<BrowserHandle> =
+        entries.keys.mapNotNull { id ->
+            handles[id]?.takeIf { handle -> handle.isValid }
+        }
 }
 
 /**
@@ -201,8 +235,10 @@ object ActiveBrowserRegistry {
  * surface of the panel the user is in, so a sidebar-slot browser or the background half of a
  * split answers false. The menu items this gates fire their accelerator window-wide regardless
  * of ShortcutContext, so "a browser exists somewhere" would swallow Cmd+[ and Cmd+] from an
- * editor. Zoom and Reload stay ungated and keep acting on [selectActiveHandleId]'s broader
- * answer, which predates this and is out of scope here.
+ * editor. The menu gate is deliberately stricter than the dispatch target: a sidebar-slot
+ * browser or the background half of a split can no longer be zoomed or reloaded from the View
+ * menu - accepted, because the broader "a browser exists somewhere" gate would swallow Ctrl+R
+ * (and Cmd+[/Cmd+]) from a terminal or editor tab.
  */
 internal fun activeBrowserWindows(
     candidates: Collection<ActiveBrowserRegistry.Entry>,
@@ -212,6 +248,26 @@ internal fun activeBrowserWindows(
         .filter { it.inMainPanel && it.panelActive && isLive(it.handleId) }
         .map { it.windowId }
         .toSet()
+
+/**
+ * The window-scoped dispatch target of every window that has one: [windowId] -> handleId of
+ * the entry [selectActiveHandleId] ranks first, under the SAME filter [activeBrowserWindows]
+ * applies (`inMainPanel && panelActive` and live).
+ *
+ * Its keys are therefore exactly [activeBrowserWindows]' set, which keeps the badge's
+ * visibility gate and its dispatch target on one definition; the value adds what the set
+ * cannot: WHICH handle is active, so a per-handle read is possible.
+ */
+internal fun activeHandleIds(
+    candidates: Collection<ActiveBrowserRegistry.Entry>,
+    isLive: (String) -> Boolean,
+): Map<String, String> =
+    candidates
+        .filter { it.inMainPanel && it.panelActive && isLive(it.handleId) }
+        .groupBy { it.windowId }
+        .mapNotNull { (windowId, windowEntries) ->
+            selectActiveHandleId(windowEntries, windowId)?.let { windowId to it }
+        }.toMap()
 
 /**
  * Of the live browser surfaces composed in [windowId], which one owns a window-scoped action.

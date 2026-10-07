@@ -1,14 +1,15 @@
 package ai.rever.boss.components.plugin
 
+import ai.rever.boss.mcp.ApprovedArtifact
 import ai.rever.boss.plugin.api.PluginDependency
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.api.PluginState
-import ai.rever.boss.utils.logging.BossLogger
-import ai.rever.boss.utils.logging.LogCategory
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.receiveAsFlow
-import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.transform
 
 /**
  * A dependency a just-installed plugin declares but which is not present.
@@ -54,6 +55,26 @@ data class DependentPlugin(
 )
 
 /**
+ * Everything the dependency dialog will install if the user says yes, in an order that works.
+ *
+ * Built before the user answers, so the one dialog can say what it is about to do and then do
+ * exactly that. [order] is dependencies first and the plugin the user was asked about last;
+ * a plugin resolves its dependency's API lazily, but lazily still means before the first call,
+ * and that call can come from `register()`.
+ *
+ * The flags are diagnostics for the caller to log, not reasons to refuse: [unresolved] names
+ * plugins the store could not describe (their install is still attempted, but they are not expanded),
+ * [cyclic] means two store rows point at each other, [truncated] means the walk hit
+ * [PluginDependencyResolution.MAX_PLAN_SIZE] and stopped expanding.
+ */
+data class DependencyInstallPlan(
+    val order: List<String>,
+    val unresolved: Set<String>,
+    val cyclic: Boolean,
+    val truncated: Boolean,
+)
+
+/**
  * Works out which of a plugin's declared dependencies are absent.
  *
  * Pure, so the interesting rules are testable without a plugin loader: manifest
@@ -94,11 +115,9 @@ object PluginDependencyResolution {
      * nothing at all, silently re-creating the problem this feature exists to remove.
      *
      * [isIncompatible] qualifies the **jar** clause only, and must not override LOADED.
-     * `PluginCrashRegistry` keeps the flag until something clears it, and the only caller of
-     * `clearIncompatible` is the re-enable path - not install or update. So a plugin that failed
-     * registration, was updated from the Toolbox's own "Plugin Incompatible" prompt and is now
-     * running still carries the flag; excluding it would report a *running* plugin as missing,
-     * and taking Install would then discard the download and claim it "did not start".
+     * Uninstall and re-enable clear the incompatibility marker. LOADED remains authoritative
+     * even if a stale marker is observed across a lifecycle transition: reporting a running
+     * plugin as missing would discard a redundant download and claim it did not start.
      *
      * The jar clause needs [isIncompatible] to stay honest. There are **two** binary
      * incompatibility paths in `installPlugin` and only one of them fails: the load-time one
@@ -154,19 +173,118 @@ object PluginDependencyResolution {
     ): List<MissingPluginDependency> =
         manifest.dependencies
             .filterNot { dependency -> dependency.pluginId in installedPluginIds }
-            // A plugin depending on itself is a manifest mistake, not something to offer to
-            // install: the prompt would ask the user to install what they just installed.
-            .filterNot { dependency -> dependency.pluginId == manifest.pluginId }
-            .filterNot { dependency -> dependency.pluginId in NOT_USER_INSTALLABLE }
-            // A blank id is a manifest typo, and it reads as one: "Flow works without , but
-            // some of its features need it", then " was not found in the plugin store."
-            .filterNot { dependency -> dependency.pluginId.isBlank() }
+            // The shape filters live in one place so the direct prompt and the transitive plan
+            // cannot disagree about what may be offered. Presence stays here: it is a question
+            // about the host, not about the id.
+            .filter { dependency -> offerable(dependency.pluginId, parent = manifest.pluginId) }
             .groupBy { dependency -> dependency.pluginId }
             // One prompt per plugin, and when a manifest declares the same dependency twice
             // with different flags the stricter one wins: calling something "Recommended"
             // that the plugin actually requires is the worse way to be wrong.
             .map { (_, declarations) -> declarations.minBy { it.optional } }
             .map { dependency -> manifest.toMissing(dependency) }
+
+    /**
+     * Upper bound on the plugins one plan may name.
+     *
+     * A store row is free-form JSONB and can name anything, so the walk is bounded by something
+     * other than the store's honesty. Real graphs are two or three deep; this exists so a
+     * malformed one cannot turn the dialog into a hang.
+     */
+    const val MAX_PLAN_SIZE = 32
+
+    /**
+     * The closure of [rootId] over what the store says each plugin needs, minus what is present.
+     *
+     * Pure apart from the two injected questions. [isPresent] must be the same "installed and
+     * usable now" predicate the reporter and the installer already share; the last time two
+     * definitions of installed disagreed, a failed install silenced every later dependent of
+     * that plugin (see the note on [installedAndOnDisk]). [dependenciesOf] returning null means
+     * the store could not describe that plugin: it is kept in the plan, so a later install can
+     * retry the lookup, but it is not expanded. An install failure
+     * stops the plan before its dependents, including the root.
+     *
+     * The root is never filtered by [isPresent]. The dialog's Install button already guards on
+     * `isInstalled` before calling, and a root that became present between the two reads is the
+     * installer's coalescing case; dropping it here would hand the installer an empty plan it
+     * has no sensible reading of.
+     *
+     * Filters on every edge match [missingFor]: a blank id is a manifest typo, a self-reference
+     * is a typo rather than a cycle, and [NOT_USER_INSTALLABLE] must not be smuggled past a
+     * two-button dialog by a transitive declaration any more than by a direct one.
+     */
+    suspend fun installPlan(
+        rootId: String,
+        isPresent: (String) -> Boolean,
+        dependenciesOf: suspend (String) -> List<String>?,
+    ): DependencyInstallPlan {
+        val order = mutableListOf<String>()
+        val unresolved = mutableSetOf<String>()
+        // Everything ever entered, so each plugin is asked about once and a diamond's shared
+        // dependency is planned once.
+        val visited = mutableSetOf<String>()
+        // Only what is currently being expanded. Meeting a visited plugin that is also on the
+        // stack is a cycle; meeting one that has already finished is a diamond.
+        val onStack = mutableSetOf<String>()
+        var cyclic = false
+        var truncated = false
+
+        suspend fun visit(pluginId: String) {
+            if (!visited.add(pluginId)) {
+                if (pluginId in onStack) cyclic = true
+                return
+            }
+            onStack += pluginId
+            val declared = dependenciesOf(pluginId)
+            if (declared == null) unresolved += pluginId
+            val children =
+                declared
+                    .orEmpty()
+                    .map { it.trim() }
+                    .filter { offerable(it, parent = pluginId) }
+                    .filterNot(isPresent)
+            for (child in children) {
+                if (child !in visited && visited.size >= MAX_PLAN_SIZE) {
+                    truncated = true
+                    continue
+                }
+                visit(child)
+            }
+            onStack -= pluginId
+            // Post-order: a plugin is planned only after everything it needs, which is what
+            // makes the list deps-first and the root last without a second pass.
+            order += pluginId
+        }
+
+        visit(rootId)
+        return DependencyInstallPlan(order, unresolved, cyclic, truncated)
+    }
+
+    /**
+     * Whether a declared dependency id is something the dialog may offer at all.
+     *
+     * The one definition for both the direct prompt ([missingFor]) and the transitive plan
+     * ([installPlan]), so they cannot drift. Presence is checked separately by each caller: this
+     * is the shape of the id, not a question about the host.
+     *
+     * - A blank id is a manifest typo, and it reads as one: "Flow works without , but some of
+     *   its features need it", then " was not found in the plugin store."
+     * - A plugin depending on itself is a manifest mistake, not something to offer to install:
+     *   the prompt would ask the user to install what they just installed.
+     * - [NOT_USER_INSTALLABLE] must not be smuggled past a two-button dialog by any declaration.
+     *
+     * Retired ids ([RetiredPluginIds]) are deliberately not filtered here. That filter is
+     * conditional on the replacement's installed version and is applied on the offer surfaces
+     * with an injected lookup; whether a dependency on a retired plugin counts as satisfied by
+     * its replacement is a policy question, tracked as a follow-up to #429.
+     */
+    private fun offerable(
+        child: String,
+        parent: String,
+    ): Boolean {
+        val id = child.trim()
+        return id.isNotEmpty() && id != parent.trim() && id !in NOT_USER_INSTALLABLE
+    }
 
     /**
      * Every loaded, enabled plugin that declares a dependency on [pluginId] - optional ones
@@ -297,11 +415,82 @@ interface MissingDependencyInstaller {
      *
      * Separate from [install] so the prompt can appear immediately with the id and improve
      * itself when the lookup lands, rather than blocking on the network to say anything.
+     *
+     * Cancellation is the one exception to "degrade to null": a `CancellationException`, whether
+     * thrown by the lookup or returned inside its `Result`, propagates, so a dismissed dialog does
+     * not read as a store outage in the log. Every other failure degrades to null.
      */
     suspend fun displayNameFor(pluginId: String): String?
 
     /** Downloads and loads the plugin. The message on failure is shown to the user. */
     suspend fun install(pluginId: String): Result<Unit>
+
+    /**
+     * Everything Install will download and load if the user says yes to [pluginId].
+     *
+     * Defaults to the plugin alone, which is today's behaviour and what every caller other than
+     * the dependency dialog still wants: `PluginLoadGateRecovery` and `PluginStoreVersionBridge`
+     * install a plugin the user picked by name, not one whose closure was shown to them. Only
+     * the store-backed installer overrides this, and only the dialog asks.
+     */
+    suspend fun planFor(pluginId: String): DependencyInstallPlan =
+        DependencyInstallPlan(
+            order = listOf(pluginId),
+            unresolved = emptySet(),
+            cyclic = false,
+            truncated = false,
+        )
+
+    /**
+     * Installs [order] front to back and stops at the first failure.
+     *
+     * Sequential on purpose: the order is dependencies first, and a dependency still downloading
+     * when its dependent loads is the failure the plan exists to prevent. What installed before
+     * the failure stays installed - a dependency on its own is harmless and may already be wanted
+     * by something else - and the failure returned is the one for the plugin that stopped the
+     * run, which is the one the user can act on.
+     */
+    suspend fun installAll(order: List<String>): Result<Unit> {
+        val root = order.lastOrNull()
+        for (pluginId in order) {
+            val error = install(pluginId).exceptionOrNull() ?: continue
+            // A dependency's failure is shown under a title about the root, so say which plugin
+            // did not arrive and that a dependency is the reason. The root's own failure already
+            // names it. Ids rather than names: the dialog shows the id, and a name lookup is a
+            // network call this path must not wait on.
+            val reported =
+                if (pluginId == root) {
+                    error
+                } else {
+                    val message = error.message?.let { "Could not install $root: $it" } ?: "Could not install $root."
+                    IllegalStateException(message, error)
+                }
+            return Result.failure(reported)
+        }
+        return Result.success(Unit)
+    }
+
+    suspend fun installArtifact(artifact: ApprovedArtifact): Result<Unit> =
+        Result.failure(UnsupportedOperationException("installArtifact must be implemented to bind version and SHA-256"))
+
+    suspend fun installAllArtifacts(artifacts: List<ApprovedArtifact>): Result<Unit> {
+        val root = artifacts.lastOrNull()
+        for (artifact in artifacts) {
+            val error = installArtifact(artifact).exceptionOrNull() ?: continue
+            val reported =
+                if (artifact == root) {
+                    error
+                } else {
+                    val message =
+                        error.message?.let {
+                            "Could not install ${root?.pluginId}: $it"
+                        } ?: "Could not install ${root?.pluginId}."
+                    IllegalStateException(message, error)
+                }
+            return Result.failure(reported)
+        }
+        return Result.success(Unit)
+    }
 }
 
 /**
@@ -311,18 +500,25 @@ interface MissingDependencyInstaller {
  * bound to the `DynamicPluginManager` that reported - one per window - so Install always loads
  * the dependency into the manager that was actually missing it, whichever window asks.
  *
- * **Known limitation, with more than one window open.** Delivery is to whichever window
- * collects first, which is not necessarily the one that reported. The install is still correct
- * (the jar lands on disk and loads into the reporting window's manager), but the person who
- * answered may see nothing change in the window they were looking at until the next launch.
- * Routing back to the reporting window would need the prompt to carry a window id and the
- * collector to be able to decline one without consuming it - a claim registry rather than a
- * channel. Not built, because a single window is the overwhelmingly common case and the
- * consequence is cosmetic.
+ * **With more than one window open**, [windowId] is a best-effort claim on which window should
+ * show this: [shouldClaimMissingDependencyPrompt] decides whether the window that collects it
+ * off the bus is the right one to show it, or should leave it for [windowId]'s own window
+ * instead. The bus retains each prompt until an eligible collector atomically claims it.
+ * A null [windowId] is unscoped: whichever eligible window claims it shows it.
  */
 data class MissingDependencyPrompt(
     val missing: MissingPluginDependency,
     val installer: MissingDependencyInstaller,
+    /**
+     * Best-effort id of the window that triggered the install this dependency was found on,
+     * resolved via `WindowFocusManager.resolveActionableWindowId()` at report time - the same
+     * "whichever window is actionable right now" idiom this codebase already uses for deep
+     * links and CLI commands. Not perfectly precise (the actionable window can change between
+     * a click and an async install completing), and not every report call site sets it, but it
+     * is the difference between "delivered to a uniformly random window" and "usually delivered
+     * to the right one."
+     */
+    val windowId: String? = null,
     /**
      * True when a person asked for this directly, by pressing a control that needs the plugin.
      *
@@ -347,7 +543,7 @@ data class MissingDependencyPrompt(
  * An event bus rather than a direct call because the install runs in
  * `PluginLoaderDelegateImpl`, which has no window, no Compose scope and no idea whether a
  * UI exists at all - the same reason `TerminalLinkEventBus` exists, though not the same
- * delivery (see [prompts]).
+ * delivery (see [pending]).
  *
  * **Only user-initiated installs and re-activations emit here.** Startup restore and the api
  * hot-swap's reload-all both go through `DynamicPluginManager.installPlugin` directly, and a
@@ -356,12 +552,10 @@ data class MissingDependencyPrompt(
  * gone missing while the plugin sat disabled (#180).
  *
  * A class with a singleton subclass rather than a bare object, so a test can hold its own bus.
- * The shared buffer otherwise carries prompts between tests, which is the same coupling two
+ * The shared pending map otherwise carries prompts between tests, which is the same coupling two
  * windows would have.
  */
 open class PluginDependencyBus {
-    private val logger = BossLogger.forComponent("PluginDependencyBus")
-
     /**
      * Missing plugins the user has already declined, for this process only.
      *
@@ -375,14 +569,6 @@ open class PluginDependencyBus {
     private val declined =
         java.util.concurrent.ConcurrentHashMap
             .newKeySet<String>()
-
-    /**
-     * Missing plugins with a prompt already waiting, so the buffer is not spent on duplicates.
-     *
-     * Three consumers of one gateway report three prompts and the collector discards two on
-     * arrival - but they occupy slots first.
-     */
-    private val queued = ConcurrentHashMap.newKeySet<String>()
 
     /**
      * Records a dismissal so the same question stops being asked this session.
@@ -409,40 +595,94 @@ open class PluginDependencyBus {
         }
 
     /**
-     * A channel, not a `SharedFlow`, because exactly one window must ask.
+     * The single source of truth for what is waiting to be asked, keyed like [decline]. Guards
+     * every read and write with [lock] so admission ("is a prompt already live for this key")
+     * and claiming ("give me that exact prompt, once") are each one atomic step - not a map
+     * lookup a caller has to remember to pair correctly.
      *
-     * A broadcast would put an identical dialog in front of every open window, and each of
-     * them could start the same install - so this is not a smaller version of the right
-     * thing, it is the wrong delivery semantics. Channel receive hands each prompt to a
-     * single collector.
+     * A map, not a bounded `Channel`, on purpose (BossConsole#465 review). A channel's fixed
+     * capacity can silently drop an already-admitted prompt once enough *other*, genuinely
+     * distinct prompts are pending at once - a live probe on this exact class proved it:
+     * report one, receive it, admit four unrelated ones (filling a four-slot channel), then
+     * re-send the first - refused, and gone. A map has no such ceiling to overflow. It also
+     * closes a second, sharper gap the same review found: the old design freed its dedup guard
+     * the instant a prompt was *handed to a collector*, not when the collector was actually
+     * done with it - so a second, independent `report()` for the same key, arriving while the
+     * first prompt was merely in transit toward the right window, was admitted as a competing
+     * second entry. Here, a key stays reserved by [report] until [claim] (or an explicit
+     * decline/install-elsewhere) removes it - there is no gap where the key is
+     * reserved-but-empty for something else to slip into.
      *
-     * Buffered, so reporting never suspends the installer and a prompt raised before any
-     * window exists is asked as soon as one appears rather than lost.
-     *
-     * Left on the default suspend-on-overflow policy and only ever written with `trySend`:
-     * a `DROP_OLDEST` channel always accepts, so the overflow would be invisible, and the
-     * oldest prompt is the one the user is most likely part-way through answering. A full
-     * buffer refuses the newest and says so instead.
+     * `LinkedHashMap`, not `ConcurrentHashMap`: iteration order matters (the oldest prompt is
+     * the one a user is most likely part-way through answering, so it should sort first in a
+     * scan), and `synchronized` gives that for free since every access already goes through
+     * [lock] for the compound admit/claim logic anyway - a `ConcurrentHashMap`'s per-call
+     * atomicity would not help here and would still need external locking for the two-step
+     * "check both name-scoped keys" logic [report] already does.
      */
-    private val prompts = Channel<MissingDependencyPrompt>(capacity = 4)
+    private val pending = LinkedHashMap<String, MissingDependencyPrompt>()
+    private val lock = Any()
 
+    /**
+     * Wakes every collector to re-scan [pending]. Replay of 1 so a collector that starts after
+     * a report() still gets a signal to run its first scan, rather than waiting for a change
+     * that already happened; [tryEmit] never suspends, so [report] - called from an install
+     * path with no UI to wait on - never blocks on this either.
+     *
+     * `extraBufferCapacity = 1` with `DROP_OLDEST` is load-bearing, not decoration: with no
+     * extra buffer, [tryEmit] returns false - and [report] discards that boolean - whenever a
+     * collector has not yet consumed the replayed value, which is precisely whenever any window
+     * is mid-dialog or mid-[snapshotFlow] check. That is the common case for a *second* missing
+     * dependency, not a rare one, so without this the wake was routinely lost and [ticker] (a 1s
+     * poll) was doing the real work its own KDoc says is only the fallback for a closed target
+     * window. Nothing is lost either way, since [pending] still holds the prompt - this just
+     * makes the signal itself reliable instead of best-effort, so a rescan happens as soon as a
+     * collector is free rather than up to a second later. Conflating repeated "go look" signals
+     * into one is exactly right for a rescan trigger, which is why DROP_OLDEST and not SUSPEND.
+     */
+    private val changed =
+        MutableSharedFlow<Unit>(replay = 1, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /**
+     * A snapshot of [pending] at this instant, oldest first. Never returns the live map: a
+     * collector iterating it while another thread claims or admits would be undefined.
+     */
+    private fun snapshot(): List<MissingDependencyPrompt> = synchronized(lock) { pending.values.toList() }
+
+    /**
+     * Every open window collects the same broadcast and independently decides, via
+     * [shouldClaimMissingDependencyPrompt], whether a given prompt is its to show - then calls
+     * [claim] before acting on it. Re-scanning on a bounded interval as well as on every
+     * [changed] signal is the fallback for the one case no signal fires for: the prompt's
+     * preferred window closing with nobody reporting anything new. A ticker per collecting window,
+     * not one wait-and-retry loop per rejected prompt per window (the shape the prior
+     * `reofferMissingDependencyPrompt` had, and exactly what the review's "unbounded routing
+     * hops" finding was about) - this bounds total wakeups to one merged stream per collecting
+     * window, however many prompts happen to be pending at once.
+     */
     val missingDependencies =
-        prompts
-            .receiveAsFlow()
-            // Freed on the way out, not when the dialog is answered: the collector may decline to
-            // show this one (already installed, or declined since), and a slot held for a prompt
-            // nobody will ever show is what `queued` exists to avoid.
-            .onEach { prompt -> queued.remove(declineKey(prompt.missing)) }
+        merge(changed, ticker())
+            .transform { snapshot().forEach { prompt -> emit(prompt) } }
+
+    private fun ticker() =
+        flow {
+            while (true) {
+                delay(MISSING_DEPENDENCY_RESCAN_INTERVAL_MS)
+                emit(Unit)
+            }
+        }
 
     /**
      * Non-suspending on purpose, so the install path never waits on a UI.
      *
-     * Filters here and not only in the collector, because a prompt the collector is certain to
-     * discard still costs a buffer slot on the way through - and with four slots, that can be
-     * what refuses a different dependency which could have been shown.
+     * `putIfAbsent`-shaped: a key already pending keeps its *first* reporter's prompt (and
+     * therefore its [MissingDependencyPrompt.windowId]) rather than being overwritten by a
+     * second, independent report for the same key - the other half of the review finding
+     * [pending]'s KDoc describes. The second report is simply redundant: the first prompt
+     * already asks the identical question and, once shown, [shouldShowMissingDependency]
+     * re-checks presence at that point anyway.
      */
     fun report(prompt: MissingDependencyPrompt) {
-        val missingPluginId = prompt.missing.missingPluginId
         // Keyed like a decline, not by bare id: an optional prompt already waiting would
         // otherwise swallow a *required* one for the same plugin, and declining the optional
         // dialog would then silence the plugin that actually requires it.
@@ -451,22 +691,45 @@ open class PluginDependencyBus {
         // second click while the dialog is already up does not stack another copy of it. See
         // [MissingDependencyPrompt.userInitiated].
         val silenced = !prompt.userInitiated && wasDeclined(prompt.missing)
-        if (silenced || !queued.add(declineKey(prompt.missing))) return
-        if (prompts.trySend(prompt).isFailure) {
-            queued.remove(declineKey(prompt.missing))
-            // DROP_OLDEST is silent, and a prompt that never appears is indistinguishable
-            // from a feature that does not exist. Say so somewhere.
-            logger.warn(
-                LogCategory.SYSTEM,
-                "Dropped a missing-dependency prompt",
-                mapOf(
-                    "dependent" to prompt.missing.dependentPluginId,
-                    "missing" to prompt.missing.missingPluginId,
-                ),
-            )
-        }
+        if (silenced) return
+        val key = declineKey(prompt.missing)
+        val admitted =
+            synchronized(lock) {
+                if (pending.containsKey(key)) {
+                    false
+                } else {
+                    pending[key] = prompt
+                    true
+                }
+            }
+        if (admitted) changed.tryEmit(Unit)
     }
+
+    /**
+     * Atomically takes [prompt] out of [pending] for the caller that wins the race - a losing
+     * racer (another window's collector, woken by the same broadcast) gets `false` and does
+     * nothing further: there is no second dialog to suppress and no re-report to issue, because
+     * the prompt was never removed out from under it in the first place.
+     */
+    internal fun claim(prompt: MissingDependencyPrompt): Boolean =
+        synchronized(lock) {
+            val key = declineKey(prompt.missing)
+            if (pending[key] === prompt) {
+                pending.remove(key)
+                true
+            } else {
+                false
+            }
+        }
 }
+
+/**
+ * How often [PluginDependencyBus.missingDependencies] re-broadcasts with no new report.
+ *
+ * `internal`, not `private` - this repo pins its timing constants against a test
+ * (`SWIPE_NAV_DEBOUNCE_MS`, `GESTURE_GAP_MS`), and this one was neither pinned nor testable.
+ */
+internal const val MISSING_DEPENDENCY_RESCAN_INTERVAL_MS = 1000L
 
 /**
  * Whether a prompt that reached a window should be put on screen.
@@ -489,6 +752,36 @@ fun shouldShowMissingDependency(
     present: Boolean,
     declined: Boolean,
 ): Boolean = !present && (prompt.userInitiated || !declined)
+
+/**
+ * Whether the window at [collectorWindowId] should show [prompt] itself, rather than leave it
+ * for [MissingDependencyPrompt.windowId]'s own window.
+ *
+ * [PluginDependencyBus.missingDependencies] broadcasts every pending prompt to every open
+ * window, not necessarily the one whose install raised it. This function is the other half of
+ * routing correctly: a window that is not the preferred one for [prompt] simply does not call
+ * [PluginDependencyBus.claim] and leaves the prompt in place for [MissingDependencyPrompt.windowId]'s
+ * own window (or, if that window has since closed, for the bus's periodic re-scan to hand to
+ * whichever window claims it next). That "leave it alone" behaviour lives at the collector, not
+ * here; this is only the yes/no decision, kept pure and testable the same way
+ * [shouldShowMissingDependency] is.
+ *
+ * [targetWindowOpen] is passed in rather than resolved here for the same reason: whether a window
+ * id is still live is a `WindowFocusManager` question, and this function should stay answerable
+ * from a plain boolean rather than a real window registry.
+ *
+ * True whenever there is no reporting window to prefer ([MissingDependencyPrompt.windowId] is
+ * null - every call site before this field existed, and any that still don't set it), whenever
+ * [collectorWindowId] IS the reporting window, or whenever the reporting window is simply gone -
+ * a prompt must never wait forever for a window that closed before answering it, which is exactly
+ * how the single-window case (by far the most common) keeps working unchanged: its own window id
+ * always matches on the second clause.
+ */
+fun shouldClaimMissingDependencyPrompt(
+    prompt: MissingDependencyPrompt,
+    collectorWindowId: String,
+    targetWindowOpen: Boolean,
+): Boolean = prompt.windowId == null || prompt.windowId == collectorWindowId || !targetWindowOpen
 
 /** The bus the host actually uses. */
 object PluginDependencyEventBus : PluginDependencyBus()

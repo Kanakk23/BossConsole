@@ -1,5 +1,6 @@
 package ai.rever.boss.utils
 
+import ai.rever.boss.components.events.PluginActionEventBus
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -93,7 +94,7 @@ class SingleInstanceChannelTest {
         val token = "c".repeat(TOKEN_HEX_LENGTH)
         val url = "boss://auth/verify#access_token=abc&type=recovery"
 
-        val open = assertNotNull(parseRequestLine(formatOpenRequest(token, DeepLinkOrigin.EXTERNAL, url)))
+        val open = assertNotNull(parseRequestLine(openRequestLine(token, DeepLinkOrigin.EXTERNAL, url)))
         assertEquals(token, open.token)
         assertEquals(VERB_OPEN, open.verb)
         assertEquals(DeepLinkOrigin.EXTERNAL, open.origin)
@@ -109,7 +110,7 @@ class SingleInstanceChannelTest {
 
         // A URL with a space in it must survive rather than being cut short.
         val spacedUrl = "boss://url?url=a b"
-        val spaced = assertNotNull(parseRequestLine(formatOpenRequest(token, DeepLinkOrigin.OPERATOR_CLI, spacedUrl)))
+        val spaced = assertNotNull(parseRequestLine(openRequestLine(token, DeepLinkOrigin.OPERATOR_CLI, spacedUrl)))
         assertEquals(spacedUrl, spaced.url)
         assertEquals(DeepLinkOrigin.OPERATOR_CLI, spaced.origin)
 
@@ -199,7 +200,7 @@ class SingleInstanceChannelTest {
         assertEquals(RESPONSE_REJECTED, exchange(descriptor, "boss://terminal?command=id"))
         assertEquals(
             RESPONSE_REJECTED,
-            exchange(descriptor, formatOpenRequest(wrongToken, DeepLinkOrigin.OPERATOR_CLI, "boss://split")),
+            exchange(descriptor, openRequestLine(wrongToken, DeepLinkOrigin.OPERATOR_CLI, "boss://split")),
         )
     }
 
@@ -210,9 +211,10 @@ class SingleInstanceChannelTest {
 
         // A request well past the read budget. The read gives up rather than
         // growing, so the request is never acted on — the connection either
-        // comes back refused or is simply dropped.
+        // comes back refused or is simply dropped. Written raw rather than via
+        // formatOpenRequest, which now refuses oversized URLs on the send side.
         val padding = "a".repeat(MAX_REQUEST_BYTES + 4096)
-        val oversized = formatOpenRequest(descriptor.token, DeepLinkOrigin.EXTERNAL, "boss://url?url=$padding")
+        val oversized = "$PROTOCOL_VERSION ${descriptor.token} $VERB_STATUS $padding"
         assertNotEquals(RESPONSE_OK, exchangeTolerantly(descriptor, oversized))
 
         // The channel is still serving afterwards.
@@ -234,6 +236,99 @@ class SingleInstanceChannelTest {
         assertTrue(SingleInstanceManager.sendToExistingInstance("boss://auth/verify#access_token=abc"))
         assertFalse(SingleInstanceManager.sendToExistingInstance("  "))
         assertFalse(SingleInstanceManager.sendToExistingInstance("ftp://example.com"))
+    }
+
+    @Test
+    fun `forwarding a plugin action link reports the handler's real outcome, not a blind OK`() {
+        // A boss://plugin?id=X&action=Y link used to be fire-and-forget: the
+        // forwarding instance always got RESPONSE_OK, whether or not a handler
+        // for X was even registered. Now the response reflects what actually
+        // happened, so an automation or CLI caller forwarding the link over
+        // this channel can tell a genuine success from a silent no-op.
+        assertTrue(SingleInstanceManager.acquireLock())
+
+        val handlerId = "channel-test-handler-${System.nanoTime()}"
+        ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
+            .register(
+                object : ai.rever.boss.plugin.api.DeepLinkActionHandler {
+                    override val handlerId = handlerId
+
+                    override fun handle(
+                        action: String,
+                        params: Map<String, String>,
+                    ): Boolean = action == "ping"
+                },
+            )
+        try {
+            assertTrue(sendAsOperator("boss://plugin?id=$handlerId&action=ping"))
+            assertFalse(sendAsOperator("boss://plugin?id=$handlerId&action=unknown"))
+            // An EXTERNAL forward is acknowledged as queued, not as handled: it is retained for a
+            // window to ask about, and nothing has run yet to report an outcome for. This used to
+            // read false only because a test JVM registers no window and the action was refused
+            // outright; it is now retained until one exists, which is the whole point of the gate
+            // on the cold-start path. The operator-origin assertions above are what still pin a
+            // real handler verdict.
+            assertTrue(SingleInstanceManager.sendToExistingInstance("boss://plugin?id=$handlerId&action=ping"))
+        } finally {
+            ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
+                .unregister(handlerId)
+            // The EXTERNAL forward retained an entry in a process-global, 16-slot registry that
+            // every test class in this JVM shares; left behind, it can fill up another file's test.
+            PluginActionEventBus.clearForTest()
+        }
+
+        assertFalse(sendAsOperator("boss://plugin?id=no-such-handler&action=ping"))
+
+        // A plugin link that just opens a panel (no action) is unaffected: still
+        // reported as acknowledged, exactly like before this change.
+        assertTrue(SingleInstanceManager.sendToExistingInstance("boss://plugin?id=bookmarks"))
+    }
+
+    @Test
+    fun `a plugin action without a usable id is refused`() {
+        assertTrue(SingleInstanceManager.acquireLock())
+        assertFalse(SingleInstanceManager.sendToExistingInstance("boss://plugin?action=ping"))
+        assertFalse(SingleInstanceManager.sendToExistingInstance("boss://plugin?id=&action=ping"))
+    }
+
+    @Test
+    fun `a timed out queued action never runs after the UI thread becomes available`() {
+        assertTrue(SingleInstanceManager.acquireLock())
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val calls =
+            java.util.concurrent.atomic
+                .AtomicInteger()
+        val handlerId = "timeout-test-handler"
+        ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
+            .register(
+                object : ai.rever.boss.plugin.api.DeepLinkActionHandler {
+                    override val handlerId = handlerId
+
+                    override fun handle(
+                        action: String,
+                        params: Map<String, String>,
+                    ): Boolean {
+                        calls.incrementAndGet()
+                        return true
+                    }
+                },
+            )
+        javax.swing.SwingUtilities.invokeLater {
+            entered.countDown()
+            release.await(15, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        try {
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertFalse(sendAsOperator("boss://plugin?id=$handlerId&action=run"))
+        } finally {
+            release.countDown()
+            // Drain the queued dispatch before inspecting its observable side effect.
+            javax.swing.SwingUtilities.invokeAndWait {}
+            ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
+                .unregister(handlerId)
+        }
+        assertEquals(0, calls.get(), "a timed out action must not execute later from the Main queue")
     }
 
     @Test
@@ -522,6 +617,21 @@ class SingleInstanceChannelTest {
     }
 
     @Test
+    fun `plugin dev reload refuses a path-shaped plugin id on the wire`() {
+        // The id joins straight onto the dev staging root on the host, so a
+        // traversal token must be refused before it is parsed as a request.
+        assertTrue(SingleInstanceManager.acquireLock())
+        val descriptor = assertNotNull(readPublishedDescriptor())
+        val base = "$PROTOCOL_VERSION ${descriptor.token} $VERB_PLUGIN_DEV_RELOAD "
+        assertEquals(RESPONSE_REJECTED, exchange(descriptor, "$base.."))
+        assertEquals(RESPONSE_REJECTED, exchange(descriptor, "$base..\\..\\etc"))
+        assertEquals(RESPONSE_REJECTED, exchange(descriptor, "${base}plugins/other"))
+        assertEquals(RESPONSE_REJECTED, exchange(descriptor, "${base}C:\\evil"))
+        assertEquals(RESPONSE_REJECTED, exchange(descriptor, base))
+        assertEquals(RESPONSE_REJECTED, exchange(descriptor, base.dropLast(1)))
+    }
+
+    @Test
     fun `status JSON escapes platform strings`() {
         val previous = System.getProperty("os.arch")
         val unusual = "C:\\Users\\name\"quoted\nline"
@@ -626,6 +736,22 @@ class SingleInstanceChannelTest {
         assertTrue(assertNotNull(failure).message.orEmpty().contains("response size limit"))
     }
 
+    @Test
+    fun `reloadDevPlugin transmits diagnostic error over 256 bytes`() {
+        val longDetail = "DiagnosticContextInfo_".repeat(16)
+        SingleInstanceManager.pluginReloadHandlerOverride = { _ ->
+            throw IllegalStateException(longDetail)
+        }
+        assertTrue(SingleInstanceManager.acquireLock())
+        val result = SingleInstanceManager.reloadDevPlugin("diagnostic-plugin")
+        kotlin.test.assertIs<ReloadResult.Failed>(result)
+        assertTrue(
+            result.reason.length >= 350,
+            "Error response must preserve 350+ char diagnostic message: ${result.reason.length}",
+        )
+        assertTrue(result.reason.contains("DiagnosticContextInfo_"))
+    }
+
     // ==================== Helpers ====================
 
     private fun runtimeDirPath(): Path = File(tempDir.toFile(), "run").toPath()
@@ -695,3 +821,11 @@ class SingleInstanceChannelTest {
 
     private fun hasPosixPermissions(path: Path) = path.fileSystem.supportedFileAttributeViews().contains("posix")
 }
+
+private val OPERATOR = DeepLinkOrigin.OPERATOR_CLI
+
+/**
+ * A forwarded link the operator passed to `boss` themselves, which dispatches
+ * unattended. Without this an action link is EXTERNAL and is held or refused.
+ */
+private fun sendAsOperator(url: String) = SingleInstanceManager.sendToExistingInstance(url, OPERATOR)

@@ -68,7 +68,7 @@ object ImportService {
 
                 val blocked =
                     when {
-                        website.isEmpty() || isNonWebEntry(entry.website) -> SkipReason.MISSING_URL
+                        website.isEmpty() || isNonWebPasswordEntry(entry.website) -> SkipReason.MISSING_URL
 
                         // Chrome stores logins with an empty username_value.
                         // The CSV path pre-skips these; without the same check
@@ -159,12 +159,11 @@ object ImportService {
     /**
      * The value stored as a secret's website, and half of the de-duplication key.
      *
-     * Deliberately the full host, not `WebsiteMatchingUtil.extractMainDomain`:
-     * that collapses subdomains, so `jira.example.com` and `wiki.example.com`
-     * would both become `example.com` and the second credential would be
-     * discarded as "already saved" — losing a real password and erasing which
-     * host the survivor belonged to. Subdomain collapsing is right for *matching*
-     * a secret to a page at autofill time; it is wrong for storage.
+     * Preserve the full host so `jira.example.com` and `wiki.example.com` remain distinct
+     * de-duplication keys. Collapsing them could discard a real password as "already saved".
+     * The matching utility also preserves full hosts, but storage keeps a separate parser:
+     * it uses URI parsing and retains the trimmed raw value when no host can be parsed,
+     * rather than returning null. An imported website must not disappear on a parse failure.
      */
     private fun normaliseWebsite(raw: String): String {
         val trimmed = raw.trim()
@@ -178,14 +177,6 @@ object ImportService {
 
         return host?.lowercase()?.removePrefix("www.") ?: trimmed
     }
-
-    /**
-     * Entries a browser stores for native apps rather than web pages.
-     *
-     * Chrome exports rows like `android://<hash>@com.example`; they have no host
-     * and could never be autofilled, so importing them adds noise only.
-     */
-    private fun isNonWebEntry(raw: String): Boolean = raw.trim().startsWith("android://", ignoreCase = true)
 
     // ==================== Bookmarks ====================
 
@@ -326,11 +317,8 @@ object ImportService {
         index: Int,
     ): Bookmark =
         Bookmark(
-            // Bookmark.generateId() is a bare millisecond timestamp, so a bulk
-            // insert would hand hundreds of entries the same id — and
-            // removeBookmark filters by id, so deleting one would delete them
-            // all. Unique per entry AND per run: a deterministic id would make
-            // re-importing the same export collide with the previous run.
+            // Use one import-run id and an entry index to identify each imported bookmark.
+            // Re-importing the same export must not reuse ids from the previous run.
             id = "imported-$importRunId-$index-${url.hashCode()}",
             tabConfig = TabConfig(type = "browser", title = title, url = url),
             workspaceName = "",

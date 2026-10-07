@@ -1,6 +1,8 @@
 package ai.rever.boss.crash
 
+import ai.rever.boss.plugin.sandbox.PluginExecutionBoundary
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -31,6 +33,16 @@ import kotlin.test.assertTrue
  * stops a task that outlives `tearDown` from resolving the real data root.
  */
 class ContainedCrashReportTest {
+    private companion object {
+        /**
+         * Any id will do: [PluginExecutionBoundary.runAttributed] takes the id as a
+         * string and does not resolve it, so the attribution tests need no real jar
+         * or classloader. Only the classloader-scan rank does, and these exercise the
+         * two ranks above it.
+         */
+        const val PROBE_PLUGIN = "probe.plugin"
+    }
+
     /** Mirrors CrashHandler.CONTAINED_REPORT_RETENTION, which is private. */
     private val retention = 20
 
@@ -78,7 +90,7 @@ class ContainedCrashReportTest {
         CrashHandler.recordContained(uniqueThrowable("write"))
         awaitFiles(1)
 
-        val text = reports().single().readText()
+        val text = readReport(reports().single())
         assertTrue(text.contains("contained render fault"), "the file should say what it is")
         assertTrue(text.contains("plugin:"), "pluginId is the most useful field on this path")
         assertTrue(text.contains("contained-report-test write"), "the original message should survive")
@@ -100,7 +112,7 @@ class ContainedCrashReportTest {
 
             val temp = tempFiles().single()
             assertTrue(
-                temp.readText().contains("contained-report-test atomic-publish"),
+                readReport(temp).contains("contained-report-test atomic-publish"),
                 "the temp file must be complete",
             )
         } finally {
@@ -108,7 +120,7 @@ class ContainedCrashReportTest {
         }
 
         awaitFiles(1)
-        assertTrue(reports().single().readText().contains("contained-report-test atomic-publish"))
+        assertTrue(readReport(reports().single()).contains("contained-report-test atomic-publish"))
         assertTrue(tempFiles().isEmpty(), "the temp file must be removed after publication")
     }
 
@@ -167,6 +179,108 @@ class ContainedCrashReportTest {
         )
     }
 
+    /**
+     * The regression this path existed to have.
+     *
+     * The fault is reported *inside* the scope and never escapes it, which is what a
+     * contained render fault is: the host caught it, so nothing propagated out of a
+     * `runAttributed` frame to be tagged on the way out. That leaves the thread's
+     * plugin scope as the only source that can answer, and it is a ThreadLocal - so
+     * resolving attribution on the writer thread found nothing and wrote
+     * "(unattributed)" for every plugin fault that took this path.
+     *
+     * Letting the throwable escape the block instead would tag it, and the tag
+     * survives the thread hop, so the test would pass with or without the fix.
+     */
+    @Test
+    fun `a fault reported inside a plugin scope is attributed on the async path`() {
+        PluginExecutionBoundary.runAttributed(PROBE_PLUGIN) {
+            CrashHandler.recordContained(uniqueThrowable("scope-async"))
+        }
+        awaitFiles(1)
+
+        assertEquals(
+            PROBE_PLUGIN,
+            attributionOf(readReport(reports().single())),
+            "the plugin scope held at the fault must survive the hop to the writer thread",
+        )
+    }
+
+    /**
+     * The same fault must not attribute differently depending on which branch took
+     * it. `writeInline = true` runs on the calling thread, so it read the scope
+     * correctly by accident while the async branch - the one every caller but the
+     * about-to-exit path uses - did not.
+     */
+    @Test
+    fun `inline and async report the same attribution for one fault`() {
+        PluginExecutionBoundary.runAttributed(PROBE_PLUGIN) {
+            // Distinct markers: one signature would dedupe to a single file and
+            // there would be nothing to compare.
+            CrashHandler.recordContained(uniqueThrowable("scope-inline"), writeInline = true)
+            CrashHandler.recordContained(uniqueThrowable("scope-deferred"))
+        }
+        awaitFiles(2)
+
+        val attributions =
+            reports()
+                .map { readReport(it) }
+                .associate { text -> markerOf(text) to attributionOf(text) }
+
+        assertEquals(
+            mapOf("scope-inline" to PROBE_PLUGIN, "scope-deferred" to PROBE_PLUGIN),
+            attributions,
+            "inline and deferred writes must agree about who to blame",
+        )
+    }
+
+    /**
+     * The other direction, and the one that matters more: attribution must not start
+     * inventing a plugin for a host bug. A captured scope of null has to stay
+     * indistinguishable from resolving no scope at all.
+     */
+    @Test
+    fun `a host fault outside any plugin scope stays unattributed`() {
+        CrashHandler.recordContained(uniqueThrowable("host-fault"))
+        awaitFiles(1)
+
+        val text = readReport(reports().single())
+        assertEquals("(unattributed)", attributionOf(text), "a host fault must not be blamed on a plugin")
+    }
+
+    /** The `plugin:` field of a rendered report, whitespace trimmed. */
+    private fun attributionOf(reportText: String): String =
+        reportText
+            .lineSequence()
+            .first { it.startsWith("plugin:") }
+            .removePrefix("plugin:")
+            .trim()
+
+    /** The [uniqueThrowable] marker a report was written for. */
+    private fun markerOf(reportText: String): String =
+        reportText
+            .lineSequence()
+            .first { it.startsWith("message:") }
+            .substringAfter("contained-report-test ")
+            .trim()
+
+    /**
+     * Publication does not guarantee immediate read access on Windows: a transient
+     * sharing violation can reject opening an already-visible report. Retry only
+     * I/O failures, not empty/incorrect content, and preserve a persistent failure.
+     */
+    private fun readReport(file: File): String {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (true) {
+            try {
+                return file.readText()
+            } catch (e: IOException) {
+                if (System.nanoTime() >= deadline) throw e
+                Thread.sleep(20)
+            }
+        }
+    }
+
     /** The write is handed to a background thread, so poll rather than sleep a fixed span. */
     private fun awaitFiles(count: Int) {
         val deadline = System.currentTimeMillis() + 5_000
@@ -193,12 +307,11 @@ class ContainedCrashReportTest {
             // readText via runCatching: the writer thread sweeps old reports while
             // we are listing, so a file can vanish between listFiles and the read.
             val written = reports().filter { runCatching { it.readText() }.getOrDefault("").contains(text) }
-            if (written.isNotEmpty()) {
-                written.forEach { it.delete() }
-                return
-            }
+            // Windows can temporarily deny deletion too. The marker must be gone
+            // before callers assert the number of reports; otherwise keep polling.
+            if (written.isNotEmpty() && written.all { it.delete() || !it.exists() }) return
             Thread.sleep(20)
         }
-        throw AssertionError("the contained-report writer never drained")
+        throw AssertionError("the contained-report writer never drained or its marker could not be deleted")
     }
 }

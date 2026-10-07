@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin
 
+import ai.rever.boss.plugin.loader.PluginBundledTrust
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -13,8 +14,9 @@ import java.io.File
  * left a row pointing at a file that may since have been deleted:
  *
  * - **The jar**, or the plugin comes straight back on the next directory scan.
- * - **The `.sig` sidecar**, because a signature left beside a filename that is later reused by a
- *   different download hard-fails that load - worse than being unsigned.
+ * - **The `.sig` sidecar** (and the `.bundled-trust` marker, BossConsole#102 - see
+ *   [PluginBundledTrust]), because either one left beside a filename that is later reused by a
+ *   different download hard-fails, or wrongly exempts, that load.
  * - **The `installed.json` row**, or the persisted-load pass keeps trying to load a missing file.
  */
 object PluginArtifactCleanup {
@@ -29,7 +31,10 @@ object PluginArtifactCleanup {
         val deleteJar: (String) -> Boolean = { path ->
             runCatching { File(path).takeIf { it.exists() }?.delete() == true }.getOrDefault(false)
         },
-        val deleteSidecar: (String) -> Unit = { path -> runCatching { PluginSignatureSidecar.delete(path) } },
+        val deleteSidecar: (String) -> Unit = { path ->
+            runCatching { PluginSignatureSidecar.delete(path) }
+            runCatching { PluginBundledTrust.delete(path) }
+        },
         val forgetRow: (String) -> Unit = { id -> PluginPersistence.removeInstalledPlugin(id) },
     )
 
@@ -37,13 +42,18 @@ object PluginArtifactCleanup {
         pluginId: String,
         jarPath: String,
         hooks: Hooks = Hooks(),
+        additionalJarPaths: List<String> = emptyList(),
     ) {
         // A blank path is not a path: deleting on it would be a no-op at best, and the row still has
         // to go or the plugin comes back at the next launch.
-        val jarDeleted = if (jarPath.isBlank()) false else hooks.deleteJar(jarPath)
-        if (jarPath.isNotBlank()) {
-            hooks.deleteSidecar(jarPath)
-        }
+        val jarPaths = (listOf(jarPath) + additionalJarPaths).filter { it.isNotBlank() }.distinct()
+        val deletionResults =
+            jarPaths.map { path ->
+                val deleted = hooks.deleteJar(path)
+                hooks.deleteSidecar(path)
+                deleted
+            }
+        val jarDeleted = deletionResults.isNotEmpty() && deletionResults.all { it }
         runCatching { hooks.forgetRow(pluginId) }
             .onFailure { error ->
                 logger.warn(
@@ -55,7 +65,7 @@ object PluginArtifactCleanup {
         logger.info(
             LogCategory.SYSTEM,
             "Removed plugin artifacts",
-            mapOf("pluginId" to pluginId, "jarPath" to jarPath, "jarDeleted" to jarDeleted),
+            mapOf("pluginId" to pluginId, "jarPaths" to jarPaths.joinToString(", "), "jarDeleted" to jarDeleted),
         )
     }
 }

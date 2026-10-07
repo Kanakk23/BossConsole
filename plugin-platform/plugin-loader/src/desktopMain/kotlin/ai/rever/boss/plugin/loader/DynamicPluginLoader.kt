@@ -253,6 +253,23 @@ class DynamicPluginLoaderImpl(
                                 e,
                             ),
                         )
+                    } catch (e: LinkageError) {
+                        // The JVM reports "these bytes will not link into this host" as an Error,
+                        // not an Exception, so it matches neither the clause above nor the
+                        // Exception clause that closes this function - it left by being thrown.
+                        // The commonest instance is the commonest packaging mistake: a plugin
+                        // built on a newer JDK arrives as UnsupportedClassVersionError.
+                        // LinkageError, deliberately not Error: OutOfMemoryError and
+                        // StackOverflowError are the host's problem and must keep propagating.
+                        classLoaderManager.closeClassLoader(pluginId, classLoader)
+                        return@withContext Result.failure(
+                            PluginClassException(
+                                "Plugin main class could not be linked: ${e.javaClass.simpleName}",
+                                pluginId,
+                                manifest.mainClass,
+                                e,
+                            ),
+                        )
                     }
 
                 // Verify it implements Plugin interface
@@ -291,6 +308,22 @@ class DynamicPluginLoaderImpl(
                             // Try no-arg constructor
                             pluginClass.getDeclaredConstructor().newInstance() as Plugin
                         }
+                    } catch (e: LinkageError) {
+                        // Reading a Kotlin object's INSTANCE field runs its static initializer -
+                        // the plugin's own code, on this thread, for the first time. When that
+                        // throws, the JVM wraps it in ExceptionInInitializerError, which is a
+                        // LinkageError and so is not caught below. Nothing earlier can pre-empt
+                        // it either: BinaryCompatibilityValidator loads classes with
+                        // initialize=false precisely so it does NOT run plugin code.
+                        classLoaderManager.closeClassLoader(pluginId, classLoader)
+                        return@withContext Result.failure(
+                            PluginClassException(
+                                "Plugin failed to initialize: ${e.javaClass.simpleName}",
+                                pluginId,
+                                manifest.mainClass,
+                                e,
+                            ),
+                        )
                     } catch (e: Exception) {
                         classLoaderManager.closeClassLoader(pluginId, classLoader)
                         return@withContext Result.failure(
@@ -349,6 +382,28 @@ class DynamicPluginLoaderImpl(
                 Result.failure(
                     PluginLoadException(
                         "Unexpected error loading plugin: ${e.message}",
+                        cause = e,
+                    ),
+                )
+            } catch (e: LinkageError) {
+                // A backstop for the linkage failures the two clauses above do not sit in front
+                // of - a class resolved lazily somewhere in this body, for instance. Without it
+                // this function can still leave by throwing, and its signature promises a Result:
+                // every getOrElse and onFailure on the install and startup-scan paths is bypassed
+                // when it does. Still LinkageError rather than Error, so a VirtualMachineError
+                // continues to propagate rather than being filed as a failed plugin.
+                logger.error(
+                    LogCategory.SYSTEM,
+                    "Plugin could not be linked",
+                    mapOf(
+                        "jarPath" to jarPath,
+                        "error" to e.javaClass.simpleName,
+                    ),
+                    e,
+                )
+                Result.failure(
+                    PluginLoadException(
+                        "Plugin could not be linked: ${e.javaClass.simpleName}: ${e.message}",
                         cause = e,
                     ),
                 )
@@ -557,7 +612,10 @@ class DynamicPluginLoaderImpl(
      * store versions from before signing) warns and proceeds during the
      * rollout, becoming a hard failure once [PluginSignatureEnforcement] is
      * enabled — except in dev mode, where a missing sidecar is always allowed
-     * so locally built plugins keep loading.
+     * so locally built plugins keep loading, and except a [PluginBundledTrust]
+     * exemption, which is permanent rather than rollout-scoped: a bundled JAR
+     * has no store signature to eventually gain, so it stays exempt even once
+     * enforcement is on.
      */
     private fun verifySignatureOrThrow(
         jarPath: String,
@@ -565,6 +623,17 @@ class DynamicPluginLoaderImpl(
     ): PluginSignatureException? {
         val signature = PluginSignatureSidecar.read(jarPath)
         if (signature == null) {
+            if (PluginBundledTrust.isTrusted(jarPath)) {
+                logger.debug(
+                    LogCategory.SYSTEM,
+                    "Plugin has no store signature but is a trusted bundled artifact - exempt from enforcement",
+                    mapOf(
+                        "pluginId" to manifest.pluginId,
+                        "version" to manifest.version,
+                    ),
+                )
+                return null
+            }
             val devMode = System.getProperty("boss.dev.mode")?.toBoolean() == true
             if (PluginSignatureEnforcement.enforceUnsigned && !devMode) {
                 return PluginSignatureException(
@@ -630,6 +699,9 @@ class DynamicPluginLoaderImpl(
      *
      * Bundled plugins are system plugins that ship with BossConsole.
      * They are loaded in priority order (lower loadPriority values load first).
+     *
+     * This helper does not establish provenance from the directory argument. Production startup
+     * binds trusted copies through PluginStoreSetup; unsigned, unbound files still fail enforcement.
      *
      * @param bundledDir Directory containing bundled plugin JARs
      * @return List of successfully loaded plugins, sorted by load priority

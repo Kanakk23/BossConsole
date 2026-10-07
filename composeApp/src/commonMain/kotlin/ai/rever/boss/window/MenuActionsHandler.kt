@@ -24,6 +24,13 @@ import kotlinx.coroutines.flow.updateAndGet
 object MenuActionsHandler {
     private val logger = BossLogger.forComponent("MenuActionsHandler")
 
+    private val _goHomeEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
+    val goHomeEvents: SharedFlow<String> = _goHomeEvents.asSharedFlow()
+
+    fun triggerGoHome(windowId: String) {
+        _goHomeEvents.tryEmit(windowId)
+    }
+
     private val _newTabEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
     val newTabEvents: SharedFlow<String> = _newTabEvents.asSharedFlow()
 
@@ -75,6 +82,13 @@ object MenuActionsHandler {
     private val _browserDevToolsEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
     val browserDevToolsEvents: SharedFlow<String> = _browserDevToolsEvents.asSharedFlow()
 
+    private val _printBrowserEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
+    val printBrowserEvents: SharedFlow<String> = _printBrowserEvents.asSharedFlow()
+
+    fun triggerPrintBrowser(windowId: String) {
+        _printBrowserEvents.tryEmit(windowId)
+    }
+
     private val _zoomInEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
     val zoomInEvents: SharedFlow<String> = _zoomInEvents.asSharedFlow()
 
@@ -98,6 +112,12 @@ object MenuActionsHandler {
 
     private val _openSettingsEvents = MutableSharedFlow<Pair<String, String?>>(extraBufferCapacity = 10)
     val openSettingsEvents: SharedFlow<Pair<String, String?>> = _openSettingsEvents.asSharedFlow()
+
+    // The application-menu "Microkernel Mode" checkbox cannot host a dialog itself - a Menu{}
+    // block is not a real composition surface. An explicit off-to-on request instead carries here
+    // for the main window's own compose tree to show the confirmation (BossConsole#472).
+    private val _confirmMicrokernelModeEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
+    val confirmMicrokernelModeEvents: SharedFlow<String> = _confirmMicrokernelModeEvents.asSharedFlow()
 
     private val _toggleFocusModeEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
     val toggleFocusModeEvents: SharedFlow<String> = _toggleFocusModeEvents.asSharedFlow()
@@ -123,6 +143,12 @@ object MenuActionsHandler {
 
     private val _saveWorkspaceEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
     val saveWorkspaceEvents: SharedFlow<String> = _saveWorkspaceEvents.asSharedFlow()
+    private val _createSpaceEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
+    val createSpaceEvents: SharedFlow<String> = _createSpaceEvents.asSharedFlow()
+
+    fun triggerCreateSpace(windowId: String) {
+        _createSpaceEvents.tryEmit(windowId)
+    }
 
     private val _openCodebaseEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
     val openCodebaseEvents: SharedFlow<String> = _openCodebaseEvents.asSharedFlow()
@@ -451,6 +477,17 @@ object MenuActionsHandler {
     }
 
     /**
+     * Ask the window at [windowId] to show the Microkernel Mode confirmation dialog.
+     *
+     * Raised by the application-menu checkbox item on an explicit off-to-on request only - the
+     * menu item still writes the preference directly for an on-to-off request, which needs no
+     * confirmation (BossConsole#472).
+     */
+    fun triggerConfirmMicrokernelMode(windowId: String) {
+        _confirmMicrokernelModeEvents.tryEmit(windowId)
+    }
+
+    /**
      * Trigger a "Toggle Focus Mode" action for the specified window.
      *
      * @param windowId The ID of the window where the action was triggered
@@ -714,11 +751,17 @@ object MenuActionsHandler {
     private val _reloadAllPluginsEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
     val reloadAllPluginsEvents: SharedFlow<String> = _reloadAllPluginsEvents.asSharedFlow()
 
-    private val _reloadPluginEvents = MutableSharedFlow<Pair<String, ai.rever.boss.plugin.api.PanelId>>(extraBufferCapacity = 10)
-    val reloadPluginEvents: SharedFlow<Pair<String, ai.rever.boss.plugin.api.PanelId>> = _reloadPluginEvents.asSharedFlow()
+    private val _reloadPluginEvents =
+        MutableSharedFlow<Pair<String, ai.rever.boss.plugin.api.PanelId>>(extraBufferCapacity = 10)
+    val reloadPluginEvents: SharedFlow<Pair<String, ai.rever.boss.plugin.api.PanelId>> =
+        _reloadPluginEvents
+            .asSharedFlow()
 
-    private val _checkPluginUpdatesEvents = MutableSharedFlow<Pair<String, ai.rever.boss.plugin.api.PanelId>>(extraBufferCapacity = 10)
-    val checkPluginUpdatesEvents: SharedFlow<Pair<String, ai.rever.boss.plugin.api.PanelId>> = _checkPluginUpdatesEvents.asSharedFlow()
+    private val _checkPluginUpdatesEvents =
+        MutableSharedFlow<Pair<String, ai.rever.boss.plugin.api.PanelId>>(extraBufferCapacity = 10)
+    val checkPluginUpdatesEvents: SharedFlow<Pair<String, ai.rever.boss.plugin.api.PanelId>> =
+        _checkPluginUpdatesEvents
+            .asSharedFlow()
 
     private val _installStoreVersionEvents =
         MutableSharedFlow<Pair<String, ai.rever.boss.plugin.api.PanelId>>(extraBufferCapacity = 10)
@@ -737,6 +780,14 @@ object MenuActionsHandler {
      */
     fun triggerReloadAllPlugins(windowId: String) {
         _reloadAllPluginsEvents.tryEmit(windowId)
+    }
+
+    private val _showPluginHealthCenterEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
+    val showPluginHealthCenterEvents: SharedFlow<String> = _showPluginHealthCenterEvents.asSharedFlow()
+
+    /** Open the host-owned Plugin Health & Recovery Center for one window. */
+    fun triggerShowPluginHealthCenter(windowId: String) {
+        _showPluginHealthCenterEvents.tryEmit(windowId)
     }
 
     /**
@@ -798,6 +849,8 @@ object MenuActionsHandler {
 
     private val _showPluginWizardEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
     val showPluginWizardEvents: SharedFlow<String> = _showPluginWizardEvents.asSharedFlow()
+    private val _showTerminalOnboardingEvents = MutableSharedFlow<String>(extraBufferCapacity = 10)
+    val showTerminalOnboardingEvents: SharedFlow<String> = _showTerminalOnboardingEvents.asSharedFlow()
 
     /**
      * Trigger a "Show Plugin Wizard" action for the specified window.
@@ -806,5 +859,9 @@ object MenuActionsHandler {
      */
     fun triggerShowPluginWizard(windowId: String) {
         _showPluginWizardEvents.tryEmit(windowId)
+    }
+
+    fun triggerShowTerminalOnboarding(windowId: String) {
+        _showTerminalOnboardingEvents.tryEmit(windowId)
     }
 }

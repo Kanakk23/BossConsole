@@ -3,6 +3,7 @@ package ai.rever.boss.window
 import ai.rever.boss.BossAppWithAuth
 import ai.rever.boss.components.bars.ChromeBar
 import ai.rever.boss.components.bars.displayName
+import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.components.bars.isBarVisible
 import ai.rever.boss.components.bars.withBarVisible
 import ai.rever.boss.components.dialogs.CLIInstallationDialog
@@ -14,6 +15,8 @@ import ai.rever.boss.focusmode.FocusModeSettingsManager
 import ai.rever.boss.keymap.KeymapSettingsManager
 import ai.rever.boss.keymap.menu.MenuShortcutBridge
 import ai.rever.boss.keymap.model.KeymapActions
+import ai.rever.boss.mcp.McpToolRegistryImpl
+import ai.rever.boss.mcp.McpYoloPrompt
 import ai.rever.boss.plugin.api.PanelRegistry
 import ai.rever.boss.plugin.browser.ActiveBrowserRegistry
 import ai.rever.boss.plugin.browser.FluckEngine
@@ -25,10 +28,16 @@ import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.plugin.ui.BossThemeController
 import ai.rever.boss.plugin.ui.LocalHeavyweightOverlays
 import ai.rever.boss.services.editor.EditorAPIAccess
+import ai.rever.boss.services.importer.BookmarkExport
 import ai.rever.boss.services.terminal.TerminalAPIAccess
+import ai.rever.boss.settings.MicrokernelModePreference
+import ai.rever.boss.settings.microkernelModeMenuLabel
+import ai.rever.boss.settings.needsMicrokernelModeConfirmation
+import ai.rever.boss.theme.LocalWindowGlass
 import ai.rever.boss.updater.UpdateCoordinator
 import ai.rever.boss.utils.CLIInstaller
 import ai.rever.boss.utils.DisplayUtils
+import ai.rever.boss.utils.SystemUtils
 import ai.rever.boss.utils.WindowFocusManager
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -49,6 +58,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.toArgb
@@ -136,7 +146,14 @@ fun ApplicationScope.BossWindow(
         rememberWindowState(
             position = windowState.position ?: WindowPosition.Aligned(Alignment.Center),
             size = windowSize,
-            placement = if (windowState.windowType == WindowType.MAIN) WindowPlacement.Maximized else WindowPlacement.Floating,
+            placement =
+                if (windowState.windowType ==
+                    WindowType.MAIN
+                ) {
+                    WindowPlacement.Maximized
+                } else {
+                    WindowPlacement.Floating
+                },
         )
 
     // Track full screen state for reactive menu text
@@ -151,8 +168,12 @@ fun ApplicationScope.BossWindow(
         title = windowState.title,
         state = composeWindowState,
         icon = BossWindowIcon.painter,
+        // Alpha backing is fixed at window creation; AppKit restores the native frame.
+        undecorated = SystemUtils.isMacOS,
+        transparent = SystemUtils.isMacOS,
     ) {
         ApplyBossWindowIcon(window)
+        val windowGlass = rememberNativeWindowGlass(window, isFullScreen)
 
         // Apply programmatic resize requests (BossTerm "Fit host to my screen").
         // Lives inside Window {} so it can read this window's `window` (AWT
@@ -242,10 +263,14 @@ fun ApplicationScope.BossWindow(
         // toArgb(), not value.toInt(): Compose Color.value packs ARGB in the
         // UPPER 32 bits of a ULong, so value.toInt() reads the empty low bits.
         window.background =
-            Color(
-                BossThemeController.current.colors.raised
-                    .toArgb(),
-            )
+            if (SystemUtils.isMacOS) {
+                Color(0, 0, 0, 0)
+            } else {
+                Color(
+                    BossThemeController.current.colors.raised
+                        .toArgb(),
+                )
+            }
 
         // Enable native macOS fullscreen support and extend content into title bar
         // This allows the green traffic light button to enter proper native fullscreen,
@@ -271,12 +296,49 @@ fun ApplicationScope.BossWindow(
             WindowFocusManager.updateWindowFullscreen(windowState.id, isFullScreen)
         }
 
+        // OS decorations outside macOS need explicit scoped commands, not global mouse injection.
+        val currentCloseRequest by rememberUpdatedState(onCloseRequest)
+        DisposableEffect(windowState.id, window) {
+            val controls =
+                if (!SystemUtils.isMacOS) {
+                    OwnedWindowControls.register(
+                        windowState.id,
+                        window,
+                        mapOf(
+                            "close" to { currentCloseRequest() },
+                            "minimize" to { composeWindowState.isMinimized = true },
+                            "maximize" to {
+                                if (window.isResizable) composeWindowState.placement = WindowPlacement.Maximized
+                            },
+                            "unmaximize" to {
+                                if (composeWindowState.placement == WindowPlacement.Maximized) {
+                                    composeWindowState.placement = WindowPlacement.Floating
+                                }
+                            },
+                            "restore" to { composeWindowState.isMinimized = false },
+                            "exit-fullscreen" to {
+                                if (composeWindowState.placement == WindowPlacement.Fullscreen) {
+                                    composeWindowState.placement = WindowPlacement.Floating
+                                }
+                            },
+                        ),
+                    )
+                } else {
+                    null
+                }
+            onDispose { controls?.close() }
+        }
+
         // Register window for focus management (deep links, etc.) and keyboard interception
         DisposableEffect(windowState.id, window) {
             WindowFocusManager.registerWindow(windowState.id, window)
+            ai.rever.boss.sharing.AppSharingService
+                .registerWindow(windowState.id, window, window.title)
             AWTKeyboardInterceptor.registerWindow(window, windowState.id)
             onDispose {
                 WindowFocusManager.unregisterWindow(windowState.id)
+                ai.rever.boss.sharing.AppSharingService
+                    .unregisterWindow(windowState.id)
                 AWTKeyboardInterceptor.unregisterWindow(window)
                 MenuActionsHandler.cleanupWindow(windowState.id)
             }
@@ -293,6 +355,7 @@ fun ApplicationScope.BossWindow(
         // State for CLI installation dialog
         var showCLIInstallDialog by remember { mutableStateOf(false) }
         var isCliInstalled by remember { mutableStateOf<Boolean>(CLIInstaller.isInstalled()) }
+        val mcpYolo by McpToolRegistryImpl.yoloMode.collectAsState()
 
         // State for Reset Browser dialog
         var showResetBrowserDialog by remember { mutableStateOf(false) }
@@ -301,9 +364,6 @@ fun ApplicationScope.BossWindow(
         // State for Reset Terminal dialog
         var showResetTerminalDialog by remember { mutableStateOf(false) }
         var resetTerminalResult by remember { mutableStateOf<Boolean?>(null) }
-
-        // State for Welcome Wizard dialog
-        var showWelcomeWizard by remember { mutableStateOf(false) }
 
         // State for the password/bookmark import dialog
         var showImportDialog by remember { mutableStateOf(false) }
@@ -338,7 +398,12 @@ fun ApplicationScope.BossWindow(
         // currentWorkspace, which never sees a switch made anywhere else - so the menu's
         // "disable the active workspace" row greyed out whatever this instance had last
         // loaded (nothing, usually) rather than what the window is actually showing.
-        val workspaces by workspaceManager.workspaces.collectAsState()
+        val workspaces by workspaceManager.visibleWorkspaces.collectAsState()
+        val spaceMenuSettings by ai.rever.boss.components.workspaces.WorkspaceSettingsManager.currentSettings
+            .collectAsState()
+        val spaceGroups =
+            ai.rever.boss.components.workspaces
+                .spaceMenuGroups(workspaces, spaceMenuSettings.recentSpaceIds)
         val currentWorkspace by workspaceManager.currentWorkspace.collectAsState()
 
         // Get split enabled state (whether there are tabs to split)
@@ -376,6 +441,8 @@ fun ApplicationScope.BossWindow(
 
         // Coroutine scope for menu actions (like checking for updates)
         val menuScope = rememberCoroutineScope()
+        val microkernelSaveState by MicrokernelModePreference.saveState.collectAsState()
+        LaunchedEffect(Unit) { MicrokernelModePreference.refresh() }
 
         // Listen for panel registry changes to update the menu
         DisposableEffect(panelRegistry) {
@@ -395,6 +462,7 @@ fun ApplicationScope.BossWindow(
         MenuBar {
             // File Menu
             Menu("File") {
+                Item("Go Home", onClick = { MenuActionsHandler.triggerGoHome(windowState.id) })
                 Item(
                     "New Tab",
                     shortcut = shortcutBridge.getKeyShortcut(KeymapActions.TAB_NEW),
@@ -459,8 +527,10 @@ fun ApplicationScope.BossWindow(
                 Separator()
 
                 // Workspace submenu
-                Menu("Select Workspace") {
-                    workspaces.forEach { workspace ->
+                Menu("Select Space") {
+                    Item("Create New Space…", onClick = { MenuActionsHandler.triggerCreateSpace(windowState.id) })
+                    Separator()
+                    spaceGroups.recent.forEach { workspace ->
                         Item(
                             text = workspace.name,
                             onClick = {
@@ -470,9 +540,30 @@ fun ApplicationScope.BossWindow(
                         )
                     }
 
+                    if (spaceGroups.more.isNotEmpty()) {
+                        Menu("More") {
+                            spaceGroups.more.forEach { workspace ->
+                                Item(
+                                    workspace.name,
+                                    enabled = currentWorkspace?.id != workspace.id,
+                                    onClick = { MenuActionsHandler.triggerApplyWorkspace(windowState.id, workspace) },
+                                )
+                            }
+                        }
+                    }
+                    Separator()
+                    Menu("Template Spaces") {
+                        spaceGroups.templates.forEach { workspace ->
+                            Item(
+                                workspace.name,
+                                onClick = { MenuActionsHandler.triggerApplyWorkspace(windowState.id, workspace) },
+                            )
+                        }
+                    }
+
                     if (workspaces.isEmpty()) {
                         Item(
-                            text = "(No workspaces available)",
+                            text = "(No spaces available)",
                             onClick = { },
                             enabled = false,
                         )
@@ -480,7 +571,8 @@ fun ApplicationScope.BossWindow(
 
                     Separator()
 
-                    // Access TopOfMindDialog for workspace switching and quick navigation
+                    // Raises Top of Mind's quick switcher, which is where switching between
+                    // every window's tabs lives now.
                     Item(
                         "Top of the Mind",
                         shortcut = shortcutBridge.getKeyShortcut(KeymapActions.QUICK_SWITCHER_OPEN),
@@ -493,7 +585,7 @@ fun ApplicationScope.BossWindow(
                 Separator()
 
                 Item(
-                    "Save Workspace",
+                    "Save Space",
                     shortcut = shortcutBridge.getKeyShortcut(KeymapActions.WORKSPACE_SAVE),
                     onClick = {
                         MenuActionsHandler.triggerSaveWorkspace(windowState.id)
@@ -510,43 +602,41 @@ fun ApplicationScope.BossWindow(
 
                 Separator()
 
-                // Process Mode toggle
-                val isKernelMode =
-                    remember {
-                        val mode =
-                            System.getenv("BOSS_MODE")
-                                ?: ai.rever.boss.config.ConfigLoader
-                                    .getConfig("BOSS_MODE")
-                        mode == "KERNEL"
-                    }
+                // enabled falls back to startupEnabled (what env_vars said at launch) while the
+                // first refresh() is still in flight, rather than a live ConfigLoader read - see
+                // MicrokernelModePreference's KDoc on why that comparand doesn't work here.
+                val displayedKernelMode = microkernelSaveState.enabled ?: (microkernelSaveState.startupEnabled ?: false)
                 CheckboxItem(
-                    "Microkernel Mode",
-                    checked = isKernelMode,
-                    onCheckedChange = {
-                        // Toggle in env_vars file; requires restart
-                        menuScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            val envFile =
-                                ai.rever.boss.plugin.pathutils.BossDirectories
-                                    .resolve("env_vars")
-                            envFile.parentFile?.mkdirs()
-                            if (!envFile.exists()) {
-                                envFile.writeText(if (it) "BOSS_MODE=KERNEL\n" else "# BOSS_MODE=KERNEL\n", Charsets.UTF_8)
-                            } else {
-                                val lines = envFile.readLines(Charsets.UTF_8).toMutableList()
-                                val idx = lines.indexOfFirst { l -> l.trimStart('#', ' ').startsWith("BOSS_MODE") }
-                                val newLine = if (it) "BOSS_MODE=KERNEL" else "# BOSS_MODE=KERNEL"
-                                if (idx >= 0) {
-                                    lines[idx] = newLine
-                                } else {
-                                    lines.add("")
-                                    lines.add(newLine)
-                                }
-                                envFile.writeText(lines.joinToString("\n") + "\n", Charsets.UTF_8)
+                    microkernelModeMenuLabel(microkernelSaveState),
+                    checked = displayedKernelMode,
+                    enabled = microkernelSaveState.enabled != null,
+                    onCheckedChange = { requestedEnabled ->
+                        if (needsMicrokernelModeConfirmation(
+                                currentlyEnabled = displayedKernelMode,
+                                nextEnabled = requestedEnabled,
+                            )
+                        ) {
+                            // A Menu{} block cannot host a dialog itself - hand off to the main
+                            // window's compose tree, which writes the preference on confirm via
+                            // the same MicrokernelModePreference the Settings entry point uses.
+                            MenuActionsHandler.triggerConfirmMicrokernelMode(windowState.id)
+                        } else {
+                            // Disabling stays a plain, un-confirmed toggle (BossConsole#472).
+                            menuScope.launch {
+                                MicrokernelModePreference.save(requestedEnabled)
                             }
                         }
                     },
                 )
 
+                Separator()
+
+                Item(
+                    "Print...",
+                    shortcut = shortcutBridge.getKeyShortcut(KeymapActions.BROWSER_PRINT),
+                    enabled = hasBrowser,
+                    onClick = { MenuActionsHandler.triggerPrintBrowser(windowState.id) },
+                )
                 Separator()
 
                 Item(
@@ -731,6 +821,11 @@ fun ApplicationScope.BossWindow(
                     onClick = {
                         MenuActionsHandler.triggerActualSize(windowState.id)
                     },
+                    // Their bindings are BROWSER-context: AWTKeyboardInterceptor declines them
+                    // outside a browser tab, so the menu must not out-broaden the interceptor.
+                    // Un-gated, a now-live Ctrl accelerator (Windows/Linux) would fire these
+                    // from a terminal or editor tab. Back/Forward/DevTools already gate this way.
+                    enabled = hasBrowser,
                 )
                 Item(
                     "Zoom In",
@@ -738,6 +833,7 @@ fun ApplicationScope.BossWindow(
                     onClick = {
                         MenuActionsHandler.triggerZoomIn(windowState.id)
                     },
+                    enabled = hasBrowser,
                 )
                 Item(
                     "Zoom Out",
@@ -745,6 +841,7 @@ fun ApplicationScope.BossWindow(
                     onClick = {
                         MenuActionsHandler.triggerZoomOut(windowState.id)
                     },
+                    enabled = hasBrowser,
                 )
                 Item(
                     "Reload",
@@ -752,6 +849,7 @@ fun ApplicationScope.BossWindow(
                     onClick = {
                         MenuActionsHandler.triggerReloadBrowser(windowState.id)
                     },
+                    enabled = hasBrowser,
                 )
                 Item(
                     "Back",
@@ -898,10 +996,47 @@ fun ApplicationScope.BossWindow(
                         showCLIInstallDialog = true
                     },
                 )
+
+                // YOLO mode's second door, and the one that survives a hidden bottom bar (Focus
+                // mode hides it by default): the checkmark is its indicator, unchecking is its off
+                // switch. Checking only ASKS - the shared confirmation in BossAppDialogs - so the
+                // mark reflects the engine, never the click. Hidden when the deployment refuses
+                // the mode, unless it is somehow on, so it can always be turned off.
+                if (McpToolRegistryImpl.yoloAvailable || mcpYolo) {
+                    Separator()
+                    CheckboxItem(
+                        "MCP YOLO Mode",
+                        checked = mcpYolo,
+                        onCheckedChange = { on ->
+                            if (on) {
+                                McpYoloPrompt.request(windowState.id)
+                            } else {
+                                menuScope.launch { McpToolRegistryImpl.setYoloMode(false) }
+                            }
+                        },
+                    )
+                }
             }
 
             // Window Menu
             Menu("Window") {
+                Item("Share BossConsole Window", onClick = {
+                    ai.rever.boss.sharing.AppSharingService
+                        .start(windowState.id)
+                })
+                // Native menu and local-only title-bar actions share this capture-consent boundary.
+                Item("Share Selected BossConsole Windows", onClick = {
+                    ai.rever.boss.sharing.AppSharingService
+                        .startSelectedWindows()
+                })
+                Item("Stop BossConsole Sharing", onClick = {
+                    ai.rever.boss.sharing.AppSharingService
+                        .stop()
+                })
+                Item("Sharing Settings", onClick = {
+                    MenuActionsHandler.triggerOpenSettings(windowState.id, "SHARING")
+                })
+                Separator()
                 Item(
                     "Close Window",
                     shortcut = shortcutBridge.getKeyShortcut(KeymapActions.WINDOW_CLOSE),
@@ -974,7 +1109,15 @@ fun ApplicationScope.BossWindow(
                 Item(
                     "Welcome Wizard...",
                     onClick = {
-                        showWelcomeWizard = true
+                        requestTerminalWelcomeWizard(
+                            providerAvailable = TerminalAPIAccess.getProvider() != null,
+                            onOpen = { MenuActionsHandler.triggerShowTerminalOnboarding(windowState.id) },
+                            onUnavailable = {
+                                StatusMessageManager.showMessage(
+                                    "BOSS Term setup is unavailable. Update or reload Terminal Tab, then try again.",
+                                )
+                            },
+                        )
                     },
                 )
 
@@ -1006,6 +1149,13 @@ fun ApplicationScope.BossWindow(
                     "Import Passwords & Bookmarks...",
                     onClick = {
                         showImportDialog = true
+                    },
+                )
+
+                Item(
+                    "Export Bookmarks...",
+                    onClick = {
+                        menuScope.launch { BookmarkExport.runFromMenu() }
                     },
                 )
 
@@ -1048,6 +1198,13 @@ fun ApplicationScope.BossWindow(
                     },
                 )
 
+                Item(
+                    "Plugin Health & Recovery...",
+                    onClick = {
+                        MenuActionsHandler.triggerShowPluginHealthCenter(windowState.id)
+                    },
+                )
+
                 // Debug: Test crash reporter (Issue #543)
                 // This crashes during Compose composition to properly test the separate window crash dialog
                 Separator()
@@ -1068,7 +1225,9 @@ fun ApplicationScope.BossWindow(
         // here rather than defaulted on, because secondary windows (Settings) are composed from
         // inside this subtree and must opt back out - see SettingsWindow.
         CompositionLocalProvider(
+            LocalWindowGlass provides windowGlass,
             LocalAwtWindow provides window,
+            LocalWindowFullscreen provides isFullScreen,
             LocalHeavyweightOverlays provides true,
         ) {
             // Create independent component context for this window
@@ -1379,18 +1538,11 @@ fun ApplicationScope.BossWindow(
                 )
             }
 
-            // Welcome Wizard Dialog
-            if (showWelcomeWizard) {
-                TerminalAPIAccess.TerminalOnboardingWizard(
-                    onDismiss = { showWelcomeWizard = false },
-                    onComplete = { showWelcomeWizard = false },
-                )
-            }
-
             // Screen Capture Picker Dialog
             val captureRequest by ScreenCaptureNotifier.captureRequest.collectAsState()
             captureRequest?.let { request ->
                 ScreenCapturePickerDialog(
+                    requestId = request.requestId,
                     screens = request.screens,
                     windows = request.windows,
                     browsers = request.browsers,
@@ -1415,15 +1567,28 @@ fun ApplicationScope.BossWindow(
                         )
                     },
                     confirmButton = {
-                        TextButton(onClick = { ScreenCaptureNotifier.resolvePermissionRationale(true) }) { Text("Continue") }
+                        TextButton(
+                            onClick = { ScreenCaptureNotifier.resolvePermissionRationale(true) },
+                        ) { Text("Continue") }
                     },
                     dismissButton = {
-                        TextButton(onClick = { ScreenCaptureNotifier.resolvePermissionRationale(false) }) { Text("Not now") }
+                        TextButton(
+                            onClick = { ScreenCaptureNotifier.resolvePermissionRationale(false) },
+                        ) { Text("Not now") }
                     },
                 )
             }
         }
     }
+}
+
+internal fun requestTerminalWelcomeWizard(
+    providerAvailable: Boolean,
+    onOpen: () -> Unit,
+    onUnavailable: () -> Unit,
+): Boolean {
+    if (providerAvailable) onOpen() else onUnavailable()
+    return providerAvailable
 }
 
 /**

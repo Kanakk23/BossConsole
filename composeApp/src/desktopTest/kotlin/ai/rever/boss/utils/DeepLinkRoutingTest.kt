@@ -1,8 +1,13 @@
 package ai.rever.boss.utils
 
+import ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
+import ai.rever.boss.plugin.api.DeepLinkActionHandler
+import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * Guards deep-link dispatch: hosts match exactly (so a longer host is never
@@ -111,6 +116,69 @@ class DeepLinkRoutingTest {
 
         DeepLinkHandler.clearDeepLink()
         assertNull(DeepLinkHandler.deepLinkFlow.value)
+    }
+
+    @Test
+    fun `a plugin action link reports whether the registered handler actually ran it`() {
+        // boss://plugin?id=X&action=Y used to fire-and-forget into a coroutine
+        // whose result nobody read, so a caller forwarding the link over the
+        // single-instance channel got RESPONSE_OK regardless of whether a
+        // handler for X even existed. processDeepLink now hands back a Deferred
+        // for exactly this route, so SingleInstanceManager can await the real
+        // outcome instead.
+        //
+        // The verdict belongs to a dispatched action, so these links are the
+        // operator's own invocation. An externally delivered action is held for
+        // confirmation and has no verdict at all — see PluginActionOriginTest.
+        val handlerId = "test-deep-link-handler-${System.nanoTime()}"
+        DeepLinkActionRegistryImpl.register(
+            object : DeepLinkActionHandler {
+                override val handlerId = handlerId
+
+                override fun handle(
+                    action: String,
+                    params: Map<String, String>,
+                ): Boolean {
+                    check(action != "throw") { "test failure" }
+                    return action == "ping"
+                }
+            },
+        )
+        try {
+            val handled = awaitPluginActionVerdict("boss://plugin?id=$handlerId&action=ping")
+            assertTrue(handled, "a registered handler that returns true must be reported as handled")
+
+            val declined = awaitPluginActionVerdict("boss://plugin?id=$handlerId&action=unknown")
+            assertFalse(declined, "a registered handler that declines the action must be reported as not handled")
+            assertFalse(awaitPluginActionVerdict("boss://plugin?id=$handlerId&action=throw"))
+        } finally {
+            DeepLinkActionRegistryImpl.unregister(handlerId)
+        }
+
+        val noHandler = awaitPluginActionVerdict("boss://plugin?id=no-such-handler&action=ping")
+        assertFalse(noHandler, "an unregistered handler id must be reported as not handled, never a blind success")
+    }
+
+    private fun awaitPluginActionVerdict(uri: String): Boolean =
+        runBlocking {
+            requireNotNull(DeepLinkHandler.processDeepLink(uri, DeepLinkOrigin.OPERATOR_CLI)).await()
+        }
+
+    @Test
+    fun `every route but a plugin action link stays fire-and-forget`() {
+        // The Deferred verdict is new surface area added for exactly one route;
+        // every other route must keep returning null so a caller with no use
+        // for the verdict (the OS-delivered flow, the CLI) sees no behaviour
+        // change at all.
+        assertNull(DeepLinkHandler.processDeepLink("boss://url?url=https%3A%2F%2Fexample.com", DeepLinkOrigin.EXTERNAL))
+        assertNull(DeepLinkHandler.processDeepLink("boss://terminal", DeepLinkOrigin.EXTERNAL))
+        assertNull(DeepLinkHandler.processDeepLink("boss://split?orientation=horizontal", DeepLinkOrigin.EXTERNAL))
+        // A plugin link with no action (opens a panel) is also still fire-and-forget.
+        assertNull(DeepLinkHandler.processDeepLink("boss://plugin?id=bookmarks", DeepLinkOrigin.EXTERNAL))
+        // An externally delivered action link is not dispatched either — it is
+        // held for the operator, or refused when there is no window to ask in,
+        // which is this JVM's case. Either way it never reaches a handler; see
+        // PluginActionOriginTest.
     }
 
     @Test

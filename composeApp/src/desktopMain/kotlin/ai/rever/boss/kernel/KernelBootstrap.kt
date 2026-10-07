@@ -1,10 +1,13 @@
 package ai.rever.boss.kernel
 
 import ai.rever.boss.config.SelfHealingSettingsManager
-import ai.rever.boss.ipc.BossIpcClient
 import ai.rever.boss.ipc.BossIpcServer
 import ai.rever.boss.ipc.IpcAddressResolver
+import ai.rever.boss.ipc.auth.IpcTlsIdentity
 import ai.rever.boss.ipc.auth.ProcessTokenRegistry
+import ai.rever.boss.ipc.proto.CapabilityServiceGrpcKt
+import ai.rever.boss.ipc.proto.InvokeCapabilityRequest
+import ai.rever.boss.ipc.proto.InvokeCapabilityResponse
 import ai.rever.boss.ipc.proto.OrchestratorServiceGrpcKt
 import ai.rever.boss.ipc.proto.ProcessFailureReport
 import ai.rever.boss.ipc.proto.ProcessState
@@ -136,8 +139,11 @@ internal fun reapChildren(
         if (children.isEmpty()) return
 
         reapLogger.info("Reaping {} child process(es)", children.size)
+        val descendants = children.flatMap { processDescendants(it.process) }
         val deadline = System.currentTimeMillis() + gracePeriodMs
-        children.forEach { runCatching { it.process.destroy() } }
+        children.forEach { child ->
+            runCatching { child.process.destroy() }
+        }
 
         children.forEachIndexed { index, child ->
             val remainingChildren = children.size - index
@@ -154,9 +160,10 @@ internal fun reapChildren(
             }
         }
 
-        children.filter { it.isAlive }.forEach {
-            reapLogger.warn("Force-killing process: {}", it.config.processId)
-            runCatching { it.process.destroyForcibly() }
+        killProcessDescendants(descendants)
+        children.filter { it.isAlive }.forEach { child ->
+            reapLogger.warn("Force-killing process: {}", child.config.processId)
+            runCatching { child.process.destroyForcibly() }
         }
 
         // SIGKILL completion is asynchronous. Give the whole cohort one short shared budget
@@ -203,6 +210,12 @@ internal fun discardReapedSpawn(
 
 private val recoveryLogger = LoggerFactory.getLogger("KernelRecovery")
 
+// Global monitoring revisits dead services every two seconds. Report each failed generation once.
+private val restartLimitNotices = ConcurrentHashMap<String, ManagedProcess>()
+
+internal fun firstRestartLimitNotice(process: ManagedProcess): Boolean =
+    restartLimitNotices.put(process.config.processId, process) !== process
+
 /**
  * The process to bring back, or null when recovery should stand down.
  *
@@ -232,6 +245,12 @@ internal fun respawnCandidate(
                 processId,
                 process.config.maxRestarts,
             )
+            if (firstRestartLimitNotice(process)) {
+                notifyOperator(
+                    processId,
+                    "Exceeded max restart limit (${process.config.maxRestarts}). Restart BOSS to retry.",
+                )
+            }
             null
         }
 
@@ -246,16 +265,15 @@ private val notifyLogger = LoggerFactory.getLogger("KernelRepairNotice")
 /**
  * Surface a repair the operator has to decide on, using the same toast plugin crashes use.
  *
- * Logged as well as shown: a service can die before the window exists, and `showMessage` posts to a
- * flow that nobody is collecting yet — the notice would otherwise be lost with no trace.
+ * Logged and queued: services can exhaust recovery before login creates a window collector.
  */
 private fun notifyOperator(
     processId: String,
     summary: String,
 ) {
     notifyLogger.warn("Repair for {} needs operator attention: {}", processId, summary)
-    ai.rever.boss.components.bars.horizontal.StatusMessageManager
-        .showMessage("$processId needs attention: $summary", durationMs = 10_000)
+    ai.rever.boss.startup.kernelStartupNotices
+        .report("$processId needs attention: $summary", source = processId)
 }
 
 /** What the kernel does about a crashed child once the orchestrator has had its say. */
@@ -387,9 +405,6 @@ class KernelBootstrap(
      */
     private val serviceAddresses = ConcurrentHashMap<String, String>()
 
-    /** Cached orchestrator channel, keyed by the address it was opened against. */
-    private var orchestratorClient: Pair<String, BossIpcClient>? = null
-
     /**
      * Initialize the kernel infrastructure. No-op in MONOLITH mode.
      */
@@ -405,8 +420,15 @@ class KernelBootstrap(
         kernelAddress = IpcAddressResolver.kernelAddress()
         val registry = ProcessRegistry()
         val tokenRegistry = ProcessTokenRegistry()
+        val kernelIdentity = IpcTlsIdentity.create()
         // The spawner registers everything it spawns, so no call site can forget to.
-        val spawner = ProcessSpawner(kernelAddress!!, registry = registry, tokenRegistry = tokenRegistry)
+        val spawner =
+            ProcessSpawner(
+                kernelAddress!!,
+                registry = registry,
+                tokenRegistry = tokenRegistry,
+                kernelIdentity = kernelIdentity,
+            )
         processRegistry = registry
         processSpawner = spawner
         processTokenRegistry = tokenRegistry
@@ -437,17 +459,17 @@ class KernelBootstrap(
                     val process = registry.getProcess(id)
                     if (process != null) {
                         if (force) process.destroyForcibly() else process.destroy()
-                        // Don't unregister — for a SERVICE/APP/ORCHESTRATOR the process monitor
-                        // will detect the exit and trigger auto-respawn if
-                        // restartPolicy == ON_FAILURE.
-                        //
-                        // PLUGIN is the exception: it is not health-supervised, so nothing
-                        // respawns it despite its config also saying ON_FAILURE, and the global
-                        // monitor prunes the dead entry instead.
+                        // Don't unregister here. SERVICE/APP/ORCHESTRATOR exits are handled by the
+                        // global monitor, which may auto-respawn when restartPolicy == ON_FAILURE.
+                        // PLUGIN exits are supervised per window by PluginProcessMonitor, while the
+                        // global monitor only prunes their dead registry entries.
                         true
                     } else {
                         false
                     }
+                },
+                onCapabilityInvocation = { request ->
+                    invokeRegisteredCapability(registry, request)
                 },
             )
         eventBusService = EventBusServiceImpl()
@@ -468,7 +490,7 @@ class KernelBootstrap(
         // and never touches the socket. Adding a service to a running server is safe; the ordering above
         // is about existence, not about protecting streams.
         ipcServer =
-            BossIpcServer(kernelAddress!!, tokenRegistry)
+            BossIpcServer(kernelAddress!!, tokenRegistry, kernelIdentity)
                 .addService(kernelService!!)
                 .addService(eventBusService!!)
                 .addService(stateService!!)
@@ -504,6 +526,38 @@ class KernelBootstrap(
     }
 
     /**
+     * Broker a capability invocation for a child process, through the registry this
+     * kernel actually populates (#1061): the spawner registers every child and
+     * RegisterProcess completes each manifest, so this is the only place a plugin id
+     * can resolve to a live process. The per-child local registries the mastery
+     * orchestrator once built were never populated, so every mastery execution
+     * failed "Process not found".
+     */
+    private suspend fun invokeRegisteredCapability(
+        registry: ProcessRegistry,
+        request: InvokeCapabilityRequest,
+    ): InvokeCapabilityResponse {
+        val process = registry.getProcess(request.pluginId)
+        val ipcClient = process?.ipcClient
+        if (ipcClient != null) {
+            return CapabilityServiceGrpcKt
+                .CapabilityServiceCoroutineStub(ipcClient.channel)
+                .invokeCapability(request)
+        }
+        val reason =
+            if (process == null) {
+                "Process not found: ${request.pluginId}"
+            } else {
+                "No IPC client for process: ${request.pluginId}"
+            }
+        return InvokeCapabilityResponse
+            .newBuilder()
+            .setSuccess(false)
+            .setErrorMessage(reason)
+            .build()
+    }
+
+    /**
      * Decide what to do about a crashed child, and do it.
      *
      * The orchestrator gets first say — it runs the analyzer, the escalation ladder and the
@@ -521,6 +575,14 @@ class KernelBootstrap(
         spawner: ProcessSpawner,
         failure: ProcessFailure,
     ) {
+        // The dead child's registration in the kernel service must go now: it is otherwise
+        // removed only on a successful requestShutdown, so a dead id would keep reporting
+        // RUNNING and every later child would keep receiving its stale ipcAddress (#1180).
+        // Evicted before any respawn so the replacement's fresh registration is never dropped, and
+        // only if registered before this death was observed: a duplicate report of the same death
+        // must not evict a replacement that registered in between (#1612).
+        kernelService?.deregisterProcess(failure.processId, registeredBefore = failure.timestamp)
+
         val process = registry.getProcess(failure.processId)
         if (process == null || process.config.restartPolicy != RestartPolicy.ON_FAILURE) {
             logger.error(
@@ -565,14 +627,13 @@ class KernelBootstrap(
     /**
      * Ask the orchestrator how to repair [failure], or null when it cannot be asked in time.
      */
-    private suspend fun requestRepairAdvice(
+    internal suspend fun requestRepairAdvice(
         registry: ProcessRegistry,
         failure: ProcessFailure,
     ): RepairAction? {
         // Never ask the orchestrator to diagnose its own death, and never wait on one that has
         // not registered an address yet.
-        val stub = if (failure.processId == ORCHESTRATOR_PROCESS_ID) null else orchestratorStub()
-        if (stub == null) return null
+        if (failure.processId == ORCHESTRATOR_PROCESS_ID) return null
 
         val report =
             ProcessFailureReport
@@ -587,38 +648,16 @@ class KernelBootstrap(
                 .apply { registry.getManifest(failure.processId)?.let { setManifest(it) } }
                 .build()
 
-        return try {
+        return repairAdviceOrNull(failure.processId) {
+            // Obtaining the channel is fallible too: dead handles remain in the registry.
+            val stub = adviserStub(registry) ?: return@repairAdviceOrNull null
             withTimeoutOrNull(REPAIR_ADVICE_TIMEOUT_MS) { stub.reportFailure(report) }
-                ?: run {
-                    logger.warn(
-                        "Orchestrator did not answer within {}ms for {} - recovering without advice",
-                        REPAIR_ADVICE_TIMEOUT_MS,
-                        failure.processId,
-                    )
-                    null
-                }
-        } catch (e: Exception) {
-            logger.warn(
-                "Could not reach the orchestrator for {} ({}) - recovering without advice",
-                failure.processId,
-                e.message,
-            )
-            null
         }
     }
 
     /** A stub for the running orchestrator, or null while it has no registered address. */
-    private fun orchestratorStub(): OrchestratorServiceGrpcKt.OrchestratorServiceCoroutineStub? {
-        val address = serviceAddresses[ORCHESTRATOR_PROCESS_ID] ?: return null
-        val cached = orchestratorClient
-        // Re-dial when the orchestrator comes back at a new address; the old channel is dead.
-        val client =
-            if (cached != null && cached.first == address) {
-                cached.second
-            } else {
-                cached?.second?.runCatching { shutdown() }
-                BossIpcClient(address).also { orchestratorClient = address to it }
-            }
+    private fun adviserStub(registry: ProcessRegistry): OrchestratorServiceGrpcKt.OrchestratorServiceCoroutineStub? {
+        val client = registry.getProcess(ORCHESTRATOR_PROCESS_ID)?.ipcClient ?: return null
         return OrchestratorServiceGrpcKt.OrchestratorServiceCoroutineStub(client.channel)
     }
 
@@ -634,13 +673,19 @@ class KernelBootstrap(
         val restartCount = registry.getRestartCount(processId)
 
         val config =
-            if (jvmArgsOverride != null) process.config.copy(jvmArgs = jvmArgsOverride) else process.config
+            if (jvmArgsOverride != null) {
+                // Tuning is additive: the process keeps its own JVM args with the tuned flags
+                // merged in, rather than being respawned on a replacement command line.
+                process.config.copy(jvmArgs = mergeTunedJvmArgs(process.config.jvmArgs, jvmArgsOverride))
+            } else {
+                process.config
+            }
         logger.info(
             "Respawning process {} (attempt {}/{}{})",
             processId,
             restartCount + 1,
             process.config.maxRestarts,
-            if (jvmArgsOverride != null) ", tuned: $jvmArgsOverride" else "",
+            if (jvmArgsOverride != null) ", JVM tuning applied: ${config.jvmArgs != process.config.jvmArgs}" else "",
         )
         try {
             // spawn() registers the replacement itself. The manifest survives because a respawn
@@ -679,7 +724,6 @@ class KernelBootstrap(
         // writes snapshots there — say it explicitly rather than letting the child re-derive a
         // default that may not match this process's.
         val serviceEnvironment = mapOf("BOSS_DATA_DIR" to bossDataDir)
-
         // The model choice — and the key the operator entered for it — goes to the orchestrator
         // alone; the other eight have no use for a credential. (A key exported into BOSS's own
         // environment is still inherited by every child via ProcessSpawner — see
@@ -690,8 +734,35 @@ class KernelBootstrap(
             if (repairEnvironment.isEmpty()) "off" else "on (${repairEnvironment["AI_REPAIR_MODEL"]})",
         )
 
-        spawnIfJarExists(
-            spawner,
+        val missingJars = mutableListOf<String>()
+        val failedSpawns = mutableListOf<String>()
+        var spawnedCount = 0
+
+        fun trySpawn(
+            config: ProcessConfig,
+            jarPath: String,
+        ) {
+            if (java.io.File(jarPath).exists()) {
+                try {
+                    spawner.spawn(config)
+                    processMonitor?.startMonitoring(config.processId)
+                    logger.info("Spawned service: {} at {}", config.processId, jarPath)
+                    spawnedCount++
+                } catch (e: Exception) {
+                    logger.warn("Failed to spawn {}: {}", config.processId, e.message)
+                    failedSpawns.add(config.processId)
+                }
+            } else {
+                logger.info(
+                    "Service JAR not found for {} at {} - skipping spawn (build fat JARs first)",
+                    config.processId,
+                    jarPath,
+                )
+                missingJars.add(config.processId)
+            }
+        }
+
+        trySpawn(
             ProcessConfig(
                 processId = ORCHESTRATOR_PROCESS_ID,
                 processType = ProcessType.ORCHESTRATOR,
@@ -705,8 +776,7 @@ class KernelBootstrap(
             orchestratorJar,
         )
 
-        spawnIfJarExists(
-            spawner,
+        trySpawn(
             ProcessConfig(
                 processId = "boss-service-auth",
                 processType = ProcessType.SERVICE,
@@ -721,8 +791,7 @@ class KernelBootstrap(
         )
 
         val masteryOrchestratorJar = resolveServiceJar(bossDataDir, "boss-mastery-orchestrator-all.jar")
-        spawnIfJarExists(
-            spawner,
+        trySpawn(
             ProcessConfig(
                 processId = "boss-mastery-orchestrator",
                 processType = ProcessType.SERVICE,
@@ -737,8 +806,7 @@ class KernelBootstrap(
         )
 
         val workspaceJar = resolveServiceJar(bossDataDir, "boss-service-workspace-all.jar")
-        spawnIfJarExists(
-            spawner,
+        trySpawn(
             ProcessConfig(
                 processId = "boss-service-workspace",
                 processType = ProcessType.SERVICE,
@@ -753,8 +821,7 @@ class KernelBootstrap(
         )
 
         val settingsJar = resolveServiceJar(bossDataDir, "boss-service-settings-all.jar")
-        spawnIfJarExists(
-            spawner,
+        trySpawn(
             ProcessConfig(
                 processId = "boss-service-settings",
                 processType = ProcessType.SERVICE,
@@ -769,8 +836,7 @@ class KernelBootstrap(
         )
 
         val filesystemJar = resolveServiceJar(bossDataDir, "boss-service-filesystem-all.jar")
-        spawnIfJarExists(
-            spawner,
+        trySpawn(
             ProcessConfig(
                 processId = "boss-service-filesystem",
                 processType = ProcessType.SERVICE,
@@ -785,8 +851,7 @@ class KernelBootstrap(
         )
 
         val terminalJar = resolveServiceJar(bossDataDir, "boss-app-terminal-all.jar")
-        spawnIfJarExists(
-            spawner,
+        trySpawn(
             ProcessConfig(
                 processId = "boss-app-terminal",
                 processType = ProcessType.APP,
@@ -801,8 +866,7 @@ class KernelBootstrap(
         )
 
         val editorJar = resolveServiceJar(bossDataDir, "boss-app-editor-all.jar")
-        spawnIfJarExists(
-            spawner,
+        trySpawn(
             ProcessConfig(
                 processId = "boss-app-editor",
                 processType = ProcessType.APP,
@@ -817,8 +881,7 @@ class KernelBootstrap(
         )
 
         val browserJar = resolveServiceJar(bossDataDir, "boss-app-browser-all.jar")
-        spawnIfJarExists(
-            spawner,
+        trySpawn(
             ProcessConfig(
                 processId = "boss-app-browser",
                 processType = ProcessType.APP,
@@ -831,32 +894,19 @@ class KernelBootstrap(
             ),
             browserJar,
         )
-    }
 
-    private fun spawnIfJarExists(
-        spawner: ProcessSpawner,
-        config: ProcessConfig,
-        jarPath: String,
-    ) {
-        if (java.io.File(jarPath).exists()) {
-            try {
-                spawner.spawn(config)
-                processMonitor?.startMonitoring(config.processId)
-                logger.info("Spawned service: {} at {}", config.processId, jarPath)
-            } catch (e: Exception) {
-                logger.warn("Failed to spawn {}: {}", config.processId, e.message)
-            }
-        } else {
-            logger.info(
-                "Service JAR not found for {} at {} - skipping spawn (build fat JARs first)",
-                config.processId,
-                jarPath,
-            )
+        val summary = serviceStartupSummary(spawnedCount, missingJars, failedSpawns)
+        logger.info(summary)
+        // A healthy spawn is logged, not toasted: only missing JARs or failed spawns are
+        // startup news for the user (BossConsole#450's review).
+        if (serviceStartupSummaryNeedsNotice(missingJars, failedSpawns)) {
+            ai.rever.boss.startup.kernelStartupNotices
+                .report(summary, source = ai.rever.boss.startup.STARTUP_NOTICE_SOURCE)
         }
     }
 
     /**
-     * Wire the IPC event bridge to all 12 event buses so events are forwarded
+     * Wire the IPC event bridge to all 13 event buses so events are forwarded
      * cross-process in KERNEL mode (M8 fix).
      */
     private fun wireEventBridges(bridge: IpcEventBridgeImpl) {
@@ -867,12 +917,13 @@ class KernelBootstrap(
         ai.rever.boss.components.events.URLEventBus.ipcBridge = bridge
         ai.rever.boss.components.events.GitTerminalEventBus.ipcBridge = bridge
         ai.rever.boss.components.events.PanelEventBus.ipcBridge = bridge
+        ai.rever.boss.components.events.TabEventBus.ipcBridge = bridge
         ai.rever.boss.components.events.RunEventBus.ipcBridge = bridge
         ai.rever.boss.components.events.RunnerTerminalEventBus.ipcBridge = bridge
         ai.rever.boss.components.events.FileEventBus.ipcBridge = bridge
         ai.rever.boss.components.events.TerminalEventBus.ipcBridge = bridge
         ai.rever.boss.components.events.TerminalLinkEventBus.ipcBridge = bridge
-        logger.info("IPC event bridges wired to all 12 event buses")
+        logger.info("IPC event bridges wired to all 13 event buses")
     }
 
     /**
@@ -904,10 +955,7 @@ class KernelBootstrap(
         // restart would otherwise come up still holding claims from processes that are now dead.
         RemoteUiSurfaceRegistry.shared.clear()
 
-        // 5. Close the orchestrator channel. Nothing else owns it, so a mode switch or in-process
-        // restart would otherwise leak the channel and its threads.
-        orchestratorClient?.second?.shutdown()
-        orchestratorClient = null
+        // 5. Channels were closed with their owning managed processes above.
         serviceAddresses.clear()
 
         // 6. Cancel scope

@@ -3,6 +3,7 @@ package ai.rever.boss.config
 import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
+import ai.rever.boss.utils.logging.decodeFailure
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -11,6 +12,7 @@ import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 /**
@@ -163,6 +165,17 @@ object ChromiumFlagsSettingsManager {
             field = value
             lastPersisted = null
         }
+
+    // `internal var` purely so tests can stub the environment - a JVM cannot set its own
+    // environment variables, and one exported BOSS_* variable would otherwise leak into every
+    // test that reads envOverride. Production never reassigns this; the default System::getenv
+    // is what runs in the field.
+    //
+    // Declared before `bootSettings = loadSync()` on purpose: object initialisers run in
+    // declaration order, so an initialiser above this line that reached envOverride would
+    // read a not-yet-assigned envReader and die at object init before a logger could say why.
+    // In the old layout this var sat below bootSettings, so the very first load ran first.
+    internal var envReader: (String) -> String? = System::getenv
     private val json =
         Json {
             prettyPrint = true
@@ -184,6 +197,10 @@ object ChromiumFlagsSettingsManager {
     private val _currentSettings = MutableStateFlow(bootSettings)
     val currentSettings: StateFlow<ChromiumFlagsSettings> = _currentSettings.asStateFlow()
 
+    internal fun reloadForTest() {
+        _currentSettings.value = loadSync()
+    }
+
     private fun loadSync(): ChromiumFlagsSettings =
         try {
             if (settingsFile.exists()) {
@@ -191,6 +208,15 @@ object ChromiumFlagsSettingsManager {
             } else {
                 ChromiumFlagsSettings()
             }
+        } catch (e: SerializationException) {
+            // Defaults, not a crash: this file decides how the browser composites, and a
+            // hand-edited or truncated one must not be able to stop the app booting.
+            logger.warn(
+                LogCategory.BROWSER,
+                "Error loading Chromium flag settings, using defaults",
+                decodeFailure(e),
+            )
+            ChromiumFlagsSettings()
         } catch (e: Exception) {
             // Defaults, not a crash: this file decides how the browser composites, and a
             // hand-edited or truncated one must not be able to stop the app booting.
@@ -252,11 +278,12 @@ object ChromiumFlagsSettingsManager {
      * The environment's value for [key], or null. Used by the Settings UI to say a row
      * is overridden instead of letting it look broken. Reads the environment ONLY: a
      * system property here would report this object's own publication back to it.
+     *
+     * Blank reads as UNSET. `FOO= boss` exports an empty string, which is non-null, so a bare
+     * getenv let an empty variable claim ownership of a key and silently suppress the user's
+     * setting - reported in the UI as an override with no value to show.
      */
-    // Blank reads as UNSET. `FOO= boss` exports an empty string, which is non-null, so a bare
-    // getenv let an empty variable claim ownership of a key and silently suppress the user's
-    // setting - reported in the UI as an override with no value to show.
-    fun envOverride(key: String): String? = System.getenv(key)?.takeIf { it.isNotBlank() }
+    fun envOverride(key: String): String? = envReader(key)?.takeIf { it.isNotBlank() }
 
     /**
      * What [key] would resolve to on the next launch given [settings] — **env first,

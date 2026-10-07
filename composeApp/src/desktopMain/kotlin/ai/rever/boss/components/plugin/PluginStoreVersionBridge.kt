@@ -49,10 +49,14 @@ actual object PluginStoreVersionBridge {
                 )
         // Both failure shapes, flattened. This used to be `runCatching { … }` around the call with
         // `result.getOrNull()?.getOrNull()` inside, which looked like it distinguished a broken lookup
-        // from an unpublished plugin and did not: `RemotePluginRepository.getPlugin` RETURNS
-        // `Result.failure` instead of throwing, so the inner `getOrNull()` swallowed the error, the
-        // outer `isFailure` was always false, and every failure fell through to NotPublished. A single
-        // undecodable dependency entry in a store row was reported to the user as "not published".
+        // from an unpublished plugin and did not: `getPlugin` returns `Result.failure` instead of
+        // throwing, so the inner `getOrNull()` swallowed the error, the outer `isFailure` was always
+        // false, and every failure fell through to NotPublished. A single undecodable dependency
+        // entry in a store row was reported to the user as "not published". The flatten covers both
+        // arrival shapes because the `PluginRepository` interface permits either: the bundled
+        // `RemotePluginRepository` rethrows a caller's cancellation while returning
+        // `Result.failure` for a genuine store error, and a third-party implementation may fold
+        // the cancellation into the returned `Result.failure` too.
         val lookup = runCatching { store.getPlugin(pluginId) }.getOrElse { Result.failure(it) }
         // The repository logs the detail; this only needs a line short enough to render.
         lookup.exceptionOrNull()?.let { failure ->
@@ -78,6 +82,14 @@ actual object PluginStoreVersionBridge {
         version: String,
         sourceUrl: String?,
         manager: DynamicPluginManager,
+    ): Result<String> = installStoreVersion(pluginId, version, sourceUrl, manager, expectedSha256 = null)
+
+    actual suspend fun installStoreVersion(
+        pluginId: String,
+        version: String,
+        sourceUrl: String?,
+        manager: DynamicPluginManager,
+        expectedSha256: String?,
     ): Result<String> {
         // Outside the detached job on purpose: the question belongs to the window the user is
         // looking at, and detaching it would let the swap start before anyone had answered.
@@ -112,36 +124,58 @@ actual object PluginStoreVersionBridge {
             // offers cancels THAT job - the one actually downloading. Cancelling the
             // window's coroutine would only abandon the wait: the swap is detached
             // precisely so closing a window cannot stop it mid-flight.
-            val job = currentCoroutineContext()[Job]
-            val ownsTransfer =
-                DownloadCenter.begin(
-                    id = pluginId,
-                    title = displayName,
-                    kind = TransferKind.PLUGIN_INSTALL,
-                    detail = "Store version v$version",
-                    onCancel = { job?.cancel() },
+            val lease =
+                PluginUpdateLease
+                    .acquire(PluginStoreSetup.getPluginDir(), pluginId)
+                    .getOrElse { return@run Result.failure(it) }
+            lease.use {
+                installTracked(
+                    store,
+                    StoreVersionRequest(
+                        pluginId = pluginId,
+                        version = version,
+                        sourceUrl = sourceUrl,
+                        runningJarPath = manager.getPluginInfo(pluginId)?.jarPath,
+                        hasLiveInstance = manager.getPluginInfo(pluginId)?.state == PluginState.LOADED,
+                        expectedSha256 = expectedSha256,
+                    ),
+                    displayName,
+                    manager,
                 )
-            try {
-                installer.install(
-                    store = store,
-                    request =
-                        StoreVersionRequest(
-                            pluginId = pluginId,
-                            version = version,
-                            sourceUrl = sourceUrl,
-                            runningJarPath = manager.getPluginInfo(pluginId)?.jarPath,
-                            hasLiveInstance = manager.getPluginInfo(pluginId)?.state == PluginState.LOADED,
-                        ),
-                    unload = { id -> manager.uninstallPlugin(id, force = true).map { } },
-                    load = { path ->
-                        manager.installPlugin(path, enabled = true).map { it.state == PluginState.LOADED }
-                    },
-                    onProgress = { DownloadCenter.progress(pluginId, it) },
-                    onInstalling = { DownloadCenter.phase(pluginId, TransferPhase.INSTALLING) },
-                )
-            } finally {
-                if (ownsTransfer) DownloadCenter.end(pluginId)
             }
+        }
+    }
+
+    private suspend fun installTracked(
+        store: ai.rever.boss.plugin.repository.PluginRepository,
+        request: StoreVersionRequest,
+        displayName: String,
+        manager: DynamicPluginManager,
+    ): Result<String> {
+        val pluginId = request.pluginId
+        val version = request.version
+        val job = currentCoroutineContext()[Job]
+        val ownsTransfer =
+            DownloadCenter.begin(
+                id = pluginId,
+                title = displayName,
+                kind = TransferKind.PLUGIN_INSTALL,
+                detail = "Store version v$version",
+                onCancel = { job?.cancel() },
+            )
+        return try {
+            installer.install(
+                store = store,
+                request = request,
+                unload = { id -> manager.uninstallPlugin(id, force = true).map { } },
+                load = { path ->
+                    manager.installPlugin(path, enabled = true).map { it.state == PluginState.LOADED }
+                },
+                onProgress = { DownloadCenter.progress(pluginId, it) },
+                onInstalling = { DownloadCenter.phase(pluginId, TransferPhase.INSTALLING) },
+            )
+        } finally {
+            if (ownsTransfer) DownloadCenter.end(pluginId)
         }
     }
 }

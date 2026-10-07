@@ -573,6 +573,16 @@ object BrowserServiceImpl : BrowserService {
                 error("Engine was recycled during browser creation (generation $generation is stale)")
             }
 
+            // Chrome setup is not an engine creation failure and must not trigger wedge recovery.
+            installBrowserChromeOrClose(
+                browser,
+                releaseOwnership = {
+                    val failedProfile = managed
+                    managed = null // Do not release twice if the outer Exception handler runs.
+                    failedProfile?.let(::releaseManaged)
+                },
+            )
+
             // Enable swipe navigation for touchscreen devices.
             //
             // Touchscreens only, and the qualifier is load-bearing: this does NOT give macOS the
@@ -642,7 +652,9 @@ object BrowserServiceImpl : BrowserService {
                 "Browser created via BrowserService",
                 mapOf(
                     "handleId" to handle.id,
-                    "url" to config.url,
+                    // Scheme, host and path only: a tab's URL can carry an OAuth code, a sign-in token or a
+                    // presigned signature under names maskUriParams does not list, and this line is INFO.
+                    "url" to LogSanitizer.describeUri(config.url),
                     "profile" to (managed?.profileName ?: "default"),
                     "activeBrowsers" to activeBrowsers.size,
                 ),
@@ -656,7 +668,7 @@ object BrowserServiceImpl : BrowserService {
                 logger.warn(
                     LogCategory.BROWSER,
                     "Discarding browser from a recycled engine - retrying",
-                    mapOf("url" to config.url),
+                    mapOf("url" to LogSanitizer.describeUri(config.url)),
                 )
             } else {
                 logger.error(LogCategory.BROWSER, "Failed to create browser", error = e)
@@ -945,7 +957,7 @@ object BrowserServiceImpl : BrowserService {
         profile: Profile,
         auth: BrowserAuthSpec,
     ) {
-        val tmp = profile.newBrowser()
+        val tmp = profile.newBrowser().also { installBrowserChromeOrClose(it) }
         try {
             seedAndAwait(profile, auth)
         } finally {
@@ -1052,7 +1064,11 @@ object BrowserServiceImpl : BrowserService {
                 logger.warn(
                     LogCategory.BROWSER,
                     "Cookie rejected",
-                    mapOf("name" to c.name, "url" to LogSanitizer.maskUriParams(c.url), "error" to (e.message ?: "unknown")),
+                    mapOf(
+                        "name" to c.name,
+                        "url" to LogSanitizer.describeUri(c.url),
+                        "error" to (e.message ?: "unknown"),
+                    ),
                 )
             }
         }
