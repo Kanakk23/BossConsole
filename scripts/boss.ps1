@@ -303,10 +303,15 @@ function Forward-To-BossExe {
                 $global:LASTEXITCODE = $null
                 $errCount = $Error.Count
                 & $bossExe @forwardArgs | Out-Host
+                $callSuccess = $?
                 if ($null -ne $global:LASTEXITCODE) {
                     exit $global:LASTEXITCODE
                 }
-                if ($Error.Count -gt $errCount -or -not $?) {
+                # A delegate script that encounters non-terminating errors (e.g. via Write-Error)
+                # without an explicit exit code is treated as failed. Note that a delegate which
+                # internally tolerates non-terminating errors (-ErrorAction SilentlyContinue) and
+                # exits normally will also be reported as exit 1 unless it provides an explicit exit code.
+                if ($Error.Count -gt $errCount -or -not $callSuccess) {
                     exit 1
                 }
                 exit 0
